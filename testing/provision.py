@@ -309,6 +309,51 @@ def provision_viewer(directory, admin_file, username, author_username):
         admin.logout()
 
 
+def unpair_viewer(directory, admin_file, username, author_username):
+    """Revoke only the exact retained pairing, keeping dependency until verified."""
+    registry = registry_load(directory)
+    viewer = next((slot for slot in registry["slots"] if slot["username"] == username), None)
+    if not viewer or viewer["persona"] != "report_viewer" or not viewer.get("accountId"):
+        raise ValueError("Unpair requires a retained report viewer")
+    pairing = viewer.get("reportViewerFixture")
+    if not pairing:
+        return {"account": username, "unpaired": True, "changed": False}
+    if pairing["authorUsername"] != author_username:
+        raise ValueError("Unpair author does not match the exact retained pairing")
+    empty = {"capabilities": ["schemer:access"], "connections": [], "dashboards": []}
+    admin = Client()
+    try:
+        credentials = json.loads(private_read(admin_file))
+        if not admin.login(credentials.get("admin", credentials)).get("is_admin"):
+            raise ValueError("Viewer unpairing requires an application administrator")
+        account = next((item for item in admin.call("GET", "/api/v1/admin/accounts") if item["username"] == username), None)
+        if (not account or account["id"] != viewer["accountId"] or account["is_admin"] or account["disabled"]
+                or account["role_ids"] or account["direct_access"] not in (empty, viewer_access(pairing))):
+            raise ValueError("Viewer unpairing refuses changed identity or unrelated access")
+        viewer["provisioned"] = False
+        write_private(directory / "registry.json", registry)
+        if account["direct_access"] != empty:
+            admin.call("PATCH", f"/api/v1/admin/accounts/{viewer['accountId']}", {"direct_access": empty})
+        confirmed = next((item for item in admin.call("GET", "/api/v1/admin/accounts") if item["id"] == viewer["accountId"]), None)
+        if not confirmed or confirmed["direct_access"] != empty:
+            raise ValueError("Viewer grant revocation did not persist")
+        user = Client()
+        try:
+            identity = user.login(viewer)
+            if identity.get("user", {}).get("id") != viewer["accountId"] or identity.get("capabilities") != ["schemer:access"]:
+                raise ValueError("Viewer identity drift after grant revocation")
+            user.call("GET", f"/api/v1/schemer/dashboards/{pairing['dashboardId']}", expected=404)
+        finally:
+            user.logout()
+        viewer.pop("reportViewerFixture")
+        viewer["provisioned"] = True
+        write_private(directory / "registry.json", registry)
+        derived_files(directory, registry)
+        return {"account": username, "unpaired": True, "changed": True}
+    finally:
+        admin.logout()
+
+
 def _verify_report_author_model(model, slot):
     fixture = slot["reportAuthorFixture"]
     if (model.get("id") != fixture["modelId"] or model.get("ownerId") != slot.get("accountId")
@@ -957,13 +1002,17 @@ def main():
     viewer_parser.add_argument("--admin-credentials", type=Path, required=True)
     viewer_parser.add_argument("--account", required=True)
     viewer_parser.add_argument("--author", required=True)
+    unpair_parser = subparsers.add_parser("unpair-viewer", help="Revoke only one exact retained shared report pairing")
+    unpair_parser.add_argument("--admin-credentials", type=Path, required=True)
+    unpair_parser.add_argument("--account", required=True)
+    unpair_parser.add_argument("--author", required=True)
     author_cleanup_parser = subparsers.add_parser("cleanup-author", help="Delete only ledgered report-author starter dashboards and models")
     author_cleanup_parser.add_argument("--accounts", required=True, help="Comma-separated retained report-author QA usernames")
     export_parser = subparsers.add_parser("export", help="Export private credentials without deployment-specific IDs")
     export_parser.add_argument("--output", type=Path, required=True)
     import_parser = subparsers.add_parser("import", help="Import private credentials into an empty QA state directory")
     import_parser.add_argument("--input", type=Path, required=True)
-    for child in (initialize_parser, provision_parser, chat_parser, writer_parser, viewer_parser, author_cleanup_parser, export_parser, import_parser):
+    for child in (initialize_parser, provision_parser, chat_parser, writer_parser, viewer_parser, unpair_parser, author_cleanup_parser, export_parser, import_parser):
         child.add_argument("--state-dir", type=Path, default=Path(os.environ.get("SCHEMII_QA_STATE_DIRECTORY", ROOT / ".schemii/testing")))
     args = parser.parse_args()
     if args.command == "init" and not 1 <= args.copies <= 100:
@@ -986,6 +1035,8 @@ def main():
             result = provision_writer(directory, args.admin_credentials, args.account)
         elif args.command == "viewer":
             result = provision_viewer(directory, args.admin_credentials, args.account, args.author)
+        elif args.command == "unpair-viewer":
+            result = unpair_viewer(directory, args.admin_credentials, args.account, args.author)
         elif args.command == "cleanup-author":
             selected = args.accounts.split(",")
             if any(not re.fullmatch(r"qa_report_author_[0-9]{3}", name) for name in selected):

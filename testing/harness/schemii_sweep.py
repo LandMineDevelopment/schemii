@@ -81,8 +81,8 @@ def pilot_writer(fixture: dict, seeded: dict, username: str, prefix: str) -> tup
                  "copyTable": prefix + "copy_items", "copyRows": [[1, "Alpha", 2], [2, "Beta", 3], [3, "Gamma", 0]],
                  "copyCSV": "id,label,qty\n1,Alpha,2\n2,Beta,3\n3,Gamma,0\n",
                  "writerCleanup": {"status": "pending", "owner": "coordinator",
-                                   "scope": schema, "command": f"./test.sh reset-writer --account {username}",
-                                   "note": "After all lanes stop and ownership is reconciled, reset only this marked writer target; cleanup-sweep does not delete SQL objects. Verify with verify-writer. No cleanup pass is implied."}}
+                                   "scope": schema, "command": "./test.sh cleanup-sweep --run RUN --workspace-fixtures MAP --reset-writers",
+                                   "note": "After all lanes stop, use opt-in stopped-run cleanup with exact map/profile/schema checks and launcher reset/verify. Default cleanup-sweep leaves SQL objects. No cleanup pass is implied."}}
     checks = [
         {"path": f"/api/v1/connections/{connection}?product=schemii", "status": 200,
          "equals": {"id": connection, "host": "qa-postgres", "database": "schemii_qa", "username": schema}},

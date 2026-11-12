@@ -2,10 +2,12 @@ import { execFileSync } from 'node:child_process';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
+import { readFileSync, lstatSync } from 'node:fs';
 import { open, readFile, readdir, lstat, realpath, readlink, mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:path';
 import { readWorkspaceNavigation } from '../../src/schemii/schemii/web/assets/workspace-navigation.js';
 import { workerCleanupReasons } from './leases.mjs';
+import { sourceIdentity } from './deployment.mjs';
 
 export const nativeMode = run => run.browser === 'native';
 export function nativeBrowserRoots(root) {
@@ -330,10 +332,13 @@ export function recordReview(run, reviewer, target, scenarioId, input) {
   if (!['accepted', 'confirmed-defect', 'prerequisite-mistake', 'unsupported-action', 'not-reproduced'].includes(input.verdict)) throw new Error('Review needs an explicit adjudication verdict.');
   const captures = (target.captures || []).filter(capture => attempt.evidence.includes(capture.path) && capture.phase === 'scenario' && capture.scenario === scenarioId && capture.generation === attempt.generation && capture.scenarioAttempt === attempt.scenarioAttempt && capture.source === attempt.source && capture.agent === attempt.reviewer);
   if (input.verdict === 'accepted' && (attempt.functional !== 'passed' || attempt.visual !== 'passed')) throw new Error('A failed or blocked attempt cannot become accepted.');
+  const priorFailures = (scenario.attempts || []).slice(0, -1).filter(item => item.functional !== 'passed' || item.visual !== 'passed');
+  if (input.verdict === 'accepted' && priorFailures.length && input.historyAcknowledged !== true) throw new Error('Review must explicitly acknowledge the preserved failed/blocked attempt history.');
   if (!captures.some(capture => capture.kind === 'image' && (capture.inspections || []).some(item => item.agent === reviewer.agent && item.sha256 === capture.sha256))) throw new Error('Reviewer must inspect the target attempt image and record its hash-bound receipt first.');
   const receipt = { id: randomUUID(), reviewerLane: reviewer.id, agent: reviewer.agent, username: reviewer.username, nativeSession: reviewer.native?.sessionId,
     targetLane: target.id, scenario: scenarioId, attempt: attempt.id, source: run.deployment.identity.fingerprint,
-    verdict: input.verdict, note: requiredText(input.note, 'Review expected/actual reason'), evidence: input.evidence || [], provenance: input.provenance || 'assigned-reviewer-session', at: new Date().toISOString() };
+    verdict: input.verdict, note: requiredText(input.note, 'Review expected/actual reason'), evidence: input.evidence || [], provenance: input.provenance || 'assigned-reviewer-session',
+    priorAttempts: priorFailures.map(item => ({ id: item.id, digest: hash(Buffer.from(JSON.stringify(item))) })), at: new Date().toISOString() };
   if (input.finding) {
     if (input.verdict === 'accepted') throw new Error('Finding adjudication needs a defect/prerequisite/unsupported/not-reproduced verdict.');
     const finding = (run.findings || []).find(item => item.id === input.finding && item.lane === target.id && item.scenario === scenarioId);
@@ -344,11 +349,146 @@ export function recordReview(run, reviewer, target, scenarioId, input) {
   run.reviews ||= []; run.reviews.push(receipt);
   return receipt;
 }
+
+export function recordCheckpoint(run, lane, scenario, input, evidence, at = new Date().toISOString()) {
+  const attempt = { id: randomUUID(), generation: lane.generation, scenarioAttempt: lane.currentScenario?.id,
+    source: run.deployment.identity.fingerprint, functional: input.functional, visual: input.visual,
+    note: input.note, evidence, reviewer: lane.agent, at };
+  scenario.attempts ||= [];
+  scenario.attempts.push(attempt);
+  scenario.initialResult ||= { functional: scenario.attempts[0].functional, visual: scenario.attempts[0].visual };
+  Object.assign(scenario, { functional: attempt.functional, visual: attempt.visual, latestAttemptId: attempt.id,
+    note: scenario.attempts.map((item, index) => `Attempt ${index + 1}: ${item.note}`).join('\n'),
+    evidence: [...new Set([...(scenario.evidence || []), ...evidence])], reviewer: lane.agent, at });
+  return attempt;
+}
+
+function boundFile(path) {
+  for (let parent = resolve(path); parent !== dirname(parent); parent = dirname(parent)) {
+    if (lstatSync(parent).isSymbolicLink()) throw new Error('Imported evidence paths cannot contain symlinks.');
+  }
+  const info = lstatSync(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 64 * 1024 * 1024 || (info.mode & 0o077)) throw new Error('Imported evidence must be bounded private regular files.');
+  return { path, sha256: hash(readFileSync(path)) };
+}
+function ownedImportFile(directory, path) {
+  const target = resolve(directory, path), rel = relative(resolve(directory), target);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error('Imported evidence must stay inside its original run.');
+  return boundFile(target);
+}
+function filesUnchanged(files) {
+  try { return files.every(file => boundFile(file.path).sha256 === file.sha256); } catch { return false; }
+}
+
+// Validate original local-CI records through the existing planner and timing
+// validators. This executes no tests and is deliberately not another runner.
+const verificationImport = `
+import json,sys
+from pathlib import Path
+from scripts.ci.local_ci import selected_plan, source_identity, lane_for, evidence
+root,path,phase=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3]
+r=json.loads(path.read_text()); identity=source_identity(root)
+if r.get('schema')!=1 or r.get('source')!=identity: raise ValueError('wrong or stale source')
+if phase not in ('focused','final'): raise ValueError('invalid verification phase')
+plan=selected_plan(root,r['base_ref'],r.get('mode')=='full')
+if not plan['classification']['valid'] or r.get('profile')!=plan['classification']['profile']: raise ValueError('wrong plan/profile')
+required=plan['feedback']['commands'] if phase=='focused' else plan['commands']
+entries=r.get('commands',[])
+chosen=entries[:len(required)]
+if not required or [x['command'] for x in chosen]!=required: raise ValueError('wrong required command inventory')
+if phase=='final' and (len(entries)!=len(required) or r.get('status')!='passed' or r.get('acceptance') is not True or r.get('pending_layers') or r.get('pending_commands')): raise ValueError('failed pending cancelled or incomplete acceptance')
+if phase=='focused' and r.get('status') not in ('passed','feedback-passed'): raise ValueError('failed or incomplete focused checks')
+out=[]; files=[str(path.resolve())]
+for entry in chosen:
+ if entry.get('status')!='passed' or entry.get('exit_code')!=0: raise ValueError('required check did not pass')
+ item={'command':entry['command'],'status':entry['status'],'duration_ms':entry['duration_ms']}
+ key=lane_for(entry['command'])
+ if key:
+  relative=Path(entry.get('timing_evidence',''))
+  if relative.is_absolute() or '..' in relative.parts or not relative.parts: raise ValueError('missing or unsafe original timing records')
+  timing=path.parent/relative
+  summary=evidence(timing,key,r['profile'],identity,r['run_id'])
+  item['summary']=summary;files.append(str(timing.resolve()))
+ out.append(item)
+if source_identity(root)!=identity: raise ValueError('source changed during receipt import')
+print(json.dumps({'source':identity,'commands':out,'files':files,'profile':r['profile'],'mode':r['mode']}))
+`;
+export function importVerification(run, receiptPath, { root, phase = 'final', note, python = 'python3' }) {
+  const attempt = { id: randomUUID(), phase, at: new Date().toISOString(), status: 'rejected', note: requiredText(note, 'Verification provenance') };
+  run.verificationHistory ||= [];
+  run.verificationHistory.push(attempt);
+  try {
+    const before = sourceIdentity(root);
+    if (before.commit !== run.deployment?.identity?.commit || before.fingerprint !== run.deployment?.identity?.fingerprint) throw new Error('Changed source requires a new prepared run; old failures cannot be relabeled.');
+    const file = boundFile(resolve(receiptPath));
+    attempt.receipt = file;
+    let validated;
+    try { validated = JSON.parse(execFileSync(python, ['-c', verificationImport, root, file.path, phase], { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore','pipe','pipe'] })); }
+    catch { throw new Error('Original CI receipt rejected: source, inventory, outcome or timing evidence is stale, incomplete or invalid.'); }
+    const files = validated.files.map(boundFile);
+    if (files[0].sha256 !== file.sha256 || !isDeepStrictEqual(before, sourceIdentity(root))) throw new Error('Source or receipt changed during import.');
+    Object.assign(attempt, { status: 'passed', source: validated.source, profile: validated.profile,
+      commands: validated.commands, files, assurance: 'validated-original-local-ci-receipt' });
+    return attempt;
+  } catch (error) { attempt.reason = error.message; throw error; }
+}
+
+function reproductionProof(run, targetLane, scenarioId) {
+  const target = run.lanes.find(lane => lane.id === targetLane), scenario = target?.scenarios.find(item => item.id === scenarioId);
+  const attempt = scenario?.attempts?.at(-1);
+  const review = (run.reviews || []).filter(item => item.targetLane === targetLane && item.scenario === scenarioId && item.attempt === attempt?.id).at(-1);
+  const reviewer = run.lanes.find(lane => lane.id === review?.reviewerLane);
+  if (!attempt || attempt.source !== run.deployment?.identity?.fingerprint || attempt.functional !== 'passed' || attempt.visual !== 'passed'
+      || review?.verdict !== 'accepted' || review.source !== attempt.source || !reviewer || reviewer.role !== 'reviewer'
+      || review.agent !== reviewer.agent || review.agent === target.agent || review.username !== reviewer.username
+      || review.username.toLowerCase() === target.username.toLowerCase()
+      || (nativeMode(run) && (!review.nativeSession || review.nativeSession === target.native?.sessionId))) throw new Error('Remediation requires a current-source passing reproduction and exact independent accepted review.');
+  const captures = (target.captures || []).filter(capture => attempt.evidence.includes(capture.path));
+  if (!captures.some(capture => capture.kind === 'image' && capture.sha256 && capture.source === attempt.source
+      && capture.scenarioAttempt === attempt.scenarioAttempt && capture.inspections?.some(item => item.agent === review.agent && item.sha256 === capture.sha256))) throw new Error('Remediation review lacks hash-bound original image inspection.');
+  return { targetLane, scenarioId, attempt, review, captures: captures.map(capture => ({ path: capture.path, sha256: capture.sha256 })) };
+}
+export function importRemediation(original, current, findingId, input, { originalPath, currentPath }) {
+  const finding = (original.findings || []).find(item => item.id === findingId);
+  if (!finding || !Array.isArray(finding.evidence) || !finding.evidence.length || original.id === current.id) throw new Error('Import requires an original finding with retained evidence and a separately prepared reproduction run.');
+  if (!['resolved-defect','not-reproduced','prerequisite-mistake','unsupported-action'].includes(input.disposition)) throw new Error('Import requires an explicit remediation/adjudication disposition.');
+  if ((finding.verificationStatus === 'confirmed-defect' || finding.reviews?.some(review => review.verdict === 'confirmed-defect')) && input.disposition !== 'resolved-defect') throw new Error('A confirmed defect requires independently verified remediation, not reclassification.');
+  if (!original.deployment?.identity?.fingerprint || original.deployment.identity.fingerprint === current.deployment?.identity?.fingerprint && input.disposition === 'resolved-defect') throw new Error('Confirmed defect remediation requires a later changed source in a new prepared run.');
+  const proof = reproductionProof(current, input.targetLane, input.scenario);
+  if (proof.review.agent === finding.agent || proof.review.username?.toLowerCase() === finding.username?.toLowerCase()) throw new Error('The original reporter cannot independently resolve their own finding.');
+  const files = [
+    ...finding.evidence.map(path => ownedImportFile(dirname(originalPath), path)),
+    ...proof.captures.map(capture => { const file = ownedImportFile(dirname(currentPath), capture.path); if (file.sha256 !== capture.sha256) throw new Error('Reproduction image changed after review.'); return file; }),
+  ];
+  const receipt = { id: randomUUID(), at: new Date().toISOString(), originalRun: original.id, findingId,
+    originalPath, currentPath, source: current.deployment.identity.fingerprint, disposition: input.disposition,
+    provenance: requiredText(input.provenance, 'External review provenance'), note: requiredText(input.note, 'Resolution expected/actual reason'),
+    originalDigest: hash(Buffer.from(JSON.stringify(finding))), proofDigest: hash(Buffer.from(JSON.stringify(proof))),
+    reproduction: { targetLane: input.targetLane, scenario: input.scenario, attempt: proof.attempt.id, review: proof.review.id, reviewer: proof.review.agent }, files };
+  original.remediations ||= []; original.remediations.push(receipt);
+  current.importedFindings ||= []; current.importedFindings.push(receipt);
+  return receipt;
+}
+function remediationCurrent(receipt, run) {
+  try {
+    if (receipt.source !== run.deployment?.identity?.fingerprint || !filesUnchanged(receipt.files)) return false;
+    const original = JSON.parse(readFileSync(receipt.originalPath, 'utf8'));
+    const current = JSON.parse(readFileSync(receipt.currentPath, 'utf8'));
+    const finding = original.findings.find(item => item.id === receipt.findingId);
+    return receipt.originalDigest === hash(Buffer.from(JSON.stringify(finding)))
+      && receipt.proofDigest === hash(Buffer.from(JSON.stringify(reproductionProof(current, receipt.reproduction.targetLane, receipt.reproduction.scenario))));
+  } catch { return false; }
+}
 export function acceptance(run) {
   const testers = run.lanes.filter(lane => lane.role !== 'reviewer');
   const reasons = [];
   let reviewed = 0;
   if(run.recordingStatus === 'unavailable')reasons.push('evidence recording unavailable');
+  if (run.acceptanceContract >= 2) {
+    const final = run.verificationHistory?.filter(item => item.phase === 'final').at(-1);
+    if (!final || final.status !== 'passed' || final.source?.fingerprint !== run.deployment?.identity?.fingerprint || !filesUnchanged(final.files)) reasons.push('current-source final application verification pending or changed');
+  }
+  for (const receipt of run.importedFindings || []) if (!remediationCurrent(receipt, run)) reasons.push(`${receipt.findingId}: imported remediation evidence changed or no longer matches current source/review`);
   for (const lane of run.lanes) for (const reason of workerCleanupReasons(lane)) reasons.push(`${lane.id}: ${reason}`);
   for (const lane of testers) for (const scenario of lane.scenarios) {
     const attempt = scenario.attempts?.at(-1);
@@ -363,7 +503,11 @@ export function acceptance(run) {
   }
   if (nativeMode(run)) for (const lane of testers) if(!lane.native?.authentication || lane.native.authentication.source !== run.deployment?.identity?.fingerprint)reasons.push(`${lane.id}: native authenticated UI observation pending`);
   if (nativeMode(run)) for (const lane of run.lanes) if (lane.native && (lane.native.cleanup?.transport !== 'stopped' || lane.native.cleanup?.guardian !== 'stopped' || lane.native.cleanup?.temporaryOutput !== 'removed-observed' || lane.native.releaseAttempts?.at(-1)?.status === 'pending')) reasons.push(`${lane.id}: native transport cleanup pending`);
-  return { status: reasons.length ? 'review-pending' : 'reviewed-acceptance', reasons, intended: testers.reduce((sum, lane) => sum + lane.scenarios.length, 0), completed: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.functional !== 'not-run' && s.visual !== 'not-run').length, 0), reviewed };
+  return { status: reasons.length ? 'review-pending' : 'reviewed-acceptance', reasons, intended: testers.reduce((sum, lane) => sum + lane.scenarios.length, 0),
+    dispatched: testers.reduce((sum, lane) => sum + (lane.dispatchedAt ? lane.scenarios.length : 0), 0),
+    started: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.attempts?.length || lane.currentScenario?.scenario === s.id).length, 0),
+    completed: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.functional !== 'not-run' && s.visual !== 'not-run').length, 0),
+    firstAttemptFailures: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.attempts?.[0] && (s.attempts[0].functional !== 'passed' || s.attempts[0].visual !== 'passed')).length, 0), reviewed };
 }
 
 /** Fence before any closure prerequisite, so interrupted owners can be released. */

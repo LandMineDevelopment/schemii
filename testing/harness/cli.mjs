@@ -5,7 +5,8 @@ import { readFile, writeFile, open, rm, access } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { root, runPath, readJSON, privateJSON, writeJSON, privateDir, credentials, reportHTML, stamp } from './store.mjs';
-import { deploymentLockPath } from './deployment.mjs';
+import { deploymentLockPath, sourceIdentity } from './deployment.mjs';
+import { importVerification, importRemediation, acceptance } from './native.mjs';
 import { reserveAccounts, reserveAvailable, releaseAccounts, availableAccounts, withFileLock, withAvailableAccounts } from './leases.mjs';
 import { expandFixtureScenario } from './prerequisites.mjs';
 const stateDir=resolve(process.env.SCHEMII_QA_STATE_DIRECTORY || join(root,'.schemii/testing'));
@@ -18,6 +19,7 @@ const help = `Usage: ./test.sh COMMAND [options]
   cleanup-sweep Delete only exact-prefix objects from a stopped owned sweep
   cleanup-author-fixture Delete selected report-author starter dashboards and models
   provision-chat Grant one retained designer access to the tested shared AI model
+  unpair-viewer Revoke only one exact retained viewer/author pairing
   provision-viewer Pair one retained viewer with an explicit retained author report
   provision-writer Prepare and attach one isolated writable Schemii QA target
   reset-writer Reset one marked writable QA target after a run
@@ -49,6 +51,8 @@ const help = `Usage: ./test.sh COMMAND [options]
   heartbeat  Renew an agent’s ownership lease using its session file
   finish     Release a completed lane after all scenarios have results
   status     Read durable progress
+  verify-receipt Import an original focused/final local CI receipt; never executes suites
+  resolve-finding Link retained finding to independently reviewed new-run reproduction
   report     Generate an HTML report
   advance    Prepare the next wave after all active lanes finish
   recover    Close/reopen one lane, invalidate old handles, repeat preflight
@@ -96,7 +100,7 @@ const commandOptions = {
   setup: ['copies-per-persona','admin-credentials'], 'provision-chat': ['account','admin-credentials','model','reasoning'],
   'cleanup-author-fixture': ['accounts'],
   'cleanup-sweep': ['run','workspace-fixtures','reset-writers'],
-  'provision-writer': ['account','admin-credentials'], 'provision-viewer': ['account','author','admin-credentials'], 'reset-writer': ['account'], 'verify-writer': ['account'],
+  'provision-writer': ['account','admin-credentials'], 'provision-viewer': ['account','author','admin-credentials'], 'unpair-viewer': ['account','author','admin-credentials'], 'reset-writer': ['account'], 'verify-writer': ['account'],
   reset: ['space'], 'verify-data': ['space'], 'check-reset': ['space'],
   'export-credentials': ['output'], 'import-credentials': ['input'],
   plan: [...selectionOptions,'headless'],
@@ -115,7 +119,7 @@ const commandOptions = {
   checkpoint: ['session-file','scenario','functional','visual','note','evidence'],
   finding: ['session-file','scenario','title','severity','steps','expected','actual','evidence'],
   finish: ['session-file'], heartbeat: ['session-file'],
-  status: ['run'], report: ['run'], advance: ['run'], recover: ['run','lane'],
+  status: ['run'], report: ['run'], 'verify-receipt':['run','receipt','phase','note'], 'resolve-finding':['run','from-run','finding','target-lane','scenario','disposition','provenance','note'], advance: ['run'], recover: ['run','lane'],
   resume: ['run'], stop: ['run'], cleanup: ['run'],
 };
 function parse(argv) {
@@ -344,11 +348,11 @@ async function execute(command,o) {
       '--account',o.account,'--model',o.model||'gpt-6-luna','--reasoning',o.reasoning||'default','--state-dir',stateDir]);
     return;
   }
-  if(command==='provision-viewer') {
+  if(['provision-viewer','unpair-viewer'].includes(command)) {
     if(!/^qa_report_viewer_[0-9]{3}$/.test(o.account||'')||!/^qa_report_author_[0-9]{3}$/.test(o.author||'')||!o['admin-credentials'])throw invalid('provision-viewer needs --account VIEWER --author AUTHOR --admin-credentials FILE.');
     await privateJSON(resolve(o['admin-credentials']));
     return withFileLock(deploymentLockPath(root),()=>withAvailableAccounts([o.account,o.author],()=>
-      runCommand('python',['testing/provision.py','viewer','--account',o.account,'--author',o.author,'--admin-credentials',resolve(o['admin-credentials']),'--state-dir',stateDir]),{root}));
+      runCommand('python',['testing/provision.py',command==='unpair-viewer'?'unpair-viewer':'viewer','--account',o.account,'--author',o.author,'--admin-credentials',resolve(o['admin-credentials']),'--state-dir',stateDir]),{root}));
   }
   if(command==='provision-writer') {
     if(!o['admin-credentials']||!o.account)throw invalid('--admin-credentials and --account are required.');
@@ -400,7 +404,7 @@ async function execute(command,o) {
     const control={socket:join(runtime,'controller.sock'),token:randomBytes(32).toString('hex')};
     await writeJSON(join(dir,'control.json'),control);
     await writeJSON(join(dir,'private.json'),{credentialPath});
-    let run={id,...config,status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
+    let run={id,...config,acceptanceContract:2,status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
     await writeJSON(join(dir,'manifest.json'),run);
     await writeJSON(join(dir,'controller-owner.json'),{pid:process.pid,birthTick:await birthTick(process.pid)});
     const result=await withFileLock(join(dir,'lifecycle.lock'),async()=>{
@@ -445,6 +449,43 @@ async function execute(command,o) {
   const dir=runPath(o.run),run=await readJSON(join(dir,'manifest.json'));
   if(command==='status'){console.log(JSON.stringify(run,null,2));return;}
   if(command==='report') {const path=join(dir,'report.html');await writeFile(path,reportHTML(run),{mode:0o600});console.log(JSON.stringify({report:path,status:run.status}));return;}
+  if(['verify-receipt','resolve-finding'].includes(command)) {
+    // Offline imports never weaken the live source fence or edit a leased run.
+    let originalDir=null;
+    if(command==='resolve-finding') {
+      if(!/^qa-[a-z0-9-]{6,80}$/.test(o['from-run']||'')||o['from-run']===o.run)throw invalid('resolve-finding needs a distinct original --from-run.');
+      originalDir=runPath(o['from-run']);
+    }
+    const locked=[...new Set([dir,originalDir].filter(Boolean))].sort();
+    const withImports=(index,task)=>index===locked.length?task():withFileLock(join(locked[index],'lifecycle.lock'),()=>withImports(index+1,task));
+    return withImports(0,async()=>{
+      await requireStoppedOwner(dir);
+      const latest=await readJSON(join(dir,'manifest.json'));
+      const now=sourceIdentity(root);
+      if(now.commit!==latest.deployment?.identity?.commit||now.fingerprint!==latest.deployment?.identity?.fingerprint)throw new Error('Changed source requires a new prepared run.');
+      try {
+        if(command==='verify-receipt') {
+          if(!o.receipt||!['focused','final'].includes(o.phase)||!o.note)throw invalid('verify-receipt needs --receipt FILE --phase focused|final --note PROVENANCE.');
+          const receipt=importVerification(latest,resolve(o.receipt),{root,phase:o.phase,note:o.note});
+          console.log(JSON.stringify(receipt,null,2));
+        } else {
+          {
+            await requireStoppedOwner(originalDir);
+            const originalPath=join(originalDir,'manifest.json'),currentPath=join(dir,'manifest.json');
+            const original=await readJSON(originalPath);
+            const receipt=importRemediation(original,latest,o.finding,{targetLane:o['target-lane'],scenario:o.scenario,disposition:o.disposition,provenance:o.provenance,note:o.note},{originalPath,currentPath});
+            // Append to the original first; a partial write preserves its failure
+            // and cannot grant acceptance to the new run. Reconcile before retry.
+            await writeJSON(originalPath,original);await writeFile(join(originalDir,'report.html'),reportHTML(original),{mode:0o600});
+            console.log(JSON.stringify(receipt,null,2));
+          }
+        }
+      } finally {
+        latest.acceptance=acceptance(latest);await writeJSON(join(dir,'manifest.json'),latest);
+        await writeFile(join(dir,'report.html'),reportHTML(latest),{mode:0o600});
+      }
+    });
+  }
   if(command==='resume') {
     if(['complete','passed','execution-complete','finished-with-gaps'].includes(run.status)) {
       const report=join(dir,'report.html');

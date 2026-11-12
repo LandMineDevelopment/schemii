@@ -349,4 +349,6 @@ Pairing is idempotent, preserves credentials, refuses unrelated access/collision
 and persists its dependency before an uncertain grant update. A registered pairing
 protects its author fixtures from `cleanup-author-fixture`, even after interrupted
 provisioning. Do not remove registry flags to bypass this protection. Explicit
-unsharing/reconciliation and actual live integration remain coordinator-owned.
+unsharing uses `./test.sh unpair-viewer --account VIEWER --author AUTHOR
+--admin-credentials FILE`; exact grant revocation is verified before removing the
+dependency. Actual live integration remains coordinator-owned.

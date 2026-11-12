@@ -417,3 +417,20 @@ runs the declared `reset-writer --account ACCOUNT`, then `verify-writer --accoun
 These existing launcher operations validate the exact private QA marker/credentials;
 never issue generic SQL drops or reset another account. A generated mission is
 not cleanup evidence. Retain the actual reset/verification outcomes with the run.
+
+### Owned SQL cleanup and final receipts
+
+Use `cleanup-sweep --run RUN --workspace-fixtures MAP --reset-writers` for opt-in
+SQL cleanup after the run is stopped. It verifies exact map/profile/schema ownership,
+refuses active or unresolved account reservations, holds lifecycle/startup/deployment/
+reservation guards, and calls only launcher `--reset-testing-writable` followed by
+`--verify-testing-writable` for each owned marked writer. Failed attempts remain in
+`writer-cleanup.json`; unledgered app objects block reset. No generic SQL cleanup,
+reader reset or peer target is authorized. Explicit pilot writer selection uses
+`python -m testing.harness.schemii_workspaces --accounts ... --writer-accounts ...`.
+
+See [native QA acceptance](../../docs/native-qa-acceptance.md#later-attempts-external-review-and-final-verification)
+for append-only latest/initial execution, `resolve-finding` and `verify-receipt`.
+These import actual independent reproduction and original local-CI evidence; they
+never turn stopped processes, a closed issue, missing checks or old-source failure
+into a pass. Run source changes require a newly prepared run.

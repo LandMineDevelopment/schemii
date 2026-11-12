@@ -95,12 +95,18 @@ class SchemiiSweepTest(unittest.TestCase):
             source, workspaces = self.fixture(), self.workspaces()
             resources = source["lanes"]["qa_designer_005"]["resources"]
             mapped = workspaces["lanes"]["qa_designer_005"]
-            if mutation == "missing-profile": resources.pop("writableConnectionId")
-            if mutation == "wrong-schema": resources["writableSchema"] = "qa_write_designer_006"
-            if mutation == "reader-profile": resources["writableConnectionId"] = resources["connectionId"]
-            if mutation == "missing-workspace": mapped.pop("writerWorkspaceId")
-            if mutation == "unowned": mapped["writerCreated"] = False
-            if mutation == "reader-workspace": mapped["writerWorkspaceId"] = mapped["readerWorkspaceId"]
+            if mutation == "missing-profile":
+                resources.pop("writableConnectionId")
+            if mutation == "wrong-schema":
+                resources["writableSchema"] = "qa_write_designer_006"
+            if mutation == "reader-profile":
+                resources["writableConnectionId"] = resources["connectionId"]
+            if mutation == "missing-workspace":
+                mapped.pop("writerWorkspaceId")
+            if mutation == "unowned":
+                mapped["writerCreated"] = False
+            if mutation == "reader-workspace":
+                mapped["writerWorkspaceId"] = mapped["readerWorkspaceId"]
             with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, "marked writer"):
                 build_pilot(source, "sweep1", workspaces)
 
