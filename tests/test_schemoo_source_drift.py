@@ -82,6 +82,24 @@ def test_new_parameter_on_existing_scoped_model_adds_its_actual_lookup_dependenc
     assert {item["name"] for item in contract["tables"]} == {"child", "parent"}
 
 
+def test_saved_no_fk_lookup_stays_local_when_the_first_foreign_key_appears():
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemoo.routes import _scoped_definition
+    from schemii.schemoo.service import domain_query
+    source, rules = inferred_lookup_fixture()
+    source["relationships"] = []
+    saved = _scoped_definition(source, ModelDefinition.model_validate(rules), creating=True)
+    model = SimpleNamespace(definition=saved)
+    body = SimpleNamespace(scope_id="parent", alternative_id="pick", parameter_id="value", search="")
+    before = domain_query(source, model, body)["sql"]
+    current = deepcopy(source)
+    current["relationships"] = catalog()["relationships"]
+    assert domain_query(current, model, body)["sql"] == before
+    resaved = _scoped_definition(current, saved, saved)
+    assert resaved.sourceContract == saved.sourceContract
+    assert saved.sourceContract.relationships == []
+
+
 def catalog():
     return {"tables": [
         {"name": "parent", "primaryKey": ["id"], "columns": [{"name": "id", "dataType": "uuid", "nullable": False}]},

@@ -26,14 +26,14 @@ function stableHash(value) {
   return (hash >>> 0).toString(36);
 }
 
-export function ensureAliasConnections(draft, catalog) {
+export function ensureAliasConnections(draft, catalog, aliasIds = null) {
   const nodes = draft.nodes || [];
   const canonical = new Map(nodes.filter(node => !node.derivation && !isAlias(node)).map(node => [sourceIdentity(node,catalog), node.id]));
   const edges = draft.edges ||= [];
   const tuples = new Set(edges.map(edge => edgeKey(edgeRelationship(edge,catalog,draft.nodes)?.id || edge.relationshipId, edge.source, edge.target)));
   const ids = new Set(edges.map(edge => edge.id));
   let added = 0;
-  for (const alias of nodes.filter(isAlias)) {
+  for (const alias of nodes.filter(node => isAlias(node) && (!aliasIds || aliasIds.has(node.id)))) {
     for (const relationship of catalog.relationships || []) {
       const outgoing = sourceIdentity(relationship,catalog,"source") === sourceIdentity(alias,catalog);
       const incoming = sourceIdentity(relationship,catalog,"target") === sourceIdentity(alias,catalog);

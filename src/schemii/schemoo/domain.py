@@ -108,7 +108,8 @@ def parameter_domain(catalog, definition, alternative, parameter):
             return [item for item in values if source_identity(catalog, item, "source") == source_identity(catalog, source)
                     and any(pair["source"] == column for pair in relationship_columns(item))]
         saved = candidates(contract.get("relationships", [])) if contract.get("scope") == "model" else []
-        matches = [resolve_relationship(catalog, item["id"]) for item in saved] if saved else candidates(catalog.get("relationships", []))
+        matches = ([resolve_relationship(catalog, item["id"]) for item in saved] if saved else
+                   candidates(catalog.get("relationships", [])) if contract.get("scope") != "model" else [])
         if saved and any(item is None for item in matches):
             raise ValueError("The parameter lookup foreign key was removed. Choose an explicit domain before saving.")
         if matches:
@@ -119,6 +120,7 @@ def parameter_domain(catalog, definition, alternative, parameter):
             column = relationship_columns(relationship)[0]["target"]
     columns = (physical_table(catalog, source) or {}).get("columns", [])
     saved_table = next((item for item in contract.get("tables", []) if source_identity(catalog, item) == source_identity(catalog, source)), None)
+
     label_columns = saved_table["columns"] if saved_table and contract.get("scope") == "model" else columns
     label = "name" if parameter.get("type") != "source" and any(item["name"] == "name" for item in label_columns) else column
     return {**source, "column": column, "labelColumn": label,

@@ -292,7 +292,8 @@ function renderSelection() {
     if (!Boolean(catalogTable(node,catalog))) {
       host.append(element("p", { className:"warning", text:"This source table is unavailable. Choose its intended replacement; columns and relationships will be validated, not guessed." }),
         modelSelect("Replacement source table", [["", "Choose replacement source"], ...catalog.tables.map(t => [sourceIdentity(t,catalog),sourceLabel(t,catalog)])], "", value => {
-          if (!value) return; const [namespace,table]=JSON.parse(value);node.table=table;node.namespace=namespace;ensureAliasConnections(draft,catalog); refreshForms(); changed();
+          if (!value) return; const [namespace,table]=JSON.parse(value);node.table=table;node.namespace=namespace;ensureAliasConnections(draft,catalog,new Set([node.id])); refreshForms(); changed();
+
         }));
     }
     const label = element("input", { attrs: { "aria-label": "Object label", maxlength: 100 } }); label.value = node.label;
@@ -428,7 +429,7 @@ function renderTableColumns() {
 function addAlias(table, label, source = draft.nodes.find(n => n.table === table)) {
   const copy = { id: `alias_${crypto.randomUUID().replaceAll("-","").slice(0,12)}`, table, label, ...(source?.namespace?{namespace:source.namespace}:{}) };
   canvas?.placeNode(copy, source);
-  draft.nodes.push(copy); inheritAliasExposure(draft, source?.id, copy.id); ensureAliasConnections(draft,catalog); selected={node:copy.id}; refreshForms(); changed();
+  draft.nodes.push(copy); inheritAliasExposure(draft, source?.id, copy.id); ensureAliasConnections(draft,catalog,new Set([copy.id])); selected={node:copy.id}; refreshForms(); changed();
   inspectSelection();
   $("table-pane").scrollTop=0;
 }
