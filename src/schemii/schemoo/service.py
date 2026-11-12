@@ -7,7 +7,7 @@ from .catalog import source_issues, model_source_contract
 from .models import ModelDefinition, ModelUpdate, ExploreState
 from .store import ModelConflictError
 from .prototype import analyze_model, compile_preview, validate_definition
-from .domain import domain_source, source_identity, physical_table, relationship_columns, definition_namespaces
+from .domain import source_identity, definition_namespaces, parameter_domain
 
 
 def document(value):
@@ -158,33 +158,16 @@ def domain_query(catalog, model, body):
     parameter = next((p for p in (alternative or {}).get("inputs", []) if p["id"] == body.parameter_id), None)
     if parameter is None:
         raise ApiProblem(422, "unknown_model_parameter", "This parameter is not part of the saved model. Save your model changes first.")
-    domain = parameter.get("domain")
-    if domain:
-        try:
-            source = domain_source(domain, definition["nodes"])
-        except ValueError as error:
-            raise ApiProblem(422, "parameter_unbound", str(error)) from error
-        column = domain["column"]
-        label = domain.get("labelColumn") or column
-    else:
-        condition = next((c for c in alternative["conditions"] if c.get("parameterId") == body.parameter_id), None)
-        node = next((n for n in definition["nodes"] if n["id"] == (condition or {}).get("table")), None)
-        if not node or not condition.get("column"):
-            raise ApiProblem(422, "parameter_unbound", "Bind this parameter to a source column before browsing values.")
-        source, column = node, condition["column"]
-        # A scalar picker cannot infer a composite key or choose between parallel
-        # FKs. Require an explicit domain for either ambiguous situation.
-        matches = [r for r in catalog["relationships"] if source_identity(catalog, r, "source") == source_identity(catalog, source)
-                   and any(pair["source"] == column for pair in relationship_columns(r))]
-        if parameter["type"] != "source" and matches:
-            if len(matches) != 1 or len(relationship_columns(matches[0])) != 1:
-                raise ApiProblem(422, "parameter_domain_ambiguous", "Choose an explicit domain for a composite or ambiguous relationship.")
-            fk = matches[0]
-            source = {"namespace": source_identity(catalog, fk, "target")[0], "table": fk["targetTable"]}
-            column = relationship_columns(fk)[0]["target"]
-        columns = (physical_table(catalog, source) or {}).get("columns", [])
-        label = "name" if parameter["type"] != "source" and any(c["name"] == "name" for c in columns) else column
-    return domain_values_plan(catalog, source.get("table", ""), column, label, body.search, namespace=source.get("namespace"))
+    try:
+        lookup = parameter_domain(catalog, definition, alternative, parameter)
+    except ValueError as error:
+        raise ApiProblem(422, "parameter_unbound", str(error)) from error
+    if not lookup:
+        raise ApiProblem(422, "parameter_unbound", "Bind this parameter to a source column before browsing values.")
+    issues = source_issues(catalog, definition)
+    if any(issue.get("severity", "breaking") == "breaking" for issue in issues):
+        raise ApiProblem(422, "model_source_drift", "Source references need repair before browsing parameter values.", details={"issues": issues})
+    return domain_values_plan(catalog, lookup["table"], lookup["column"], lookup["labelColumn"], body.search, namespace=lookup.get("namespace"))
 
 
 def domain_values_plan(catalog, table, column, label, search="", *, namespace=None):

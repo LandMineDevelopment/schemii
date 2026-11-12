@@ -127,6 +127,7 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
   const ticket = ++libraryTicket;
   refreshActions = [];
   const dialog = document.getElementById("model-library"), content = document.getElementById("library-content");
+  const current = () => ticket === libraryTicket && dialog.open;
   disposeSelects(content); content.replaceChildren(element("p", { text: "Loading your models and connections…", attrs: { role: "status" } }));
   if (!dialog.open) dialog.showModal();
   try {
@@ -134,7 +135,14 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
     if (ticket !== libraryTicket || !dialog.open) return;
     content.replaceChildren();
     const status = element("p", { className: "hint", attrs: { role: "status" } });
-    const choose = async model => { try { if (await onOpen(model.id) !== false) { dialog.close(); return true; } } catch (error) { status.textContent = error.message; } return false; };
+    const choose = async model => {
+      if (!current()) return false;
+      try {
+        const opened = await onOpen(model.id);
+        if (opened !== false && current()) { dialog.close(); return true; }
+      } catch (error) { if (current()) status.textContent = error.message; }
+      return false;
+    };
     if (!models.length && onAssistant) {
       const assistant = element("button", { type: "button", className: "ui-button primary", text: "Create with model assistant" });
       assistant.onclick = () => { dialog.close(); onAssistant(); };
@@ -181,9 +189,8 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
                 }
               },
             });
-            if (copied) {
-              await openModelLibrary(onOpen, { onDeleted, canDelete });
-              if (await onOpen(copied.id) !== false) dialog.close();
+            if (copied && current()) {
+              if (!await choose(copied) && current()) await openModelLibrary(onOpen, { onDeleted, canDelete, onAssistant });
             }
           } catch (error) {
             const target = content.querySelector('[role="status"]');
@@ -270,9 +277,11 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
       try {
         const parts = splitDraft(importedDraft(catalog, selection.getSelection()));
         const model = await requestJson(`${API}/models`, { method: "POST", body: { name: name.value.trim(), connectionId, namespace, ...parts, catalogFingerprint: catalog.fingerprint }, timeoutMs: 30000 });
+        if (!current()) return;
         create.disabled = true;
-        if (!await choose(model)) await openModelLibrary(onOpen, { onDeleted, canDelete, onAssistant });
+        if (!await choose(model) && current()) await openModelLibrary(onOpen, { onDeleted, canDelete, onAssistant });
       } catch (error) {
+        if (!current()) return;
         status.textContent = error.message;
         if (error.code === "model_source_changed") { create.disabled = true; status.textContent += " Use Reload sources to review the updated selection."; }
         else if (!error.status || error.status >= 500) { creationUncertain = true; create.disabled = true; status.textContent += " Review the model list before creating again to check whether this model was saved."; }

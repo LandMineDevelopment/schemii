@@ -68,6 +68,7 @@ def definition_namespaces(namespace, definition):
                 domain = value.get("domain") or {}
                 if domain.get("nodeId") is None and domain.get("table"):
                     names.add(domain.get("namespace") or namespace)
+    names.update(table.get("namespace") or namespace for table in (definition.get("sourceContract") or {}).get("tables", []))
     if len(names) > 16:
         raise ValueError("Choose at most 16 source schemas for one model.")
     return sorted(names)
@@ -85,3 +86,40 @@ def domain_source(domain, nodes):
 
 def domain_table(domain, nodes):
     return domain_source(domain, nodes).get("table", "")
+
+
+def parameter_domain(catalog, definition, alternative, parameter):
+    """Resolve the same qualified saved lookup for contracts and execution."""
+    explicit = parameter.get("domain")
+    if explicit:
+        source = domain_source(explicit, definition.get("nodes", []))
+        column = explicit.get("column")
+        return {**source, "column": column, "labelColumn": explicit.get("labelColumn") or column} if source.get("table") and column else None
+    condition = next((item for item in alternative.get("conditions", [])
+                      if parameter.get("id") and item.get("parameterId") == parameter["id"]), None)
+    node = next((item for item in definition.get("nodes", []) if item["id"] == (condition or {}).get("table")), None)
+    if not node or not condition.get("column"):
+        return None
+    source = {key: node[key] for key in ("namespace", "table") if key in node}
+    column = condition["column"]
+    contract, relationship = definition.get("sourceContract") or {}, None
+    if parameter.get("type") != "source":
+        def candidates(values):
+            return [item for item in values if source_identity(catalog, item, "source") == source_identity(catalog, source)
+                    and any(pair["source"] == column for pair in relationship_columns(item))]
+        saved = candidates(contract.get("relationships", [])) if contract.get("scope") == "model" else []
+        matches = [resolve_relationship(catalog, item["id"]) for item in saved] if saved else candidates(catalog.get("relationships", []))
+        if saved and any(item is None for item in matches):
+            raise ValueError("The parameter lookup foreign key was removed. Choose an explicit domain before saving.")
+        if matches:
+            if len(matches) != 1 or len(relationship_columns(matches[0])) != 1:
+                raise ValueError("Choose an explicit domain for a composite or ambiguous relationship.")
+            relationship = matches[0]
+            source = {"table": relationship["targetTable"], **({"namespace": relationship["targetNamespace"]} if relationship.get("targetNamespace") else {})}
+            column = relationship_columns(relationship)[0]["target"]
+    columns = (physical_table(catalog, source) or {}).get("columns", [])
+    saved_table = next((item for item in contract.get("tables", []) if source_identity(catalog, item) == source_identity(catalog, source)), None)
+    label_columns = saved_table["columns"] if saved_table and contract.get("scope") == "model" else columns
+    label = "name" if parameter.get("type") != "source" and any(item["name"] == "name" for item in label_columns) else column
+    return {**source, "column": column, "labelColumn": label,
+            **({"relationshipId": relationship["id"]} if relationship else {})}
