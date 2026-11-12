@@ -1386,3 +1386,116 @@ def test_materialized_acl_replay_preserves_privileges_past_single_digit_step_num
         "author": {(privilege, False) for privilege in privileges},
         "reader": {("SELECT", True)},
     }
+
+
+def protected_view_catalog(query):
+    from schemii.common.postgres.models import PostgresIndex
+
+    source = view_binding_catalog(query)
+    namespace = source.namespace
+    base = mixed().safety.preservation[1]
+    table = base.model_copy(update={"identity": relation("source_data", namespace)})
+    view = base.model_copy(
+        update={
+            "identity": relation("saved", namespace),
+            "relation_kind": "m",
+            "indexes": (
+                PostgresIndex(
+                    name="saved_idx",
+                    table="saved",
+                    definition='CREATE INDEX saved_idx ON "Cache ""schema""".saved(value)',
+                    method="btree",
+                    unique=False,
+                    valid=True,
+                ),
+            ),
+        }
+    )
+    return build_postgres_catalog(
+        **source.model_dump(
+            exclude={"fingerprint", "captured_at", "safety", "fingerprint_version"}
+        ),
+        safety=PostgresSafetyEvidence(
+            version=2,
+            preservation=(table, view),
+            dependency_complete=True,
+            unknown_reasons=(),
+            dependencies=(
+                PostgresDependency(
+                    source=view.identity, target=table.identity, kind="n"
+                ),
+                PostgresDependency(
+                    source=relation("saved_idx", namespace),
+                    target=view.identity,
+                    kind="a",
+                ),
+            ),
+        ),
+        captured_at=source.captured_at,
+    )
+
+
+def test_protected_view_preservation_accepts_only_proven_same_binding_representation():
+    before = protected_view_catalog(
+        'SELECT value FROM "Cache ""schema""".source_data WHERE value >= 2'
+    )
+    current = import_postgres_catalog(before).content
+    compatibility = migration_compatibility(before, current, current)
+    assert relation("saved", before.namespace) in compatibility.protected_scope
+    after = protected_view_catalog("SELECT value FROM source_data WHERE value >= 2")
+    assert preservation_matches(before, after, compatibility)
+    changed = protected_view_catalog("SELECT value FROM source_data WHERE value > 2")
+    assert not preservation_matches(before, changed, compatibility)
+    unpopulated = build_postgres_catalog(
+        **after.model_dump(
+            exclude={"fingerprint", "captured_at", "materialized_views"}
+        ),
+        materialized_views=(
+            after.materialized_views[0].model_copy(update={"populated": False}),
+        ),
+        captured_at=after.captured_at,
+    )
+    assert not preservation_matches(before, unpopulated, compatibility)
+    different_column = build_postgres_catalog(
+        **after.model_dump(
+            exclude={"fingerprint", "captured_at", "materialized_views"}
+        ),
+        materialized_views=(
+            after.materialized_views[0].model_copy(
+                update={
+                    "columns": (
+                        PostgresColumn(
+                            name="changed",
+                            ordinal=1,
+                            data_type="integer",
+                            nullable=True,
+                        ),
+                    )
+                }
+            ),
+        ),
+        captured_at=after.captured_at,
+    )
+    assert not preservation_matches(before, different_column, compatibility)
+
+
+@pytest.mark.parametrize(
+    "old_query,new_query",
+    [
+        (
+            "SELECT value FROM external.source_data",
+            'SELECT value FROM "Cache ""schema""".source_data',
+        ),
+        (
+            "WITH source_data AS (SELECT 1 AS value) SELECT value FROM source_data",
+            'WITH source_data AS (SELECT 1 AS value) SELECT value FROM "Cache ""schema""".source_data',
+        ),
+    ],
+)
+def test_protected_view_preservation_never_erases_external_or_cte_shadow_changes(
+    old_query, new_query
+):
+    before, after = protected_view_catalog(old_query), protected_view_catalog(new_query)
+    current = import_postgres_catalog(before).content
+    compatibility = migration_compatibility(before, current, current)
+    assert not preservation_matches(before, after, compatibility)

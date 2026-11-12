@@ -675,6 +675,12 @@ def preservation_matches(
         PostgresObjectIdentity(kind="relation", namespace=before.namespace, name=name)
         for name in mutable_relations
     )
+    view_queries = {
+        PostgresObjectIdentity(
+            kind="relation", namespace=item.namespace, name=item.name
+        ): item.query_definition
+        for item in (*before.views, *before.materialized_views)
+    }
 
     def projection(catalog: PostgresCatalog):
         evidence = catalog.safety
@@ -699,7 +705,21 @@ def preservation_matches(
                     signature=getattr(item, "identity_arguments", ""),
                 )
                 if key in scope:
-                    rows[key] = item.model_dump(mode="json")
+                    value = item.model_dump(mode="json")
+                    query = value.get("query_definition")
+                    original = view_queries.get(key)
+                    if (
+                        original is not None
+                        and isinstance(query, str)
+                        and view_definitions_equivalent(
+                            before.namespace, original, query, catalog
+                        )
+                    ):
+                        # pg_get_viewdef qualification follows the connection's
+                        # search path. Preserve its proven binding, while all
+                        # other protected attributes still compare exactly.
+                        value["query_definition"] = original
+                    rows[key] = value
         mutable = {
             PostgresObjectIdentity(
                 kind="relation", namespace=before.namespace, name=name
