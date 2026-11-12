@@ -95,7 +95,19 @@ export async function openPreviewHandoff(context, { onCreated, request = request
       const node = source.definition.nodes.find(node => node.id === field.table);
       fieldsList.append(element('li', { text: `${node?.label || field.table} [${field.table}] · ${field.column} · ${field.aggregate || 'none'}` }));
     }
-    review.append(fieldsList, element('pre', { text: JSON.stringify({ selections: context.payload.explore.selections, reportFilters: context.payload.explore.reportFilters }, null, 2) }));
+    const filtersList = element('ul');
+    for (const [id, choice] of Object.entries(context.payload.explore.selections)) {
+      const scope = source.definition.scopes.find(item => item.id === id);
+      const alternative = scope?.alternatives?.find(item => item.id === choice.alternativeId);
+      const values = Object.entries(choice.values).map(([key, value]) => `${alternative?.inputs?.find(input => input.id === key)?.label || key}: ${JSON.stringify(value)}`);
+      filtersList.append(element('li', { text: `${scope?.label || id} · ${choice.active === false ? 'inactive' : 'active'} · ${alternative?.label || choice.alternativeId || 'default alternative'}${values.length ? ' · ' + values.join('; ') : ''}${scope?.requirement === 'optional' ? ' · offered as a dashboard filter' : ''}` }));
+    }
+    for (const filter of context.payload.explore.reportFilters) {
+      const conditions = filter.conditions.map(condition => `${condition.table}.${condition.column} ${condition.operator || 'eq'} ${JSON.stringify(condition.value ?? condition.compareColumn ?? condition.parameterId ?? '')}`);
+      filtersList.append(element('li', { text: `${filter.label || 'Report filter'} · ${filter.mode || 'rows'} · ${conditions.join('; ')}` }));
+    }
+    if (!filtersList.children.length) filtersList.append(element('li', { text: 'No transferred filter selections or report filters.' }));
+    review.append(fieldsList, element('h3', { text: 'Filters' }), filtersList);
     body.append(element('label', { className: 'stack' }, ['Dashboard name', name]), element('label', { className: 'stack' }, ['Tile name', title]),
       element('label', { className: 'stack' }, ['Initial report type', kind]), review);
     submit.disabled = false;

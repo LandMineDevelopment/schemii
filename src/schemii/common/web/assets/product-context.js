@@ -44,8 +44,8 @@ export function validatePreviewContext(payload) {
 
 function validatePayload(kind, value) {
   if (kind === 'preview') return validatePreviewContext(value);
-  if (kind !== 'schema' || !keys(value, ['connectionId', 'connectionRevision', 'namespace'])
-      || !profilePattern.test(value.connectionId) || !string(value.namespace, 63)
+  if (kind !== 'schema' || !keys(value, ['connectionId', 'connectionOwnerId', 'connectionRevision', 'namespace'])
+      || !profilePattern.test(value.connectionId) || !string(value.connectionOwnerId) || !string(value.namespace, 63)
       || !Number.isSafeInteger(value.connectionRevision) || value.connectionRevision < 1) invalid();
   return JSON.parse(JSON.stringify(value));
 }

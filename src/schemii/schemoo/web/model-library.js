@@ -19,9 +19,10 @@ export async function resolveSchemaContext(context, request = requestJson) {
   const { connections } = await request('/api/v1/connections?product=schemoo');
   const source = connections.find(item => item.id === context.payload.connectionId);
   if (!source) throw new Error('This exact PostgreSQL connection is unavailable in Schemoo. Ask for access or return to Schemii and choose another live source.');
-  if (source.revision !== context.payload.connectionRevision) throw new Error('The saved source connection changed. Return to Schemii and send its current context again.');
+  if ((source.ownerId || account.user.id) !== context.payload.connectionOwnerId || source.revision !== context.payload.connectionRevision) throw new Error('The saved source connection changed. Return to Schemii and send its current context again.');
   const schemas = await request(`/api/v1/connections/${encodeURIComponent(source.id)}/namespaces?product=schemoo`, { timeoutMs: 30000 });
   if (!schemas.namespaces.some(item => item.name === context.payload.namespace && !item.system)) throw new Error('This source schema is no longer accessible. Return to Schemii and choose a current live source.');
+  assertProductContext(context, await request('/api/v1/auth/me'), 'schemoo');
   return source;
 }
 
@@ -315,6 +316,7 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
         status.textContent = error.message;
         if (sourceContext && !posted) { contextBlocked = true; create.disabled = true; status.textContent += ' Return to Schemii and send a fresh live-source context.'; }
         else if (error.code === "model_source_changed") { create.disabled = true; status.textContent += " Use Reload sources to review the updated selection."; }
+        else if (sourceContext && [403, 404, 409].includes(error.status)) { contextBlocked = true; create.disabled = true; status.textContent += ' Return to Schemii and send a fresh live-source context.'; }
         else if (!error.status || error.status >= 500) {
           creationUncertain = true; create.disabled = true;
           if (sourceContext) uncertainContexts.set(sourceContext, { name: name.value.trim(), beforeIds: models.map(item => item.id) });

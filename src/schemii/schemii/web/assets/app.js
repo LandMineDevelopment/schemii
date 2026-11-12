@@ -5086,7 +5086,7 @@ function bindEvents() {
       const workspace = await api.getWorkspace(origin.id);
       const connection = await api.getConnection(workspace.connectionId);
       if (state.activeWorkspace?.id !== origin.id || workspace.connectionId !== origin.connectionId || workspace.namespace !== origin.namespace) throw new Error('The workspace source changed. Reload it and send the current live schema.');
-      location.assign(createProductContext('schema', account, { connectionId: workspace.connectionId, connectionRevision: connection.revision, namespace: workspace.namespace }));
+      location.assign(createProductContext('schema', account, { connectionId: workspace.connectionId, connectionOwnerId: connection.ownerId || account.user.id, connectionRevision: connection.revision, namespace: workspace.namespace }));
     } catch (error) { errorToast(error); }
     finally { schemaHandoffPending = false; updateHeader(); }
   });
