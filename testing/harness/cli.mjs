@@ -404,7 +404,7 @@ async function execute(command,o) {
     const control={socket:join(runtime,'controller.sock'),token:randomBytes(32).toString('hex')};
     await writeJSON(join(dir,'control.json'),control);
     await writeJSON(join(dir,'private.json'),{credentialPath});
-    let run={id,...config,acceptanceContract:2,status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
+    let run={id,...config,acceptanceContract:2,verificationBase:execFileSync('git',['-C',root,'rev-parse','--verify','origin/main^{commit}'],{encoding:'utf8'}).trim(),status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
     await writeJSON(join(dir,'manifest.json'),run);
     await writeJSON(join(dir,'controller-owner.json'),{pid:process.pid,birthTick:await birthTick(process.pid)});
     const result=await withFileLock(join(dir,'lifecycle.lock'),async()=>{

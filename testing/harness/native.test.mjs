@@ -574,6 +574,8 @@ f=directory/'receipt.json';f.write_text(json.dumps(r));f.chmod(0o600)
   }
   await writeJSON(receiptPath,{...original,source:{...original.source,fingerprint:'0'.repeat(64)}});
   assert.throws(()=>importVerification(run,receiptPath,{root,note:'Synthetic wrong source'}),/rejected/);
+  await writeJSON(receiptPath,{...original,base_ref:'HEAD'});
+  assert.throws(()=>importVerification(run,receiptPath,{root,note:'Synthetic wrong narrowed comparison base'}),/rejected/);
   await writeJSON(receiptPath,{...original,commands:original.commands.slice(1)});
   assert.throws(()=>importVerification(run,receiptPath,{root,note:'Synthetic missing required command'}),/rejected/);
   await writeJSON(receiptPath,original);

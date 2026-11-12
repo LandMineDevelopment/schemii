@@ -385,11 +385,12 @@ function filesUnchanged(files) {
 const verificationImport = `
 import json,sys
 from pathlib import Path
-from scripts.ci.local_ci import selected_plan, source_identity, lane_for, evidence
-root,path,phase=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3]
+from scripts.ci.local_ci import selected_plan, source_identity, lane_for, evidence, git
+root,path,phase,base=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3],sys.argv[4]
 r=json.loads(path.read_text()); identity=source_identity(root)
 if r.get('schema')!=1 or r.get('source')!=identity: raise ValueError('wrong or stale source')
 if phase not in ('focused','final'): raise ValueError('invalid verification phase')
+if git(root,'rev-parse','--verify','--end-of-options',r['base_ref']+'^{commit}').decode().strip()!=base: raise ValueError('receipt base differs from frozen acceptance scope')
 plan=selected_plan(root,r['base_ref'],r.get('mode')=='full')
 if not plan['classification']['valid'] or r.get('profile')!=plan['classification']['profile']: raise ValueError('wrong plan/profile')
 required=plan['feedback']['commands'] if phase=='focused' else plan['commands']
@@ -422,8 +423,10 @@ export function importVerification(run, receiptPath, { root, phase = 'final', no
     if (before.commit !== run.deployment?.identity?.commit || before.fingerprint !== run.deployment?.identity?.fingerprint) throw new Error('Changed source requires a new prepared run; old failures cannot be relabeled.');
     const file = boundFile(resolve(receiptPath));
     attempt.receipt = file;
+    const base = run.verificationBase || execFileSync('git', ['-C',root,'rev-parse','--verify','origin/main^{commit}'], {encoding:'utf8'}).trim();
+    if (!/^[0-9a-f]{40}$/.test(base)) throw new Error('Verification requires the prepared frozen base commit.');
     let validated;
-    try { validated = JSON.parse(execFileSync(python, ['-c', verificationImport, root, file.path, phase], { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore','pipe','pipe'] })); }
+    try { validated = JSON.parse(execFileSync(python, ['-c', verificationImport, root, file.path, phase, base], { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore','pipe','pipe'] })); }
     catch { throw new Error('Original CI receipt rejected: source, inventory, outcome or timing evidence is stale, incomplete or invalid.'); }
     const files = validated.files.map(boundFile);
     if (files[0].sha256 !== file.sha256 || !isDeepStrictEqual(before, sourceIdentity(root))) throw new Error('Source or receipt changed during import.');

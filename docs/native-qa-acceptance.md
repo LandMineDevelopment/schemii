@@ -253,6 +253,9 @@ latest attempts, reviews, original finding content, or reporter self-review inva
 the import. A GitHub issue closure or free-text claim is insufficient.
 
 The coordinator still schedules existing `./ci.sh` checks according to ownership.
+Prepare freezes `verificationBase` to the intended origin/main commit. Use
+`./ci.sh --base VERIFICATION_BASE_SHA` so later ref movement cannot narrow the
+required inventory; receipt imports reject a different comparison base.
 Import their original private receipt after it finishes; this command executes no
 suite and does not substitute a new runner:
 
