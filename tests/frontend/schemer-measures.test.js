@@ -50,3 +50,35 @@ test('a legal model output matching the report token stays selectable and distin
   assert.ok(choices.some(([key])=>key===outputKey(physical)));
   assert.ok(!choices.some(([key])=>key===outputKey(calculationRef(current.calculations[0]))));
 });
+
+test('KPI baseline references share calculation validation and keep stale identities for repair',()=>{
+  const current=tile();current.kind='kpi';
+  current.kpiComparison={label:'Target',baseline:{output:{table:'@report',column:'deleted',aggregate:'none',kind:'calculated'},scope:'group'},favorable:'higher'};
+  const before=structuredClone(current.kpiComparison.baseline);
+  assert.match(calculationErrors(current,[source,...reportOutputs(current)]).join(' '),/KPI Target:.*removed/);
+  assert.deepEqual(current.kpiComparison.baseline,before);
+  current.kpiComparison.baseline.output=calculationRef(current.calculations[0]);
+  assert.deepEqual(calculationErrors(current,[source,...reportOutputs(current)]),[]);
+  current.calculations[0].label='Renamed share';
+  assert.deepEqual(calculationErrors(current,[source,...reportOutputs(current)]),[]);
+  current.calculations=[];current.measures=current.hiddenMeasures;current.hiddenMeasures=[];
+  assert.match(calculationErrors(current,[source,...reportOutputs(current)]).join(' '),/KPI Target:.*removed/);
+});
+for(const constant of ['NaN','Infinity','1e99999',true,'0.1000000000000000001']) test(`KPI baseline validates exact numeric token ${constant}`,()=>{
+  const current=tile();current.kind='kpi';current.kpiComparison={label:'Baseline',baseline:{constant,scope:'group'},favorable:'higher'};
+  const errors=calculationErrors(current,[source,...reportOutputs(current)]);
+  if(constant==='0.1000000000000000001') assert.deepEqual(errors,[]);
+  else assert.match(errors.join(' '),/KPI Baseline:.*numeric constant/);
+  assert.equal(current.kpiComparison.baseline.constant,constant);
+});
+test('KPI baseline rejects incompatible types and scopes without rewriting them',()=>{
+  const current=tile();current.kind='kpi';
+  const text={table:'people',column:'name',aggregate:'min',kind:'value',dataType:'text',label:'Name'};
+  current.hiddenMeasures.push({table:'people',column:'name',aggregate:'min'});
+  current.kpiComparison={label:'Baseline',baseline:{output:{table:'people',column:'name',aggregate:'min',kind:'value'},scope:'group'},favorable:'higher'};
+  assert.match(calculationErrors(current,[source,text,...reportOutputs(current)]).join(' '),/KPI Baseline:.*numeric aggregate/);
+  current.kpiComparison.baseline={output:calculationRef(current.calculations[0]),scope:'source_population'};
+  assert.match(calculationErrors(current,[source,text,...reportOutputs(current)]).join(' '),/KPI Baseline:.*base aggregate/);
+  current.kpiComparison.baseline={constant:'10',scope:'qualifying_groups'};
+  assert.match(calculationErrors(current,[source,text,...reportOutputs(current)]).join(' '),/KPI Baseline:.*constants have no population scope/);
+});

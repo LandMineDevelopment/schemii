@@ -6,31 +6,53 @@ const numeric = /^(smallint|integer|bigint|numeric|decimal|real|double precision
 const scopes=[['group','This group / cell'],['source_population','Source-filtered report population · before result filters'],['qualifying_groups','Qualifying groups · after independent result filters, before Top N']];
 export function calculationErrors(tile,outputs) {
   const errors=[],items=new Map((tile.calculations || []).map(item=>[item.id,item])),keys=new Map(outputs.map(item=>[outputKey(item),item])),done=new Map(),path=[];
+  const baseKeys=new Set([...tile.measures,...(tile.hiddenMeasures || [])].map(field=>JSON.stringify([field.table,field.column,field.aggregate || 'none'])));
+  const axes=tile.kind==='pivot'?[...(tile.rowDimensions || []),...(tile.columnDimensions || [])]:(tile.dimensions || []);
+  const axisKeys=new Set(axes.map(field=>JSON.stringify([field.table,field.column,field.aggregate || 'none'])));
+  function validateOperand(operand,label) {
+    const populations=new Set(),scope=operand?.scope ?? 'group';
+    if(!operand || (operand.constant!=null)===(operand.output!=null)) {
+      errors.push(`${label}: choose exactly one output or numeric constant.`);return populations;
+    }
+    if(!scopes.some(([value])=>value===scope)) errors.push(`${label}: choose a supported population scope.`);
+    if(operand.constant!=null) {
+      const token=String(operand.constant).trim();
+      const match=/^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(token);
+      let valid=['string','number'].includes(typeof operand.constant) && String(operand.constant).length<=200 && !!match;
+      if(valid) {
+        const integer=match[2] || '',fraction=match[3] ?? match[4] ?? '',first=(integer+fraction).search(/[1-9]/);
+        const adjusted=BigInt(match[5] || '0')+BigInt(first<0?-fraction.length:integer.length-first-1);
+        valid=adjusted>=-4096n&&adjusted<=4096n;
+      }
+      if(!valid) errors.push(`${label}: enter a finite numeric constant of bounded magnitude. Your exact input is kept.`);
+      if(scope!=='group') errors.push(`${label}: numeric constants have no population scope.`);
+      return populations;
+    }
+    const output=keys.get(outputKey(operand.output));
+    if(!output) {errors.push(`${label}: an input was removed. Restore it or choose a replacement.`);return populations;}
+    if(output.kind==='calculated') {
+      if(scope!=='group') errors.push(`${label}: population scope needs a base aggregate.`);
+      for(const population of visit(output.column)) populations.add(population);
+    } else {
+      const identity=JSON.stringify([output.table,output.column,output.aggregate || 'none']);
+      if(!baseKeys.has(identity)||axisKeys.has(identity)||!numeric.test(output.dataType || '')) errors.push(`${label}: choose numeric aggregate inputs.`);
+      if(scope!=='group' && (output.kind!=='value' || output.aggregate==='none')) errors.push(`${label}: population scope needs a base aggregate.`);
+      if(scope!=='group' && tile.timeAnalysis && ((tile.timeAnalysis.comparison || 'none')!=='none' || tile.timeAnalysis.runningTotal)) errors.push(`${label}: population scopes cannot combine calendar windows. Use period values or group scope.`);
+      populations.add(scope);
+    }
+    return populations;
+  }
   function visit(id) {
     if(done.has(id)) return done.get(id);
     const item=items.get(id);if(!item){errors.push(`Calculation ${id} was removed. Rebind its references.`);return new Set();}
     if(path.includes(id)){errors.push(`Calculation cycle: ${[...path,id].join(' → ')}. Rebind an operand.`);return new Set();}
     path.push(id);const populations=new Set();
     if(!item.label?.trim()) errors.push('Name every calculated measure.');
-    for(const operand of [item.left,item.right]) {
-      if(operand?.constant != null) {
-        if(!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(String(operand.constant).trim()) || String(operand.constant).length>200) errors.push(`${item.label}: enter a finite numeric constant. Your exact input is kept.`);
-      } else {
-        const output=keys.get(outputKey(operand?.output || {}));
-        if(!output) errors.push(`${item.label}: an input was removed. Restore it or choose a replacement.`);
-        else if(output.kind==='calculated') {
-          if(operand.scope!=='group') errors.push(`${item.label}: population scope needs a base aggregate.`);
-          for(const scope of visit(output.column)) populations.add(scope);
-        } else {
-          if(!numeric.test(output.dataType || '')) errors.push(`${item.label}: choose numeric aggregate inputs.`);
-          if(operand.scope!=='group' && (output.kind!=='value' || output.aggregate==='none')) errors.push(`${item.label}: population scope needs a base aggregate.`);
-          populations.add(operand.scope || 'group');
-        }
-      }
-    }
+    for(const operand of [item.left,item.right]) for(const scope of validateOperand(operand,item.label || 'Calculation')) populations.add(scope);
     path.pop();done.set(id,populations);return populations;
   }
   for(const id of items.keys()) visit(id);
+  if(tile.kpiComparison) validateOperand(tile.kpiComparison.baseline,`KPI ${tile.kpiComparison.label || 'baseline'}`);
   for(const filter of tile.aggregateFilters || []) if(filter.kind==='calculated' && done.get(filter.column)?.has('qualifying_groups')) errors.push(`${items.get(filter.column)?.label}: this filter would define its own denominator. Use an independent filter or source population.`);
   const used=new Set((tile.calculations || []).flatMap(item=>[item.left,item.right]).filter(operand=>operand?.output).map(operand=>outputKey(operand.output)));
   for(const output of [...(tile.sort || []),...(tile.aggregateFilters || [])]) used.add(outputKey(output));
@@ -54,7 +76,7 @@ export function measureEditor(tile,{outputs,onChange,element,modelSelect}) {
     if(!choices.some(([value])=>value===selected)) choices.unshift([selected,'Unavailable input · choose a replacement']);
     const block=element('div',{className:'measure-operand'},[labeled(label,modelSelect(`${item.label || 'Calculation'} ${label}`,choices,selected,value=>{
       if(value==='constant') item[key]={constant:'0',scope:'group'};
-      else {const output=numericOutputs.find(output=>outputKey(output)===value);item[key]={output:{table:output.table,column:output.column,aggregate:output.aggregate,kind:output.kind},scope:'group'};}
+      else {const output=numericOutputs.find(output=>outputKey(output)===value);if(!output) return;item[key]={output:{table:output.table,column:output.column,aggregate:output.aggregate,kind:output.kind},scope:'group'};}
       onChange();
     }))]);
     if(operand.constant != null) block.append(labeled('Exact numeric value',input(`${label} exact numeric value`,operand.constant,value=>{operand.constant=value;})));

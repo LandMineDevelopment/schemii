@@ -311,3 +311,16 @@ test('upgrade retains calculation identities and hidden dependencies for explici
   assert.equal(draft.tiles[0].calculations[0].right.output.column,'removed');
   assert.deepEqual(dashboard,before);
 });
+
+test('upgrade blocks a stale KPI baseline and preserves it until explicit rebind',()=>{
+  const {dashboard,model,catalog,tile}=data();tile.kind='kpi';tile.dimensions=[];
+  tile.calculations=[];tile.hiddenMeasures=[];
+  tile.kpiComparison={label:'Target',baseline:{output:{table:'@report',column:'deleted',aggregate:'none',kind:'calculated'},scope:'group'},favorable:'higher'};
+  const before=structuredClone(dashboard),draft=modelUpgradeDraft(dashboard,model);
+  const issues=modelUpgradeIssues(draft,model,catalog);
+  assert.ok(issues.some(issue=>/KPI Target:.*removed/.test(issue.message)));
+  assert.deepEqual(draft.tiles[0].kpiComparison,tile.kpiComparison);
+  assert.deepEqual(dashboard,before);
+  draft.tiles[0].kpiComparison.baseline.output={table:'people',column:'id',aggregate:'count',kind:'value'};
+  assert.deepEqual(modelUpgradeIssues(draft,model,catalog),[]);
+});

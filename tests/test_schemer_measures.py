@@ -608,3 +608,178 @@ def test_calendar_source_population_preserves_date_eligibility(context):
     )
     assert population.this.args["where"].find(exp.Is).expression == exp.Null()
     assert population.this.args["where"].find(exp.Not) is not None
+
+
+def calendar_rows(sql):
+    def adapt(node):
+        if isinstance(node, exp.TimestampTrunc):
+            return exp.Anonymous(
+                this="DATE",
+                expressions=[node.this.copy(), exp.Literal.string("start of month")],
+            )
+        if isinstance(node, exp.Cast) and node.args["to"].is_type("date"):
+            return node.this.copy()
+        if isinstance(node, exp.ByteString):
+            return exp.Literal.string(node.this)
+        return node
+
+    statement = parse_one(sql, read="postgres").transform(adapt).transform(adapt)
+    with sqlite3.connect(":memory:") as connection:
+        connection.executescript("""ATTACH DATABASE ':memory:' AS public;
+            CREATE TABLE public.people(id INTEGER,created_at TEXT,amount REAL);
+            INSERT INTO public.people VALUES(1,'2024-01-01',100),(2,'2024-02-01',200),(3,NULL,1000);""")
+        return connection.execute(statement.sql(dialect="sqlite")).fetchall()
+
+
+@pytest.mark.parametrize(
+    "scope,expected",
+    [("source_population", [1, 2]), ("qualifying_groups", [1, 2]), ("group", [1])],
+)
+def test_calendar_constituents_match_evaluated_population_in_preview_and_csv(
+    context, scope, expected
+):
+    dashboard, tile, _, catalog = configured(
+        context,
+        dimensions=[{"table": "people", "column": "created_at"}],
+        hiddenMeasures=[{"table": "people", "column": "amount", "aggregate": "sum"}],
+        detailFields=[
+            {"table": "people", "column": column}
+            for column in ["id", "created_at", "amount"]
+        ],
+        timeAnalysis={
+            "table": "people",
+            "column": "created_at",
+            "granularity": "month",
+        },
+        calculations=[
+            calculation(right=operand("amount", scope=scope), operation="percent_of")
+        ],
+        topN=1,
+    )
+    catalog["tables"][0]["columns"].append({"name": "created_at", "dataType": "date"})
+    _, chart = queries.tile_plan(None, None, dashboard, tile.id)
+    values = calendar_rows(chart["sql"])
+    assert len(values) == 1 and values[0][1] == pytest.approx(
+        100 if scope == "group" else 100 / 300 * 100
+    )
+    selection = {
+        "dimensions": [
+            {"table": "people", "column": "created_at", "value": "2024-01-01"}
+        ],
+        "measureIndex": 0,
+        "constituent": operand("amount", scope=scope),
+    }
+    for exporting in [False, True]:
+        _, drill = queries.tile_plan(
+            None, None, dashboard, tile.id, selection=selection, exporting=exporting
+        )
+        rows = calendar_rows(drill["sql"])
+        assert [row[0] for row in rows] == expected
+        assert sum(row[2] for row in rows) == (100 if scope == "group" else 300)
+    selection["dimensions"][0]["value"] = "2024-02-01"
+    _, absent = queries.tile_plan(None, None, dashboard, tile.id, selection=selection)
+    assert calendar_rows(absent["sql"]) == [], (
+        "Final parent Top N still gates the selected mark"
+    )
+
+
+def test_calendar_population_drill_preserves_source_filters(context):
+    dashboard, tile, _, catalog = configured(
+        context,
+        dimensions=[{"table": "people", "column": "created_at"}],
+        hiddenMeasures=[{"table": "people", "column": "amount", "aggregate": "sum"}],
+        detailFields=[
+            {"table": "people", "column": column}
+            for column in ["id", "created_at", "amount"]
+        ],
+        timeAnalysis={
+            "table": "people",
+            "column": "created_at",
+            "granularity": "month",
+        },
+        calculations=[
+            calculation(
+                right=operand("amount", scope="source_population"),
+                operation="percent_of",
+            )
+        ],
+        reportFilters=[
+            {
+                "mode": "rows",
+                "conditions": [
+                    {
+                        "table": "people",
+                        "column": "amount",
+                        "operator": "gt",
+                        "value": 150,
+                    }
+                ],
+            }
+        ],
+    )
+    catalog["tables"][0]["columns"].append({"name": "created_at", "dataType": "date"})
+    selection = {
+        "dimensions": [
+            {"table": "people", "column": "created_at", "value": "2024-02-01"}
+        ],
+        "measureIndex": 0,
+        "constituent": operand("amount", scope="source_population"),
+    }
+    _, drill = queries.tile_plan(
+        None, None, dashboard, tile.id, selection=selection, exporting=True
+    )
+    assert [row[0] for row in calendar_rows(drill["sql"])] == [2]
+
+
+def test_native_bigint_kpi_variance_promotes_before_subtraction_and_abs(context):
+    _, result = plan(
+        context,
+        kind="kpi",
+        dimensions=[],
+        calculations=[],
+        measures=[{"table": "people", "column": "amount", "aggregate": "max"}],
+        hiddenMeasures=[{"table": "people", "column": "amount", "aggregate": "min"}],
+        kpiComparison={"baseline": operand("amount", "min"), "favorable": "higher"},
+    )
+    # Recompile with native extrema rather than widened SUM inputs.
+    catalog = queries.model_catalog(None, None, None)
+    next(
+        column
+        for column in catalog["tables"][0]["columns"]
+        if column["name"] == "amount"
+    )["dataType"] = "bigint"
+    dashboard = context[0]
+    _, result = queries.tile_plan(None, None, dashboard, dashboard.tiles[0].id)
+    ast = parse_one(result["sql"], read="postgres")
+    assert list(ast.find_all(exp.Sub)) and list(ast.find_all(exp.Abs))
+    assert all(
+        isinstance(node.left, exp.Cast) and isinstance(node.right, exp.Cast)
+        for node in ast.find_all(exp.Sub)
+    )
+    assert all(isinstance(node.this, exp.Cast) for node in ast.find_all(exp.Abs))
+    assert result["kpiComparison"]["percentScale"] == 100
+
+
+def test_stale_kpi_baseline_is_rejected_by_the_server_without_rebinding(context):
+    dashboard, tile, model, catalog = configured(
+        context,
+        kind="kpi",
+        dimensions=[],
+        kpiComparison={
+            "label": "Target",
+            "baseline": {
+                "output": {
+                    "table": "@report",
+                    "column": "deleted",
+                    "aggregate": "none",
+                    "kind": "calculated",
+                },
+                "scope": "group",
+            },
+            "favorable": "higher",
+        },
+    )
+    with pytest.raises(ApiProblem, match="baseline output was removed") as caught:
+        MeasureGraph(tile, catalog, model.definition)
+    assert caught.value.code == "invalid_calculated_measure"
+    assert tile.kpi_comparison.baseline.output.column == "deleted"

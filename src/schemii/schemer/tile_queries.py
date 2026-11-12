@@ -18,7 +18,7 @@ from schemii.schemoo.prototype import _literal
 from .models import ReportQuery
 from .time_analysis import bucket_expression, compile_time_analysis, validate_time_analysis, source_type
 from .dashboard_models import ReportOutput, tile_dimensions, base_measures
-from .measures import MeasureGraph, output_definitions, compile_measures, population_queries
+from .measures import MeasureGraph, output_definitions, compile_measures, population_queries, source_population_eligibility
 
 
 def _problem(message):
@@ -448,6 +448,10 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     if parent_conditions:
         parent = parent.where(*parent_conditions)
     conditions.append(exp.Exists(this=parent))
+    if population_scope=="source_population" and time_analysis:
+        eligibility=source_population_eligibility(tile,bucket_expression(
+            column((time_analysis.table,time_analysis.column)),time_analysis,time_kind))
+        conditions.append(eligibility)
     if population_scope=="qualifying_groups":
         qualifying_plan=_ordered(original,parent_statement.copy(),tile.limit,filters=filters)
         qualifying_parent=exp.select(exp.Literal.number(1)).from_(parse_one(qualifying_plan["sql"],read="postgres").subquery("population_groups"))

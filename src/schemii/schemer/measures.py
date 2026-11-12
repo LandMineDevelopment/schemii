@@ -395,17 +395,20 @@ def compile_measures(graph, statement, *, populations=None, qualification_filter
     if kpi:
         current = f"groups.{q('measure_' + str(graph.visible_indices()[0]))}"
         baseline = operand_sql(kpi.baseline)
+        numeric_current = f"CAST({current} AS NUMERIC)"
+        numeric_baseline = f"CAST({baseline} AS NUMERIC)"
+        difference = f"({numeric_current} - {numeric_baseline})"
         values = [
             baseline,
-            f"({current} - {baseline})",
-            f"(CAST(({current} - {baseline}) AS NUMERIC) / NULLIF(ABS({baseline}),0) * 100)",
+            difference,
+            f"({difference} / NULLIF(ABS({numeric_baseline}),0) * 100)",
         ]
         status = (
-            f"CASE WHEN {current} IS NULL OR {baseline} IS NULL THEN 'unavailable' WHEN {current} = {baseline} THEN 'at baseline' WHEN "
+            f"CASE WHEN {numeric_current} IS NULL OR {numeric_baseline} IS NULL THEN 'unavailable' WHEN {numeric_current} = {numeric_baseline} THEN 'at baseline' WHEN "
             + (
-                f"{current} > {baseline}"
+                f"{numeric_current} > {numeric_baseline}"
                 if kpi.favorable == "higher"
-                else f"{current} < {baseline}"
+                else f"{numeric_current} < {numeric_baseline}"
                 if kpi.favorable == "lower"
                 else "FALSE"
             )
@@ -459,6 +462,13 @@ def compile_measures(graph, statement, *, populations=None, qualification_filter
     }
 
 
+def source_population_eligibility(tile, calendar_expression):
+    """Shared calendar membership for population evaluation and its raw drill."""
+    if getattr(tile, "time_analysis", None) is None:
+        return None
+    return exp.Not(this=exp.Is(this=calendar_expression.copy(), expression=exp.Null()))
+
+
 def population_queries(
     graph, catalog, model, tile, query, original, *, qualifying=None
 ):
@@ -482,9 +492,15 @@ def population_queries(
         where = ""
         calendar = getattr(tile, "time_analysis", None)
         if calendar and scope == "source_population":
-            # Calendar reports omit undated records before grouping. Their
-            # source population must retain the same eligibility boundary.
-            where = f" WHERE raw.{q(axis_inputs[(calendar.table, calendar.column)])} IS NOT NULL"
+            eligibility = source_population_eligibility(
+                tile,
+                exp.column(
+                    axis_inputs[(calendar.table, calendar.column)],
+                    table="raw",
+                    quoted=True,
+                ),
+            )
+            where = " WHERE " + eligibility.sql(dialect="postgres")
         if scope == "qualifying_groups":
             relation = (
                 f"({qualifying['sql'].rstrip().removesuffix(';')})"
