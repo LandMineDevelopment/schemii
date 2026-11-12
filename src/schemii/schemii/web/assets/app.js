@@ -1,4 +1,6 @@
 import { setAssistantDesignSavedHandler } from "./ai-assistant.js";
+import { createProductContext, requireContextAccount } from "#common/product-context.js";
+let schemaHandoffPending = false;
 import { createInspectorDataController } from "./inspector-data.js";
 import { createTableEditor } from "./table-editor.js";
 import { api } from "./api.js";
@@ -1287,6 +1289,7 @@ function updateHeader() {
   elements.reloadConflictButton.disabled = state.catalogLoading;
   elements.applyConnectionLayoutButton.disabled = state.catalogLoading;
   updateDesignControls();
+  byId("create-model-from-schema").disabled = !state.activeWorkspace || state.catalogLoading || state.designSubmitting || state.historySubmitting || tableEditor.hasDraft || schemaHandoffPending;
   tableEditor.updateActions();
   elements.downloadCatalogButton.textContent = designWorkspace ? "Download desired design JSON" : "Download live catalog JSON";
   byId("deploy-design-button").hidden = !detachedDesignEligible(state.activeWorkspace, state.design);
@@ -5066,6 +5069,26 @@ function bindEvents() {
     state.relationPreview = null;
     state.relationPreviewError = null;
     state.relationPreviewPagingError = null;
+  });
+  byId("create-model-from-schema").addEventListener("click", async () => {
+    if (schemaHandoffPending || !state.activeWorkspace) return;
+    if (!state.activeWorkspace.connectionId) {
+      askConfirmation({ title: 'Choose a live source for a model', message: 'This detached desired design has no PostgreSQL source. Copy it to a concrete PostgreSQL target and review/apply its migration, then open that database-backed workspace to create a Schemoo model. Undeployed desired DDL cannot be used as a live model source.', label: 'Choose PostgreSQL target', tone: 'primary', callback: () => designDeployment.open() });
+      return;
+    }
+    const originId = state.activeWorkspace.id;
+    schemaHandoffPending = true; updateHeader();
+    try {
+      if (!await flushLayoutBeforeTransition()) return;
+      const origin = state.activeWorkspace;
+      if (origin?.id !== originId) throw new Error('The workspace changed. Send its current live schema again.');
+      const account = await requestJson('/api/v1/auth/me'); requireContextAccount(account, 'schemoo');
+      const workspace = await api.getWorkspace(origin.id);
+      const connection = await api.getConnection(workspace.connectionId);
+      if (state.activeWorkspace?.id !== origin.id || workspace.connectionId !== origin.connectionId || workspace.namespace !== origin.namespace) throw new Error('The workspace source changed. Reload it and send the current live schema.');
+      location.assign(createProductContext('schema', account, { connectionId: workspace.connectionId, connectionRevision: connection.revision, namespace: workspace.namespace }));
+    } catch (error) { errorToast(error); }
+    finally { schemaHandoffPending = false; updateHeader(); }
   });
   byId("deploy-design-button").addEventListener("click", async () => {
     elements.objectsDialog.close();

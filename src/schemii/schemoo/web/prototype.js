@@ -22,6 +22,8 @@ import { readExecution } from "/assets/common/query-execution.js";
 import { openModelLibrary, confirmModelDeletion, refreshModelLibraryActions, openSourceSelection } from "./model-library.js";
 import { createPreviewLibrary } from "./preview-library.js";
 import { installProductNavigation } from "#common/product-navigation.js";
+import { currentAccount, canAccessProduct } from "#common/accounts-session.js";
+import { createProductContext, consumeProductContext, requireContextAccount } from "#common/product-context.js";
 import { nodeColumns } from "./model-columns.js";
 import { openDerivedSource } from "./derived-dialog.js";
 import { repetitionDiagnostics, repetitionNotice, summarySeed } from "./repetition.js";
@@ -41,6 +43,7 @@ function setModelName(value) {
 }
 let catalog, draft, canvas, plan, diagnostics = {}, selected, storageKey, timer, version = 0, busy = false;
 let model, saving = false, dirty = false, conflicted = false, catalogTicket = 0;
+let contextHandoffPending = false, incomingSchemaContext = null;
 let initialLayout;
 let inspectorTab = "model", selectedFilterId = null;
 let sourceAdditions = {tables:[],columns:[],relationships:[],initialized:false};
@@ -117,6 +120,8 @@ function save() {
   if (!model || !draft) return;
   dirty = Object.values(changedParts(model, draft, $("model-name").value.trim(), initialLayout)).some(Boolean);
   $("save-model").disabled = saveBlocked() || !dirty;
+  $("create-dashboard-from-preview").disabled = !model || saveBlocked() || contextHandoffPending;
+  $("create-dashboard-from-preview").title = dirty ? "Save model, layout and preview changes before creating a dashboard" : "Review this saved preview in Schemer before creating a dashboard";
   $("draft-status").textContent = conflicted ? "Save conflict · reload to continue" : saving ? "Saving model…" : dirty ? "Unsaved changes" : `Saved · revision ${model.revision} · read-only preview`;
   previewLibrary.render();
 }
@@ -636,7 +641,8 @@ const tooltips = {
   fit: "Zoom and center to show all model objects.",
 };
 for (const [id, text] of Object.entries(tooltips)) $(id).dataset.uiTooltip = text;
-installProductNavigation(document.getElementById("product-navigation"), { activeProduct: "schemoo" });
+const contextualArrival = new URLSearchParams(location.search).has("handoff");
+if (!contextualArrival) installProductNavigation(document.getElementById("product-navigation"), { activeProduct: "schemoo" });
 const assistantButton = createIconButton({ icon: "assistant", label: "Open model assistant", className: "ui-button" });
 assistantButton.id = "ai-assistant-button";
 document.querySelector(".toolbar .tools").append(assistantButton);
@@ -717,7 +723,8 @@ async function loadModel(id) {
     onSelectNode:id=>{selected={node:id};inspectSelection();},
     onSelectEdge:id=>{selected={edge:id};inspectSelection();},
     onCreateConnection:edge=>{draft.edges.push(edge);selected={edge:edge.id};refreshForms();changed();inspectSelection();}});
-  const url=new URL(location.href); url.searchParams.set("model",model.id); history.replaceState(null,"",url);
+  incomingSchemaContext = null;
+  const url=new URL(location.href); url.searchParams.delete("handoff"); url.searchParams.set("model",model.id); history.replaceState(null,"",url);
   $("results").replaceChildren(element("p", {className:"empty",text:"Run a read-only preview."})); $("result-status").textContent="Nothing run yet";
   refreshForms();canvas.render();initialLayout=splitDraft(draft).layout;changed();$("workbench").inert=false;
   void previewLibrary.load(model.id);
@@ -760,8 +767,25 @@ async function saveModel() {
 
 $("model-name").oninput=()=>{setModelName($("model-name").value);save();};
 $("save-model").onclick=saveModel;
+$("create-dashboard-from-preview").onclick = async () => {
+  if (!model || saveBlocked() || contextHandoffPending) return;
+  if (dirty) { showError('Save model, layout and preview changes before creating a dashboard from this preview.'); return; }
+  const origin = model, ticket = version, explore = structuredClone(splitDraft(draft).explore);
+  if (explore.root !== model.definition.root) { showError('Save the intended model starting object or choose a preview that uses the saved model starting object before creating a dashboard.'); return; }
+  contextHandoffPending = true; save(); showError();
+  try {
+    const account = await requestJson('/api/v1/auth/me'); requireContextAccount(account, 'schemer');
+    const current = await requestJson(`${API}/models/${encodeURIComponent(origin.id)}`);
+    if (current.revision !== origin.revision || current.layoutRevision !== origin.layoutRevision || current.exploreRevision !== origin.exploreRevision) throw new Error('This saved model or preview changed in another tab. Reload the model and send its current preview.');
+    await requestJson(`${API}/models/${encodeURIComponent(origin.id)}/plan`, { method: 'POST', body: { expectedRevision: origin.revision, explore }, timeoutMs: 30000 });
+    if (model !== origin || version !== ticket || dirty || busy || saving) throw new Error('The model or preview changed while checking it. Save and send the current preview again.');
+    location.assign(createProductContext('preview', account, { modelId: origin.id, modelRevision: origin.revision, explore }));
+  } catch (error) { if (model === origin) showError(error.message); }
+  finally { contextHandoffPending = false; save(); }
+};
 function openLibrary() {
   return openModelLibrary(loadModel, {
+    sourceContext: incomingSchemaContext,
     onAssistant: () => assistant.open(),
     canDelete: () => !busy && !saving && !previewLibrary.isPending(),
     onDeleted: deleted => { if (deleted.id === model?.id) clearDeletedModel(); },
@@ -784,6 +808,13 @@ $("delete-model").onclick=async()=>{
 };
 window.addEventListener("beforeunload",event=>{if(dirty){event.preventDefault();event.returnValue="";}});
 try {
-  const id=new URL(location.href).searchParams.get("model");
-  if(id) await loadModel(id); else await openLibrary();
-}catch(error){showError(error.message);$("target").textContent="Model unavailable";$("workbench").inert=false;}
+  if (contextualArrival) {
+    const account = await currentAccount();
+    installProductNavigation(document.getElementById('product-navigation'), { activeProduct: canAccessProduct(account, 'schemoo') ? 'schemoo' : null, account });
+    incomingSchemaContext = consumeProductContext(new URLSearchParams(location.search).get('handoff'), account, 'schemoo');
+    await openLibrary();
+  } else {
+    const id=new URL(location.href).searchParams.get("model");
+    if(id) await loadModel(id); else await openLibrary();
+  }
+}catch(error){showError(error.message);$("target").textContent=contextualArrival ? "Saved context unavailable · return to its source and send again" : "Model unavailable";$("workbench").inert=!!contextualArrival;}
