@@ -4,10 +4,11 @@ import { downloadContent, createIconElement } from "#common/ui.js";
 import { validateCopyHandoff, openCopyHandoff } from "./ai-copy-handoff.js";
 import { requestJson } from "#common/http.js";
 import { renderMarkdown } from "#common/ai-markdown.js";
-import { createMessageNode, formatDate, modelValue, availableModels, populateModelOptions, apiKeyProviderDetails, providerConnectionState, zenConnectionNotice, sharedCodexConnectionNotice, sharedCodexPolicy, aiStatusPath } from "#common/ai-presentation.js";
+import { createMessageNode, formatDate, modelValue, availableModels, populateModelOptions } from "#common/ai-presentation.js";
 import { renderAiActivity } from "#common/ai-activity.js";
 import { enhanceModelPicker } from "#common/ai-model-picker.js";
 import { placeTurnActivity } from "#common/ai-timeline.js";
+import { createProviderConnections } from "#common/ai-provider-connections.js";
 import { createIconButton } from "./ui.js";
 import { permissionMode, permissionValues, permissionSummary, renderPermissionBundles, bindContextSelection } from "#common/ai-permissions.js";
 
@@ -84,8 +85,6 @@ let timelineProposals = [];
 let timelineOperations = [];
 let timelineSignature = "";
 let pendingDeleteChatId = null;
-let providerLogin = null;
-let loginTimer = null;
 let streamingResponse = null;
 let pendingProposal = null;
 let pendingProposalBatch = null;
@@ -558,141 +557,24 @@ function defaultCapabilities() {
   return { liveCatalog: false, structuredDataRead: false, monitorQueries: false, ...permissionValues({}, settings?.permissionActions || []), ...(settings?.defaultCapabilities || {}) };
 }
 
-function safeExternalUrl(value) {
-  try {
-    const url = new URL(value);
-    return ["http:", "https:"].includes(url.protocol) ? url.href : "";
-  } catch {
-    return "";
-  }
-}
-
-function clearProviderLogin() {
-  globalThis.clearTimeout(loginTimer);
-  providerLogin = null;
-}
-
-async function pollProviderLogin(login) {
-  try {
-    const state = await requestJson(`/api/v1/ai/prototype/logins/${encodeURIComponent(login.id)}`);
-    if (providerLogin !== login) return;
-    if (state.status === "succeeded") {
-      clearProviderLogin(); await refreshProviderStatus();
-      elements.settingsStatus.textContent = "Codex connected to your account."; return;
-    }
-    if (state.status !== "pending") throw new Error(state.message || "Sign-in expired. Connect again.");
-    Object.assign(login, { userCode: state.userCode, verificationUrl: state.verificationUrl });
-    renderProviders();
-    loginTimer = globalThis.setTimeout(() => void pollProviderLogin(login), 2000);
-  } catch (error) {
-    if (providerLogin !== login) return;
-    clearProviderLogin(); renderProviders(); elements.settingsStatus.textContent = error.message;
-  }
-}
-
-function codexConnection() {
-  const section = document.createElement("div"); section.className = "ai-auth-form";
-  if (providerLogin) {
-    const login = providerLogin;
-    const copy = document.createElement("p");
-    copy.textContent = login.userCode ? "Enter this code at OpenAI to connect your account:" : "Preparing device sign-in…";
-    section.append(copy);
-    if (login.userCode) {
-      const code = document.createElement("strong"); code.textContent = login.userCode; section.append(code);
-      const url = safeExternalUrl(login.verificationUrl);
-      if (url) { const link = document.createElement("a"); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Continue at OpenAI"; section.append(link); }
-    }
-    const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "ui-button compact"; cancel.textContent = "Cancel sign-in";
-    cancel.disabled = !login.id;
-    cancel.addEventListener("click", async () => {
-      cancel.disabled = true;
-      try {
-        await requestJson(`/api/v1/ai/prototype/logins/${encodeURIComponent(login.id)}`, { method: "DELETE" });
-        if (providerLogin === login) { clearProviderLogin(); renderProviders(); elements.settingsStatus.textContent = "Sign-in cancelled."; }
-      } catch (error) { elements.settingsStatus.textContent = error.message; cancel.disabled = false; }
-    });
-    section.append(cancel);
-  } else {
-    const connect = document.createElement("button"); connect.type = "button"; connect.className = "ui-button compact primary"; connect.textContent = "Connect Codex";
-    connect.addEventListener("click", async () => {
-      const login = {}; providerLogin = login; renderProviders(); elements.settingsStatus.textContent = "Preparing device sign-in…";
-      try {
-        const result = await requestJson("/api/v1/ai/prototype/login", { method: "POST" });
-        if (providerLogin !== login) return;
-        login.id = result.id; renderProviders(); void pollProviderLogin(login);
-      } catch (error) { clearProviderLogin(); renderProviders(); elements.settingsStatus.textContent = error.message; }
-    });
-    section.append(connect);
-  }
-  return section;
-}
-
-function apiKeyConnection(provider) {
-  const form = document.createElement("form"); form.className = "ai-auth-form";
-  const details = apiKeyProviderDetails[provider.id];
-  const label = document.createElement("label"); const copy = document.createElement("span"); copy.textContent = details.label;
-  const key = document.createElement("input"); key.type = "password"; key.required = true; key.autocomplete = "off"; label.append(copy, key);
-  const submit = document.createElement("button"); submit.type = "submit"; submit.className = "ui-button compact primary"; submit.textContent = "Connect";
-  form.append(label, submit);
-  form.addEventListener("submit", async event => {
-    event.preventDefault(); submit.disabled = true;
-    try {
-      await requestJson(`/api/v1/ai/credentials/${encodeURIComponent(provider.id)}`, { method: "POST", body: { apiKey: key.value } });
-      key.value = ""; await refreshProviderStatus(); elements.settingsStatus.textContent = `${provider.name} connected.`;
-    } catch (error) { elements.settingsStatus.textContent = error.message; submit.disabled = false; }
-  });
-  return form;
-}
-
-function renderProviders() {
-  if (!elements.providerList) return;
-  const providers = runtime?.providers || [];
-  if (!providers.length) {
-    const empty = document.createElement("p"); empty.className = "ai-provider-empty"; empty.textContent = runtime?.message || "No model providers are available."; elements.providerList.replaceChildren(empty); return;
-  }
-  elements.providerList.replaceChildren(...providers.map(provider => {
-    const card = document.createElement("details"); card.className = "ai-provider-card";
-    card.open = (providerLogin && provider.id === "openai-codex") || provider.id === (chat?.providerId || settings?.defaultProviderId);
-    const heading = document.createElement("summary"); heading.className = "ai-provider-heading";
-    const name = document.createElement("strong"); name.textContent = provider.name;
-    const state = document.createElement("span"); state.className = `ai-provider-state${provider.available ? " connected" : ""}`;
-    state.textContent = providerConnectionState(provider);
-    const caret = document.createElement("span"); caret.className = "ai-provider-caret"; caret.textContent = "⌄";
-    heading.append(name, state, caret); card.append(heading);
-    if (provider.privacy || provider.privacyNotice) {
-      const privacy = document.createElement("p"); privacy.className = "ai-provider-empty"; privacy.textContent = provider.privacy || provider.privacyNotice; card.append(privacy);
-    }
-    if (provider.id === "opencode") {
-      const notice = document.createElement("p"); notice.className = "ai-provider-empty"; notice.textContent = zenConnectionNotice; card.append(notice);
-    } else if (provider.id === "instance-codex") {
-      const notice = document.createElement("p"); notice.className = "ai-provider-empty"; notice.textContent = `${sharedCodexConnectionNotice} ${sharedCodexPolicy(provider)}`; card.append(notice);
-    } else if (provider.authenticated && ["openai-codex", "openai"].includes(provider.id)) {
-      const disconnect = document.createElement("button"); disconnect.type = "button"; disconnect.className = "ui-button compact"; disconnect.textContent = "Disconnect";
-      disconnect.addEventListener("click", async () => {
-        disconnect.disabled = true;
-        try {
-          await requestJson(`/api/v1/ai/credentials/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
-          await refreshProviderStatus(); elements.settingsStatus.textContent = `${provider.name} disconnected.`;
-        } catch (error) { elements.settingsStatus.textContent = error.message; disconnect.disabled = false; }
-      }); card.append(disconnect);
-    } else if (provider.id === "openai-codex") card.append(codexConnection());
-    else if (apiKeyProviderDetails[provider.id]) card.append(apiKeyConnection(provider));
-    return card;
-  }));
-}
-
-async function refreshProviderStatus({ refresh = false } = {}) {
-  const settingsSelection = elements.settingsModel.value.split("\u0000");
-  runtime = await requestJson(aiStatusPath("schemii", workspaceId(), refresh), { timeoutMs: refresh ? 20_000 : 10_000 }); models = availableModels(runtime);
-  loadModelOptions(elements.model, chat?.providerId || settings?.defaultProviderId, chat?.modelId || settings?.defaultModelId);
-  loadModelOptions(elements.settingsModel, settingsSelection[0] || chat?.providerId || settings?.defaultProviderId, settingsSelection[1] || chat?.modelId || settings?.defaultModelId);
-  populateScopedReasoningOptions(elements.settingsReasoning, runtime, selectedModel(elements.settingsModel), elements.settingsReasoning.value || chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", chat?.status === "working");
-  renderProviders(); updateContextControls();
-  modelPickers.forEach(picker => picker.sync());
-  if (refresh && (runtime.healthy === false || runtime.providers?.some(provider => provider.catalogError))) {
-    throw new Error(runtime.message || "Could not check available models. Try again.");
-  }
-}
+const providerConnections = createProviderConnections({
+  container: elements.providerList,
+  getScope: () => ({ product: "schemii", resourceId: workspaceId() }),
+  getSelectedProvider: () => chat?.providerId || settings?.defaultProviderId,
+  classes: { card: "ai-provider-card", heading: "ai-provider-heading", state: "ai-provider-state", caret: "ai-provider-caret", copy: "ai-provider-empty", auth: "ai-auth-form", button: "ui-button compact" },
+  onStatus: message => { elements.settingsStatus.textContent = message; },
+  onRuntime: next => {
+    const settingsSelection = elements.settingsModel.value.split("\u0000");
+    const reasoning = elements.settingsReasoning.value;
+    runtime = next; models = availableModels(next);
+    updateContextControls();
+    loadModelOptions(elements.settingsModel, settingsSelection[0] || chat?.providerId || settings?.defaultProviderId, settingsSelection[1] || chat?.modelId || settings?.defaultModelId);
+    populateScopedReasoningOptions(elements.settingsReasoning, runtime, selectedModel(elements.settingsModel), reasoning || chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", chat?.status === "working");
+    modelPickers.forEach(picker => picker.sync());
+  },
+});
+function renderProviders() { providerConnections.render(); }
+async function refreshProviderStatus(options) { return providerConnections.refresh(options); }
 
 async function createConversation({ model = defaultModel(), capabilities = defaultCapabilities(), reasoningEffort = chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", title = "New conversation" } = {}) {
   if (!model) throw new Error("No AI model is configured for this deployment.");
@@ -704,11 +586,13 @@ async function createConversation({ model = defaultModel(), capabilities = defau
 
 async function loadAssistant() {
   const workspace = workspaceId(); if (!workspace) throw new Error("Open a workspace first.");
-  let list;
-  [design, settings, runtime, list] = await Promise.all([
-    requestJson(`/api/v1/schemii/workspaces/${workspace}/design`), requestJson("/api/v1/schemii/ai/settings"), requestJson(aiStatusPath("schemii", workspace)),
+  providerConnections.scopeChanged();
+  const [nextDesign, nextSettings, , list] = await Promise.all([
+    requestJson(`/api/v1/schemii/workspaces/${workspace}/design`), requestJson("/api/v1/schemii/ai/settings"), providerConnections.refresh(),
     requestJson(`/api/v1/schemii/ai/chats?workspaceId=${encodeURIComponent(workspace)}`),
   ]);
+  if (workspace !== workspaceId()) return;
+  design = nextDesign; settings = nextSettings;
   models = availableModels(runtime);
   chats = list.chats; chat = chats[0] || null;
   if (!chat && models.length) await createConversation(); updateContextControls();
@@ -1124,4 +1008,4 @@ elements.body?.addEventListener("click", async event => {
   }
 });
 
-window.addEventListener("beforeunload", () => { globalThis.clearTimeout(pollTimer); globalThis.clearTimeout(loginTimer); globalThis.clearInterval(elapsedTimer); });
+window.addEventListener("beforeunload", () => { globalThis.clearTimeout(pollTimer); providerConnections.dispose(); globalThis.clearInterval(elapsedTimer); });
