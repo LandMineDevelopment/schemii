@@ -259,65 +259,88 @@ def test_stop_confirmation_without_stock_lifespan_evidence_is_rejected(monkeypat
 
 
 def test_fixture_wrapper_preserves_stock_messages_and_observes_real_owner_counts(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
     import asyncio
-    from dataclasses import make_dataclass
+    from dataclasses import asdict
+    import psycopg
     from dev.pressure.app import ObservedApplication
-
-    Snapshot = make_dataclass(
-        "Snapshot",
-        [
-            (name, object)
-            for name in (
-                "maximum",
-                "active",
-                "peak_active",
-                "admitted",
-                "rejected",
-                "connection_failures",
-                "connection_seconds",
-                "closed",
-            )
-        ],
+    from schemii.common.errors import (
+        MetadataCapacityError,
+        MetadataStorageUnavailableError,
+    )
+    from schemii.common.metadata.config import MetadataConfig
+    from schemii.common.metadata.database import (
+        MetadataConnectionFactory,
+        MetadataReadinessProbe,
     )
 
-    class Owner:
-        def __init__(self, maximum):
-            self.maximum, self.closed = maximum, False
+    def forbidden_contact(*args, **kwargs):
+        raise AssertionError("Real database contact/query forbidden")
 
-        def admission_snapshot(self):
-            return Snapshot(
-                self.maximum,
-                0 if self.closed else self.maximum,
-                self.maximum,
-                2,
-                0,
-                0,
-                0.0,
-                self.closed,
-            )
+    monkeypatch.setattr(psycopg, "connect", forbidden_contact)
+    tmp_path.chmod(0o700)
+    password = tmp_path / "test-owned-password"
+    password.write_text("offline-test-owned-password")
+    password.chmod(0o600)
+    config = MetadataConfig(
+        dsn="host=invalid.test dbname=offline user=offline",
+        password_file=password,
+        encryption_key_file=tmp_path / "never-open-key",
+        maximum_connections=2,
+    )
+    natives, connect_calls = [], []
+    fail_connect = False
 
-    normal, ready = Owner(2), Owner(1)
+    class Native:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+        cursor = forbidden_contact
+
+    def offline_connect(*args, **kwargs):
+        connect_calls.append(True)
+        if fail_connect:
+            raise psycopg.OperationalError("offline injected connection failure")
+        connection = Native()
+        natives.append(connection)
+        return connection
+
+    normal = MetadataConnectionFactory(config, connect=offline_connect)
+    ready = MetadataConnectionFactory(
+        config, connect=offline_connect, maximum_connections=1
+    )
+    held = [normal(), normal(), ready()]
+    with pytest.raises(MetadataCapacityError):
+        normal()
+    assert len(connect_calls) == 3
 
     class Application:
         state = SimpleNamespace(
             services=SimpleNamespace(
                 metadata=SimpleNamespace(
                     connection_factory=normal,
-                    readiness_probe=SimpleNamespace(_connection_factory=ready),
+                    readiness_probe=MetadataReadinessProbe(ready),
                 )
             )
         )
 
         async def __call__(self, scope, receive, send):
+            nonlocal fail_connect
             assert await receive() == {"type": "lifespan.startup"}
             await send({"type": "lifespan.startup.complete"})
             assert await receive() == {"type": "lifespan.shutdown"}
-            normal.closed = ready.closed = True
+            for connection in held:
+                connection.close()
+            fail_connect = True
+            with pytest.raises(MetadataStorageUnavailableError):
+                normal()
+            normal.close()
+            ready.close()
             await send({"type": "lifespan.shutdown.complete"})
 
-    tmp_path.chmod(0o700)
     wrapper = ObservedApplication(Application(), "pressure_" + "a" * 32, tmp_path)
     events = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
     sent, running = [], []
@@ -337,15 +360,18 @@ def test_fixture_wrapper_preserves_stock_messages_and_observes_real_owner_counts
         {"type": "lifespan.shutdown.complete"},
     ]
     assert running[0]["normal"]["counts"]["active"] == 2
-    assert (
-        result["stage"] == "shutdown-complete"
-        and result["normal"]["counts"]["closed"] is True
-    )
-    assert (
-        result["normal"]["counts"]["active"]
-        == result["readiness"]["counts"]["active"]
-        == 0
-    )
+    assert running[0]["normal"]["counts"]["rejected"] == 1
+    assert running[0]["readiness"]["counts"]["active"] == 1
+    assert result["stage"] == "shutdown-complete"
+    for name, owner in (("normal", normal), ("readiness", ready)):
+        counts = asdict(owner.admission_snapshot())
+        counts["maximum"] = counts.pop("maximum_connections")
+        assert result[name] == {"status": "observed", "counts": counts}
+        assert counts["closed"] is True and counts["active"] == 0
+    assert result["normal"]["counts"]["admitted"] == 3
+    assert result["normal"]["counts"]["connection_failures"] == 1
+    assert result["normal"]["counts"]["connection_seconds"] > 0
+    assert len(connect_calls) == 4 and all(connection.closed for connection in natives)
     assert result["instrumentation"]["stockCapacityEligible"] is False
     assert wrapper.thread is not None and not wrapper.thread.is_alive()
 
@@ -394,3 +420,113 @@ def test_peak_requires_actual_owner_sample_inside_pressure_window_same_process()
     event["normal"]["counts"]["active"] = 0
     with pytest.raises(RuntimeError, match="saturated_owner_count_not_observed"):
         p.observed_peak(sample, process_pid=7, started_at=at.isoformat())
+
+
+def test_actual_metadata_owners_are_observed_without_connecting_before_and_after_close(
+    tmp_path,
+):
+    from dataclasses import asdict
+    from dev.pressure.app import ObservedApplication
+    from schemii.common.metadata.config import MetadataConfig
+    from schemii.common.metadata.database import (
+        MetadataConnectionFactory,
+        MetadataReadinessProbe,
+    )
+
+    calls = []
+
+    def forbidden_connect(*args, **kwargs):
+        calls.append(True)
+        raise AssertionError("Database contact forbidden")
+
+    config = MetadataConfig(
+        dsn="host=invalid.test dbname=offline user=offline",
+        password_file="/never-open/offline-password",
+        encryption_key_file="/never-open/offline-key",
+        maximum_connections=2,
+    )
+    normal = MetadataConnectionFactory(config, connect=forbidden_connect)
+    readiness = MetadataConnectionFactory(
+        config, connect=forbidden_connect, maximum_connections=1
+    )
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            services=SimpleNamespace(
+                metadata=SimpleNamespace(
+                    connection_factory=normal,
+                    readiness_probe=MetadataReadinessProbe(readiness),
+                )
+            )
+        )
+    )
+    tmp_path.chmod(0o700)
+    wrapper = ObservedApplication(app, "pressure_" + "a" * 32, tmp_path)
+    wrapper.startup_complete, wrapper.stage = True, "running"
+    for closed in (False, True):
+        if closed:
+            normal.close()
+            readiness.close()
+            wrapper.stage = "shutdown-complete"
+        wrapper.write()
+        value = json.loads((tmp_path / "observation.json").read_text())
+        for name, owner in (("normal", normal), ("readiness", readiness)):
+            expected = asdict(owner.admission_snapshot())
+            expected["maximum"] = expected.pop("maximum_connections")
+            assert value[name] == {"status": "observed", "counts": expected}
+            assert value[name]["counts"]["closed"] is closed
+            assert value[name]["counts"]["active"] == 0
+        assert not calls
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"maximum_connections": 0},
+        {"maximum_connections": True},
+        {"active": -1},
+        {"active": 1},
+        {"peak_active": 3},
+        {"admitted": True},
+        {"rejected": -1},
+        {"connection_failures": 0.0},
+        {"connection_seconds": float("nan")},
+        {"connection_seconds": float("inf")},
+        {"connection_seconds": -0.1},
+        {"connection_seconds": True},
+        {"closed": 1},
+    ],
+)
+def test_invalid_actual_owner_snapshot_never_becomes_observed(changes):
+    from dataclasses import replace
+    from dev.pressure.app import owner_snapshot
+    from schemii.common.metadata.database import MetadataAdmissionSnapshot
+
+    snapshot = MetadataAdmissionSnapshot(2, 0, 0, 0, 0, 0, 0.0, False)
+    owner = SimpleNamespace(admission_snapshot=lambda: replace(snapshot, **changes))
+    assert owner_snapshot(owner) == {
+        "status": "unknown",
+        "reason": "owner_snapshot_failed",
+    }
+
+
+@pytest.mark.parametrize("shape", ["missing", "unexpected", "old-dto"])
+def test_incomplete_or_new_owner_contract_stays_unknown(shape):
+    from dataclasses import asdict, make_dataclass
+    from dev.pressure.app import owner_snapshot
+    from schemii.common.metadata.database import MetadataAdmissionSnapshot
+
+    values = asdict(MetadataAdmissionSnapshot(2, 0, 0, 0, 0, 0, 0.0, False))
+    if shape == "missing":
+        values.pop("connection_seconds")
+    elif shape == "unexpected":
+        values["new_owner_counter"] = 0
+    else:
+        values["maximum"] = values.pop("maximum_connections")
+    ChangedSnapshot = make_dataclass(
+        "UnsupportedContract", [(name, object) for name in values]
+    )
+    owner = SimpleNamespace(admission_snapshot=lambda: ChangedSnapshot(**values))
+    assert owner_snapshot(owner) == {
+        "status": "unknown",
+        "reason": "owner_snapshot_failed",
+    }

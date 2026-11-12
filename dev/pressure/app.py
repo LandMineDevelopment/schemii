@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -21,7 +22,7 @@ from threading import Event, RLock, Thread
 INTERVAL = 0.1
 MAXIMUM_BYTES = 16384
 FIELDS = {
-    "maximum",
+    "maximum_connections",
     "active",
     "peak_active",
     "admitted",
@@ -44,8 +45,24 @@ def owner_snapshot(owner):
         for name in FIELDS - {"closed", "connection_seconds"}:
             if type(counts[name]) is not int or counts[name] < 0:
                 raise ValueError()
-        if not 0 <= counts["active"] <= counts["peak_active"] <= counts["maximum"]:
+        seconds = counts["connection_seconds"]
+        if (
+            type(seconds) not in {int, float}
+            or not math.isfinite(seconds)
+            or seconds < 0
+        ):
             raise ValueError()
+        if (
+            counts["maximum_connections"] < 1
+            or not 0
+            <= counts["active"]
+            <= counts["peak_active"]
+            <= counts["maximum_connections"]
+        ):
+            raise ValueError()
+        # Adapt the existing production owner contract to the fixed private DTO.
+        # Schema drift stays unknown instead of inventing or defaulting counters.
+        counts["maximum"] = counts.pop("maximum_connections")
         return {"status": "observed", "counts": counts}
     except Exception:
         return {"status": "unknown", "reason": "owner_snapshot_failed"}
