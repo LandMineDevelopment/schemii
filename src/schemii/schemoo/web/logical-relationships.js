@@ -18,11 +18,35 @@ export function catalogTable(source, catalog) {
 }
 export function sourceLabel(source, catalog) {
   const [namespace, name] = JSON.parse(sourceIdentity(source, catalog));
-  return namespace === (catalog.namespace || "public") ? name : `${namespace}.${name}`;
+  const quote = name => /^[A-Za-z_][A-Za-z0-9_$]*$/.test(name) ? name : `"${name.replaceAll('"', '""')}"`;
+  return namespace === (catalog.namespace || "public") ? quote(name) : `${quote(namespace)}.${quote(name)}`;
 }
 export function sourceNodeId(source, catalog) {
   const [namespace, name] = JSON.parse(sourceIdentity(source, catalog));
   return namespace === (catalog.namespace || "public") ? name : JSON.stringify([namespace, name]);
+}
+/** Reserve all legacy default-schema names before allocating other source IDs. */
+export function sourceNodeIds(sources, catalog) {
+  const identities = [...new Set(sources.map(source => sourceIdentity(source, catalog)))];
+  const compare = (left, right) => {
+    const a = Array.from(left), b = Array.from(right);
+    for (let i = 0; i < Math.min(a.length, b.length); i++) {
+      if (a[i] !== b[i]) return a[i].codePointAt(0) - b[i].codePointAt(0);
+    }
+    return a.length - b.length;
+  };
+  const ids = new Map(), used = new Set();
+  for (const identity of identities) {
+    const [namespace, name] = JSON.parse(identity);
+    if (namespace === (catalog.namespace || "public")) { ids.set(identity, name); used.add(name); }
+  }
+  for (const identity of identities.filter(identity => !ids.has(identity)).sort(compare)) {
+    const base = Array.from(identity).slice(0, 192).join("");
+    let id = base;
+    for (let suffix = 2; used.has(id); suffix++) id = `${base}_${suffix}`;
+    ids.set(identity, id); used.add(id);
+  }
+  return ids;
 }
 export function relationshipColumns(relationship) {
   return relationship?.columns ?? (relationship?.sourceColumn && relationship?.targetColumn

@@ -276,7 +276,7 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
       creating = true; form.inert = true; status.textContent = "Creating selected model…";
       try {
         const parts = splitDraft(importedDraft(catalog, selection.getSelection()));
-        const model = await requestJson(`${API}/models`, { method: "POST", body: { name: name.value.trim(), connectionId, namespace, ...parts, catalogFingerprint: catalog.fingerprint }, timeoutMs: 30000 });
+        const model = await requestJson(`${API}/models`, { method: "POST", body: { name: name.value.trim(), connectionId, namespace, ...parts, catalogFingerprint: catalog.fingerprint, catalogNamespaces: catalog.namespaces || [namespace] }, timeoutMs: 30000 });
         if (!current()) return;
         create.disabled = true;
         if (!await choose(model) && current()) await openModelLibrary(onOpen, { onDeleted, canDelete, onAssistant });

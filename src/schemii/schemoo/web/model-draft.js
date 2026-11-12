@@ -1,4 +1,4 @@
-import { sourceIdentity, sourceNodeId, relationshipColumns } from "./logical-relationships.js";
+import { sourceIdentity, sourceNodeIds, sourceLabel, relationshipColumns } from "./logical-relationships.js";
 // Prototype examples describe model metadata only; every edge still references a live FK.
 export const MODEL_LIMITS = Object.freeze({ sources: 100, relationships: 200, fields: 1000 });
 const selectionFor = table => ({table: table.name, ...(table.namespace ? {namespace: table.namespace} : {}), columns: table.columns.map(column => column.name)});
@@ -21,7 +21,8 @@ export function importedDraft(catalog, selection = (catalog.tables || []).map(se
     selected.set(identity,new Set(columns));
   }
   if (selected.size > MODEL_LIMITS.sources) throw new Error("Choose at most 100 sources for one model.");
-  const exposedFields = selection.flatMap(item => [...selected.get(sourceIdentity(item,catalog))].map(column => ({table:sourceNodeId(item,catalog),column,aggregate:"none"})));
+  const nodeIds = sourceNodeIds(selection, catalog);
+  const exposedFields = selection.flatMap(item => [...selected.get(sourceIdentity(item,catalog))].map(column => ({table:nodeIds.get(sourceIdentity(item,catalog)),column,aggregate:"none"})));
   if (!exposedFields.length) throw new Error("Select at least one field before creating the model.");
   if (exposedFields.length > MODEL_LIMITS.fields) throw new Error("Choose at most 1,000 exposed fields for one model.");
   const relationships = (catalog.relationships || []).filter(relationship => selected.has(sourceIdentity(relationship,catalog,"source")) && selected.has(sourceIdentity(relationship,catalog,"target")));
@@ -32,7 +33,7 @@ export function importedDraft(catalog, selection = (catalog.tables || []).map(se
   if ([...dependencies.values()].some(columns=>columns.size>MODEL_LIMITS.fields)) throw new Error("A selected source exceeds 1,000 fields including required keys and joins. Choose fewer fields or a smaller subset.");
   const nodes = selection.map(item => {
     const position=(catalog.positions || []).find(position=>sourceIdentity(position,catalog)===sourceIdentity(item,catalog));
-    return {id:sourceNodeId(item,catalog),table:item.table,label:(item.namespace && item.namespace !== catalog.namespace ? `${item.namespace}.${item.table}` : item.table).slice(0,100),
+    return {id:nodeIds.get(sourceIdentity(item,catalog)),table:item.table,label:sourceLabel(item,catalog).slice(0,100),
       ...(item.namespace ? {namespace:item.namespace} : {}),...(Number.isFinite(position?.x)&&Number.isFinite(position?.y)?{x:position.x,y:position.y}:{})};
   });
   const root=nodes.find(node=>selected.get(sourceIdentity(node,catalog)).size)?.id || nodes[0].id;
