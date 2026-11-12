@@ -72,7 +72,8 @@ Selection: --persona modeler --agents 1..10 OR --accounts USER1,USER2
            --tracks lifecycle,canvas,rules,query,chat --parallel 1..10
            --viewports desktop,mobile --fixtures /path/manifest.json
            --credentials-file /private/accounts.json --headless
-Native:    --browser native --controller t3 --reviewer-account USER --runtime-slots N
+Native:    --browser native --controller t3 --reviewer-accounts USER1,USER2 --runtime-slots N
+           --reviewer-account USER remains supported for one reviewer
            Native UI tools act directly; session CLI records ownership/evidence only.
 Workers:   --controller t3|codex --agent-model MODEL --agent-reasoning EFFORT
            --agent-timeout SECONDS
@@ -99,7 +100,7 @@ Exit codes: 0 success, 1 failure, 2 invalid args, 3 awaiting agent dispatch,
 `;
 function invalid(message) { return Object.assign(new Error(message), { exitCode: 2 }); }
 function blocked(message) { return Object.assign(new Error(message), { exitCode: 4 }); }
-const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout','persona','reviewer-account','runtime-slots'];
+const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout','persona','reviewer-account','reviewer-accounts','runtime-slots'];
 const commandOptions = {
   help: [], '--help': [], '-h': [], personas: [],
   setup: ['copies-per-persona','admin-credentials'], 'provision-chat': ['account','admin-credentials','model','reasoning'],
@@ -155,7 +156,12 @@ async function selection(o, reservedAccounts) {
   const controller = o.controller || 't3';
   if (!['t3','codex'].includes(controller)) throw new Error('--controller must be t3 or codex.');
   if (browser === 'native' && controller !== 't3') throw new Error('--browser native requires --controller t3 and thread-owned schemii_browser tools.');
-  if (o.agents !== undefined && !(browser === 'native' ? /^(?:[1-9]|10|11)$/ : /^(?:[1-9]|10)$/).test(o.agents)) throw new Error('--agents must be 1 through 10 (11 including reserved reviewer for native).');
+  if (o['reviewer-account'] !== undefined && o['reviewer-accounts'] !== undefined) throw new Error('--reviewer-account and --reviewer-accounts are mutually exclusive.');
+  const reviewerAccounts = o['reviewer-accounts'] !== undefined ? o['reviewer-accounts'].split(',').map(x => x.trim()) : o['reviewer-account'] !== undefined ? [o['reviewer-account'].trim()] : [];
+  if (reviewerAccounts.some(a => !/^[a-zA-Z0-9_.@-]{1,64}$/.test(a)) || new Set(reviewerAccounts.map(a => a.toLowerCase())).size !== reviewerAccounts.length) throw new Error('Reviewer accounts must be a nonempty list of unique usernames.');
+  if (browser === 'native' && !reviewerAccounts.length) throw new Error('Native QA requires --reviewer-account or --reviewer-accounts naming separately selected accounts.');
+  const maxAgents = browser === 'native' ? 10 + reviewerAccounts.length : 10;
+  if (o.agents !== undefined && (!/^[1-9][0-9]*$/.test(o.agents) || !Number.isSafeInteger(Number(o.agents)) || Number(o.agents) > maxAgents)) throw new Error(`--agents must be 1 through ${maxAgents} (${browser === 'native' ? 'at most ten testers plus the selected reviewers' : 'testers'}).`);
   const defaultAccounts = Array.from({length: Number(o.agents || 2)}, (_,i)=>`qa_subagent_${String(i+1).padStart(2,'0')}`).join(',');
   let persona=null,poolCandidates=[];
   if(o.persona) {
@@ -185,13 +191,16 @@ async function selection(o, reservedAccounts) {
   if (o.parallel !== undefined && !/^(?:[1-9]|10)$/.test(o.parallel)) throw new Error('--parallel must be an integer from 1 through 10.');
   const parallel = Number(o.parallel || Math.min(2, accounts.length));
   if (!Number.isInteger(parallel) || parallel < 1 || parallel > 10 || parallel > accounts.length) throw new Error('Parallelism must be 1–10 and no greater than the selected accounts.');
-  const reviewerAccount = o['reviewer-account'] || null;
+  const reviewerAccount = reviewerAccounts.length === 1 ? reviewerAccounts[0] : null;
+  const testerCount = accounts.length - reviewerAccounts.length;
   const runtimeSlots = o['runtime-slots'] === undefined ? null : Number(o['runtime-slots']);
   if (browser === 'native') {
-    if (!reviewerAccount || !accounts.includes(reviewerAccount) || accounts.length < 2) throw new Error('Native QA requires --reviewer-account naming a separately selected account.');
-    if (!/^[0-9]+$/.test(o['runtime-slots'] || '') || !Number.isSafeInteger(runtimeSlots) || runtimeSlots < parallel + 2) throw new Error('Native QA requires observed --runtime-slots for active testers plus coordinator and independent reviewer.');
-    if (parallel > accounts.length - 1) throw new Error('Native --parallel counts testers; reserve one selected reviewer account separately.');
-  } else if (reviewerAccount || runtimeSlots !== null) throw new Error('--reviewer-account and --runtime-slots currently require --browser native.');
+    if (reviewerAccounts.some(a => !accounts.includes(a))) throw new Error('Every reviewer account must be a separately selected --accounts member.');
+    if (testerCount < 1 || testerCount > 10) throw new Error('Native QA requires 1–10 tester accounts, distinct from all selected reviewer accounts.');
+    if (!/^[0-9]+$/.test(o['runtime-slots'] || '') || !Number.isSafeInteger(runtimeSlots) || runtimeSlots < parallel + reviewerAccounts.length + 1) throw new Error('Native QA requires observed --runtime-slots for active testers plus one coordinator and every selected reviewer.');
+    if (parallel > testerCount) throw new Error('Native --parallel counts testers; reserve every selected reviewer account separately.');
+  } else if (reviewerAccounts.length || runtimeSlots !== null) throw new Error('--reviewer-account, --reviewer-accounts and --runtime-slots currently require --browser native.');
+  const actorCounts = { coordinators: 1, testers: testerCount, reviewers: reviewerAccounts.length, activeTesters: parallel, requiredSlots: parallel + reviewerAccounts.length + 1 };
   const products = list(o.products, 'schemoo');
   if (products.some(x => !['schemii','schemoo','schemer'].includes(x))) throw new Error('Unknown product.');
   const tracks = list(o.tracks, 'harness');
@@ -231,7 +240,7 @@ async function selection(o, reservedAccounts) {
       if (Object.hasOwn(s, 'product') && !products.includes(s.product)) throw new Error(`Scenario ${s.id} product must be one of the selected products.`);
       return (s.product ? [s.product] : products).flatMap(product => viewports.map(viewportName => expandFixtureScenario(s,product,viewportName)));
     });
-    return { id: `lane-${i+1}`, username, products, track, role: username === reviewerAccount ? 'reviewer' : 'tester', status: 'queued', generation: 0,
+    return { id: `lane-${i+1}`, username, products, track, role: reviewerAccounts.includes(username) ? 'reviewer' : 'tester', status: 'queued', generation: 0,
       viewport: viewports[0] === 'mobile' ? {width:390,height:844} : {width:1280,height:800},
       viewports, resources: spec.resources || {}, checks, url: spec.url,
       persona:persona?.id || spec.persona || null, expectedCapabilities:spec.expectedCapabilities, deniedProducts:spec.deniedProducts || [], writeAuthorization,
@@ -240,7 +249,7 @@ async function selection(o, reservedAccounts) {
   for (const l of lanes) {
     if (!l.scenarios.length || new Set(l.scenarios.map(x=>x.id)).size !== l.scenarios.length || l.scenarios.some(x=>!/^[a-z0-9-]+$/.test(x.id || ''))) throw new Error('Scenario IDs must be unique kebab-case values.');
   }
-  return { browser, reviewerAccount, runtimeSlots, accounts, persona:persona?.id || null, poolCandidates, agents:accounts.length, parallel, controller, agentModel, agentReasoning, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
+  return { browser, reviewerAccount, reviewerAccounts, actorCounts, runtimeSlots, accounts, persona:persona?.id || null, poolCandidates, agents:accounts.length, parallel, controller, agentModel, agentReasoning, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
     baseURL:'https://localhost:8001',previewURL:'https://omarchy.taile4f57f.ts.net',
     fixtureMode:o.fixtures ? 'declared-retained-resources' : 'harness-only-no-app-data-writes',
     fixtureVersion:fixture.version || fixture.fixtureVersion || null,
@@ -402,7 +411,7 @@ async function execute(command,o) {
       await access(chromium.executablePath());
       if(!config.headless&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY) throw new Error('No display available. Use explicit --headless for functional-only browser operation.');
     } catch(error) { throw blocked(`Prerequisite check failed: ${error instanceof SyntaxError ? 'Malformed private credential JSON.' : error.message}`); }
-    if(command==='doctor'){console.log(JSON.stringify({dependencies:'ready',browser:config.browser === 'native' ? 'thread-owned-native-after-claim' : 'isolated-processes',accounts:config.accounts,requestedParallel:config.parallel,controller:config.controller,agentModel:config.agentModel,agentReasoning:config.agentReasoning,agentTimeout:config.agentTimeout,agentCapacity:config.controller==='codex'?'Independent Codex CLI workers; capacity limited by --parallel (maximum 10).':'Coordinator must verify live runtime slots before claiming lanes.',browserPreflight:'pending prepare'},null,2));return;}
+    if(command==='doctor'){console.log(JSON.stringify({dependencies:'ready',browser:config.browser === 'native' ? 'thread-owned-native-after-claim' : 'isolated-processes',accounts:config.accounts,reviewerAccount:config.reviewerAccount,reviewerAccounts:config.reviewerAccounts,actorCounts:config.actorCounts,runtimeSlots:config.runtimeSlots,requestedParallel:config.parallel,controller:config.controller,agentModel:config.agentModel,agentReasoning:config.agentReasoning,agentTimeout:config.agentTimeout,agentCapacity:config.controller==='codex'?'Independent Codex CLI workers; capacity limited by --parallel (maximum 10).':'Coordinator must verify live runtime slots before claiming lanes.',browserPreflight:'pending prepare'},null,2));return;}
     const id=`qa-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`,dir=runPath(id);
     await privateDir(dir);
     const runtime=join('/tmp',`schemii-qa-${process.getuid()}`,id);

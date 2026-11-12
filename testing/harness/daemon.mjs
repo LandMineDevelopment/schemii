@@ -298,7 +298,7 @@ async function controllerRequest(req){
   if(req.command==='ping')return {alive:true};
   if(stopping&&['stop','cleanup'].includes(req.command))return {status:'stopping',preserved:'QA accounts, app data, credentials, evidence and reports'};
   if(starting || stopping)throw new Error(starting?'Startup is still running; inspect status.':'Controller is stopping.');
-  if(req.command==='run')return {status:'awaiting-agent-dispatch',available:run.lanes.filter(l=>l.status==='ready'&&l.role!=='reviewer').map(brief),reviewer:run.lanes.filter(l=>l.status==='ready'&&l.role==='reviewer').map(brief),queued:run.lanes.filter(l=>l.status==='queued').map(l=>l.id),requiredSlots:'One coordinator + requested active testers + independent verifier. Check actual runtime availability before claim.'};
+  if(req.command==='run')return {status:'awaiting-agent-dispatch',available:run.lanes.filter(l=>l.status==='ready'&&l.role!=='reviewer').map(brief),reviewer:run.lanes.filter(l=>l.status==='ready'&&l.role==='reviewer').map(brief),queued:run.lanes.filter(l=>l.status==='queued').map(l=>l.id),actorCounts:run.actorCounts,requiredSlots:`One coordinator + ${run.parallel} active testers + ${run.lanes.filter(l=>l.role==='reviewer').length} independent reviewers. Check actual runtime availability before claim.`};
   const task=transition.then(async()=>{
     if(req.command==='claim'){
       return claim(lane(req.laneId),req.agent);
