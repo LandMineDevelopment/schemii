@@ -61,6 +61,7 @@ h1 { margin: 4px 0 0; font-size: 19px; } h2 { margin: 12px 0; font-size: 15px; }
 #model-shell { flex: 1; display: flex; min-height: 0; position: relative; }
 #canvas-area { flex: 1; min-width: 0; min-height: 0; position: relative; overflow: hidden; } #canvas-host { position: absolute; inset: 0; }
 .canvas-banner { position: absolute; z-index: 3; left: 14px; top: 14px; right: 14px; display: flex; justify-content: space-between; gap: 10px; pointer-events: none; font-size: 11px; }
+.canvas-banner button { pointer-events: auto; }
 .canvas-banner .sm-help-button { pointer-events: auto; flex-shrink: 0; align-self: flex-start; margin-right: auto; background: #10151de8; }
 #graph-status,.legend { padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: #10151de8; }
 #graph-status.has-cycles { color: #ffb4bd; border-color: #8d4049; }

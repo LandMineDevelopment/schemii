@@ -138,6 +138,9 @@ for (const outcome of ['success', 'error']) {
     await expect(review).toContainText('creation is still pending');
     await expect.poll(async () => {
       await review.getByRole('button', { name: 'Review model list', exact: true }).click();
+      // Wait for this replacement review before sampling its outcome. Reading
+      // immediately after the click only observes the synchronous loading view.
+      await expect(confirm).toBeDisabled();
       return review.textContent();
     }).toMatch(outcome === 'success' ? /create response identified a saved model/ : /create outcome is uncertain/);
     await expect(confirm).toBeDisabled();
@@ -147,6 +150,7 @@ for (const outcome of ['success', 'error']) {
       await expect(review.getByRole('button', { name: /^Review saved model/ })).toHaveCount(0);
     }
     expect(state.creates).toHaveLength(1);
+    await test.info().attach(`pending-model-create-${outcome}-${test.info().project.name}`, { body: await page.screenshot(), contentType: 'image/png' });
   });
 }
 
