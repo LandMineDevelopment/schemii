@@ -424,3 +424,13 @@ def test_report_controls_roundtrip_independently_of_batch_size_and_reject_bad_pr
             DashboardTile.model_validate({**body, "aggregateFilters": [{**FIELD, "aggregate": "count", **item}]})
     with pytest.raises(ValidationError, match="unique"):
         DashboardTile.model_validate({**body, "sort": body["sort"] * 2})
+
+
+@pytest.mark.parametrize("value", [9007199254740993, -9007199254740993, 0.1, -0.125, 1e-8])
+def test_backend_numeric_predicate_json_types_are_not_restricted_by_editor_precision(value):
+    import json
+    from schemii.schemer.dashboard_models import AggregateFilter
+    payload = {**FIELD, "aggregate": "count", "operator": "gte", "value": value}
+    parsed = AggregateFilter.model_validate_json(json.dumps(payload))
+    assert parsed.value == value and type(parsed.value) is type(value)
+    assert json.loads(parsed.model_dump_json(by_alias=True))["value"] == value

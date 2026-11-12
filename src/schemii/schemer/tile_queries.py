@@ -6,6 +6,8 @@ change a required scope's correlation. They can repeat contributors, which is
 reported explicitly rather than implying a drill row count equals a measure.
 """
 
+import re
+
 from sqlglot import exp, parse_one
 
 from schemii.common.api.errors import ApiProblem
@@ -45,7 +47,7 @@ def report_outputs(tile):
 
 def validate_report_controls(tile, catalog, definition):
     """Resolve selected semantic outputs and typed values, without slicer values."""
-    from datetime import date, datetime
+    from datetime import date, datetime, time
     from uuid import UUID
 
     outputs = report_outputs(tile)
@@ -63,6 +65,7 @@ def validate_report_controls(tile, catalog, definition):
             kind = "numeric"
         else:
             kind = source_type(catalog, definition, predicate.table, predicate.column)
+        kind = re.sub(r"\(\d+\)", "", kind).strip().lower()
         value = predicate.value
         if predicate.operator not in {"is_null", "not_null"}:
             numeric = kind.split("(")[0].strip() in {"numeric", "decimal", "integer", "bigint", "smallint", "real", "double precision", "int2", "int4", "int8", "float4", "float8"}
@@ -79,6 +82,24 @@ def validate_report_controls(tile, catalog, definition):
                         date.fromisoformat(value)
                     elif kind.startswith("timestamp"):
                         datetime.fromisoformat(value)
+                    elif kind in {"time", "time without time zone", "time with time zone", "timetz"}:
+                        match = re.fullmatch(r"([0-9]{2})(:?)([0-9]{2})(?:\2([0-9]{2})(?:[.,]([0-9]{1,6}))?)?([Zz]|[+-](?:[0-9]{2}(?::[0-9]{2}(?::[0-9]{2})?)?|[0-9]{4}(?:[0-9]{2})?))?", value)
+                        if match is None:
+                            raise ValueError
+                        hour, _, minute, second, fraction, zone = match.groups()
+                        # PostgreSQL also represents midnight as 24:00:00.
+                        if hour == "24" and any(int(part or "0") for part in (minute, second, fraction)):
+                            raise ValueError
+                        if zone and zone.lower() != "z":
+                            parts = zone[1:].replace(":", "")
+                            if int(parts[:2]) > 15 or int(parts[2:4] or "0") > 59 or int(parts[4:6] or "0") > 59:
+                                raise ValueError
+                        parsed = time.fromisoformat(("00" + value[2:] if hour == "24" else value).replace("z", "Z"))
+                        offset = parsed.utcoffset()
+                        if (offset is not None) != (kind in {"time with time zone", "timetz"}):
+                            raise ValueError
+                        if offset is not None and abs(offset.total_seconds()) >= 16 * 3600:
+                            raise ValueError
                     elif kind == "uuid" and predicate.operator in {"eq", "ne"}:
                         UUID(value)
                     else:

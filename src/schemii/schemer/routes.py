@@ -115,7 +115,9 @@ async def stream_dashboard(dashboard_id: str, body: DashboardExecutionRequest, r
                     raise
                 errors.append({"tileId": tile.id, "message": error.message, "code": error.code})
                 continue
-            tiles.append({"tileId": tile.id, "plan": plan})
+            scalar_kpi = (tile.kind == "kpi" and not tile.dimensions
+                          and len(tile.measures) == 1 and tile.measures[0].aggregate != "none")
+            tiles.append({"tileId": tile.id, "plan": plan, "scalarKpi": scalar_kpi})
         await asyncio.to_thread(planning.check_current)
         return response(services, principal.user_id, model, tiles, errors)
 

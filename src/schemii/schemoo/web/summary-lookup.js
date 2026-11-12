@@ -31,8 +31,10 @@ export function summaryLookup(draft, catalog, source, target) {
     const forward=previous===edge.source;
     if(edge.kind === "logical" || !forward) {
       logical ||= edge.kind === "logical";
+      if (!Array.isArray(catalog.tables)) return {status:"unknown",path:[],title:"Lookup metadata unavailable",message:"Reload the source catalog before checking lookup uniqueness."};
       const table=catalogTable(nodes.get(next),catalog);
-      const columns=relationshipColumns(edge).map(pair=>pair[forward?"target":"source"]);
+      if (!table) return {status:"unknown",path:[],title:"Lookup metadata unavailable",message:"Reload the source catalog before checking lookup uniqueness."};
+      const columns=relationshipColumns(relation).map(pair=>pair[forward?"target":"source"]);
       const keys=[table?.primaryKey || [],...(table?.uniqueKeys || [])];
       multiplying ||= !keys.some(key=>Array.isArray(key) && key.length>0 && key.every(column=>columns.includes(column)));
     }

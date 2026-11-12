@@ -20,6 +20,42 @@ export function tileErrors(tile, model, catalog) {
   return [...errors, ...timeAnalysisErrors(tile), ...reportControlErrors(tile, model, catalog)];
 }
 export const reportOutputKey = output => JSON.stringify([output.table, output.column, output.aggregate || 'none', output.kind || 'value']);
+// Compare decimal values without first rounding either token through Number.
+// Rejected text remains the draft value so rerenders and failed Apply preserve it.
+export function numericFilterValue(text) {
+  const token = text.trim();
+  if (!token) return null;
+  const canonical = value => {
+    const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(value);
+    if (!match) return null;
+    const fraction = match[3] ?? match[4] ?? '';
+    let digits = `${match[2] || ''}${fraction}`.replace(/^0+/, '');
+    if (!digits) return '0';
+    const trailing = digits.length - digits.replace(/0+$/, '').length;
+    digits = digits.slice(0, digits.length - trailing);
+    const exponent = BigInt(match[5] || '0') - BigInt(fraction.length) + BigInt(trailing);
+    return `${match[1] === '-' ? '-' : ''}${digits}e${exponent}`;
+  };
+  if (token.length > 4000) return text;
+  const value = Number(token);
+  if (!Number.isFinite(value) || Number.isInteger(value) && !Number.isSafeInteger(value)) return text;
+  return canonical(token) === canonical(JSON.stringify(value)) ? value : text;
+}
+export function validTimeFilterValue(value, type) {
+  if (typeof value !== 'string') return false;
+  const match = /^(\d{2})(:?)(\d{2})(?:\2(\d{2})(?:[.,](\d{1,6}))?)?([Zz]|[+-](?:\d{2}(?::\d{2}(?::\d{2})?)?|\d{4}(?:\d{2})?))?$/.exec(value);
+  if (!match) return false;
+  const [, hour, , minute, second = '00', fraction = '', zone] = match;
+  if (Number(hour) > 24 || Number(minute) > 59 || Number(second) > 59 || Number(hour) === 24 && Number(`${minute}${second}${fraction}`) !== 0) return false;
+  const normalized = type.replace(/\(\d+\)/g, '').trim().toLowerCase();
+  const zoned = normalized === 'timetz' || normalized === 'time with time zone';
+  if (Boolean(zone) !== zoned) return false;
+  if (zone && !/^[Zz]$/.test(zone)) {
+    const parts = zone.slice(1).replaceAll(':', '');
+    if (Number(parts.slice(0, 2)) > 15 || Number(parts.slice(2, 4) || 0) > 59 || Number(parts.slice(4, 6) || 0) > 59) return false;
+  }
+  return true;
+}
 export function reportOutputs(tile, model, catalog) {
   const fields = tile.kind === 'detail' ? tile.detailFields : [...tile.dimensions, ...tile.measures];
   const make = (field, kind = 'value') => {
@@ -58,7 +94,10 @@ export function reportControlErrors(tile, model, catalog) {
     if (!['eq', 'ne', 'gt', 'gte', 'lt', 'lte'].includes(item.operator)) errors.push(`${prefix}choose a comparison operator.`);
     const value = item.value, type = output.dataType.replace(/\(\d+(?:,\s*\d+)?\)/g, '').trim().toLowerCase();
     if (value == null || typeof value === 'number' && !Number.isFinite(value) || typeof value === 'string' && (value.length > 4000 || value.includes('\0'))) { errors.push(`${prefix}enter a finite comparison value or choose a NULL check.`); return; }
-    if (model && (/^(smallint|integer|bigint|numeric|decimal|real|double precision|int[248]|float[48])$/.test(type) ? typeof value !== 'number' : type === 'boolean' ? typeof value !== 'boolean' || !['eq', 'ne'].includes(item.operator) : typeof value !== 'string')) errors.push(`${prefix}enter a ${type || 'compatible'} value.`);
+    const numeric = /^(smallint|integer|bigint|numeric|decimal|real|double precision|int[248]|float[48])$/.test(type);
+    if (model && numeric && (typeof value !== 'number' || Number.isInteger(value) && !Number.isSafeInteger(value))) errors.push(`${prefix}enter a number that can be saved without rounding (integers must be within ±9007199254740991). Your entered text is kept for correction.`);
+    else if (model && /^(time(?: without time zone| with time zone)?|timetz)$/.test(type) && !validTimeFilterValue(value, type)) errors.push(`${prefix}enter an ISO time${type === 'timetz' || type.endsWith(' with time zone') ? ' with an explicit UTC offset' : ' without a UTC offset'}, for example ${type === 'timetz' || type.endsWith(' with time zone') ? '09:00:00+02:00' : '09:00:00'}.`);
+    else if (model && !numeric && (type === 'boolean' ? typeof value !== 'boolean' || !['eq', 'ne'].includes(item.operator) : typeof value !== 'string')) errors.push(`${prefix}enter a ${type || 'compatible'} value.`);
   });
   return errors;
 }

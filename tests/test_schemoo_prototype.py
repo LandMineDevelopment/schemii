@@ -204,3 +204,30 @@ def test_legacy_fk_hash_resolver_is_default_namespace_and_endpoint_bound():
     query["nodes"][0]["namespace"] = query["nodes"][1]["namespace"] = 'other"schema'
     with pytest.raises(ValueError, match="known foreign key"):
         compile_preview(catalog, query)
+
+
+def test_default_node_allocation_separates_quoted_legacy_names_from_qualified_sources():
+    from schemii.schemoo.prototype import _Model, compile_preview
+    legacy = '["two","same"]'
+    catalog = {"namespace": "one", "tables": [
+        {"namespace": "one", "name": legacy, "columns": [{"name": "id", "dataType": "integer"}]},
+        {"namespace": "two", "name": "same", "columns": [{"name": "id", "dataType": "integer"}]}],
+        "relationships": [{"id": "cross", "sourceNamespace": "one", "sourceTable": legacy,
+            "targetNamespace": "two", "targetTable": "same", "columns": [{"source": "id", "target": "id"}]}]}
+    query = {"root": legacy, "relationships": ["cross"], "fields": [{"table": legacy + "_2", "column": "id"}]}
+    expected = {legacy: ("one", legacy), legacy + "_2": ("two", "same")}
+    assert _Model(catalog, query).keys == expected
+    assert _Model({**catalog, "tables": list(reversed(catalog["tables"]))}, query).keys == expected
+    sql = compile_preview(catalog, query)["sql"]
+    assert '"two"."same"' in sql and '"one"."[""two"",""same""]"' in sql
+
+
+def test_default_qualified_ids_remain_bounded_with_long_escaped_identifiers():
+    from schemii.schemoo.prototype import _Model
+    namespace = '"' * 63
+    tables = [{"namespace": namespace, "name": '"' * 62 + end,
+               "columns": [{"name": "id", "dataType": "integer"}]} for end in ["x", "y"]]
+    catalog = {"namespace": "public", "tables": tables, "relationships": []}
+    model = _Model(catalog, {})
+    assert len(model.nodes) == 2 and all(len(key) <= 200 for key in model.nodes)
+    assert _Model({**catalog, "tables": list(reversed(tables))}, {}).keys == model.keys
