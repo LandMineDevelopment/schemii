@@ -23,7 +23,8 @@ export function createResultGrid(result, decorate = () => {}) {
   viewport.addEventListener('scroll', draw, { passive: true }); draw(); return viewport;
 }
 export function appendStreamStatus(host, result) {
-  const text = result.error || (result.limitReached ? 'Preview limit reached · download full results' : result.loading ? 'Loading more rows…' : 'End of result');
+  const dashboardCapacity = ['dashboard_row_limit', 'dashboard_byte_limit', 'browser_dashboard_budget', 'browser_budget'].includes(result.reason);
+  const text = result.error || (result.limitReached ? `${dashboardCapacity ? 'Dashboard preview capacity reached' : 'Preview limit reached'} · download full results` : result.loading ? 'Loading more rows…' : 'End of result');
   const status = element('div', { className: `stream-progress${result.loading ? ' is-loading' : ''}${result.error ? ' is-error' : ''}`, attrs: { role: 'status' }, text });
   const viewport = host.querySelector('.data-grid-viewport'); (viewport || host).append(status);
 }

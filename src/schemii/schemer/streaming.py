@@ -53,7 +53,7 @@ async def reserve(services, owner, model, tiles):
         raise
 
 
-async def _cleanup(console, owner, receipt, pending):
+async def _cleanup(console, owner, receipt, pending, closed):
     # Interrupt any database call before joining its worker. Never close a cursor
     # concurrently with a worker that is still fetching from it.
     cancel_error = None
@@ -69,12 +69,59 @@ async def _cleanup(console, owner, receipt, pending):
     execution = await asyncio.to_thread(console.get_owned, owner, receipt.id)
     first_error = cancel_error
     for result in execution.results:
+        if result.id in closed:
+            continue
         try:
             await asyncio.to_thread(console.close_result, owner, None, receipt.id, result.id)
+            closed.add(result.id)
         except Exception as error:
             first_error = first_error or error
     if first_error:
         raise first_error
+
+
+class _PreviewShares:
+    """Protected unconsumed capacity; consumed rows remain charged until end."""
+
+    def __init__(self, states):
+        self.states = states
+
+    def remaining(self, used, limit):
+        return max(0, LIMITS[limit] - sum(state[used] for state in self.states))
+
+    def distribute(self):
+        for used, local, total, share in [("count", "rows", "totalRows", "rowShare"),
+                                          ("bytes", "bytes", "totalBytes", "byteShare")]:
+            active = [state for state in self.states if not state["done"] and state[used] < LIMITS[local]]
+            remaining = self.remaining(used, total)
+            for state in self.states:
+                state[share] = 0
+            while active and remaining:
+                portion, extra = divmod(remaining, len(active))
+                distributed = 0
+                for index, state in enumerate(active):
+                    amount = min(portion + (index < extra), LIMITS[local] - state[used] - state[share])
+                    state[share] += amount
+                    distributed += amount
+                remaining -= distributed
+                active = [state for state in active if state[used] + state[share] < LIMITS[local]]
+
+    def fits(self, state):
+        if state["offset"] == len(state["rows"]):
+            return False
+        size = len(encode(state["rows"][state["offset"]]))
+        return (self.remaining("count", "totalRows") > 0
+                and size <= self.remaining("bytes", "totalBytes"))
+
+    def lend(self, chosen):
+        size = len(encode(chosen["rows"][chosen["offset"]]))
+        for share, needed in [("rowShare", 1), ("byteShare", size)]:
+            for donor in reversed(self.states):
+                if donor is chosen or donor["done"]:
+                    continue
+                amount = min(max(0, needed - chosen[share]), donor[share])
+                donor[share] -= amount
+                chosen[share] += amount
 
 
 async def events(services, owner, model, tiles, errors=(), *, export=False):
@@ -87,8 +134,7 @@ async def events(services, owner, model, tiles, errors=(), *, export=False):
         return
     console, receipt, pending = services.console, None, None
     tile_id = None
-    total_bytes = 0
-    total_rows = 0
+    closed = set()
     failure = None
     try:
         receipt = await reserve(services, owner, model, tiles)
@@ -106,51 +152,104 @@ async def events(services, owner, model, tiles, errors=(), *, export=False):
                              "The report query did not complete. Refresh to try again.")
         if len(execution.results) != len(tiles):
             raise ApiProblem(502, "report_result_missing", "The report did not return all result sets.")
-        for index, (tile, result) in enumerate(zip(tiles, execution.results)):
-            tile_id, cursor, count, byte_count, reason = tile["tileId"], None, 0, 0, None
-            while True:
-                pending = asyncio.create_task(asyncio.to_thread(console.page, owner, None,
-                    receipt.id, result.id, cursor))
-                while access is not None and not pending.done():
-                    await asyncio.wait({pending}, timeout=0.5)
+        states = [{"tile": tile, "result": result, "cursor": None, "rows": [],
+                   "columns": [], "offset": 0, "count": 0, "bytes": 0,
+                   "fetched": False, "done": False, "rowShare": 0, "byteShare": 0}
+                  for tile, result in zip(tiles, execution.results)]
+        order = sorted(states, key=lambda state: not state["tile"].get("scalarKpi", False))
+        shares = _PreviewShares(states)
+        if not export:
+            shares.distribute()
+        arbitration = 0
+        while any(not state["done"] for state in states):
+            progressed = False
+            for state in order:
+                if state["done"]:
+                    continue
+                tile = state["tile"]
+                tile_id = tile["tileId"]
+                if access is not None:
                     await asyncio.to_thread(access.check)
-                page = await asyncio.shield(pending)
-                pending = None
-                columns = [document(column) for column in page.columns]
-                labels = tile["plan"].get("outputLabels", [])
-                columns = [{**column, "name": labels[i] if i < len(labels) else column["name"]}
-                           for i, column in enumerate(columns)]
-                accepted = []
-                for row in page.rows:
+                if state["offset"] == len(state["rows"]):
+                    if state["fetched"] and state["cursor"] is None:
+                        continue
+                    options = {"page_size": 1} if tile.get("scalarKpi") and not state["fetched"] else {}
+                    pending = asyncio.create_task(asyncio.to_thread(console.page, owner, None,
+                        receipt.id, state["result"].id, state["cursor"], **options))
+                    while access is not None and not pending.done():
+                        await asyncio.wait({pending}, timeout=0.5)
+                        await asyncio.to_thread(access.check)
+                    page = await asyncio.shield(pending)
+                    pending = None
+                    if access is not None:
+                        await asyncio.to_thread(access.check)
+                    columns = [document(column) for column in page.columns]
+                    labels = tile["plan"].get("outputLabels", [])
+                    state["columns"] = [{**column, "name": labels[i] if i < len(labels) else column["name"]}
+                                        for i, column in enumerate(columns)]
+                    if page.truncated:
+                        raise ApiProblem(422, "report_result_truncated", "The database stopped this result at a resource limit.")
+                    state.update(rows=page.rows, offset=0, cursor=page.next_cursor, fetched=True)
+                    progressed = True
+                accepted, reason = [], None
+                while state["offset"] < len(state["rows"]):
+                    row = state["rows"][state["offset"]]
                     size = len(encode(row))
                     if not export:
-                        if count >= LIMITS["rows"]:
+                        if state["count"] >= LIMITS["rows"]:
                             reason = "row_limit"
-                        elif total_rows >= LIMITS["totalRows"]:
-                            reason = "dashboard_row_limit"
-                        elif byte_count + size > LIMITS["bytes"]:
+                        elif state["bytes"] + size > LIMITS["bytes"]:
                             reason = "byte_limit"
-                        elif total_bytes + size > LIMITS["totalBytes"]:
-                            reason = "dashboard_byte_limit"
-                    if reason:
-                        break
+                        elif state["rowShare"] < 1 or state["byteShare"] < size:
+                            break  # Keep this page suffix before advancing its one-use cursor.
+                        if reason:
+                            break
                     accepted.append(row)
-                    count += 1
-                    total_rows += 1
-                    byte_count += size
-                    total_bytes += size
-                if accepted or count == 0:
-                    yield {"type": "rows", "tileId": tile_id, "columns": columns, "rows": accepted}
-                if page.truncated:
-                    raise ApiProblem(422, "report_result_truncated", "The database stopped this result at a resource limit.")
-                cursor = page.next_cursor
-                if reason or cursor is None:
-                    break
-            await asyncio.to_thread(console.close_result, owner, None, receipt.id, result.id)
-            if index == len(tiles) - 1:
-                receipt = None  # All source results are closed before final completion.
-            yield {"type": "complete", "tileId": tile_id, "rowCount": count,
-                   "limitReached": reason is not None, "reason": reason, "snapshotAt": snapshot_at}
+                    state["offset"] += 1
+                    state["count"] += 1
+                    state["bytes"] += size
+                    if not export:
+                        state["rowShare"] -= 1
+                        state["byteShare"] -= size
+                    progressed = True
+                if accepted or state["count"] == 0:
+                    yield {"type": "rows", "tileId": tile_id,
+                           "columns": state["columns"], "rows": accepted}
+                exhausted = (state["offset"] == len(state["rows"])
+                             and (state["cursor"] is None or tile.get("scalarKpi", False)))
+                if reason or exhausted:
+                    await asyncio.to_thread(console.close_result, owner, None, receipt.id, state["result"].id)
+                    closed.add(state["result"].id)
+                    state["done"] = True
+                    state["rows"] = []
+                    if len(closed) == len(states):
+                        receipt = None
+                    yield {"type": "complete", "tileId": tile_id, "rowCount": state["count"],
+                           "limitReached": reason is not None, "reason": reason, "snapshotAt": snapshot_at}
+                    if not export:
+                        shares.distribute()
+                    progressed = True
+            if not progressed:
+                # Every live result has had a first fetch. Resolve byte/row share
+                # fragmentation without dropping a pending head or spinning.
+                active = [state for state in states if not state["done"]]
+                candidates = active[arbitration:] + active[:arbitration]
+                chosen = next((state for state in candidates if shares.fits(state)), None)
+                if chosen is not None:
+                    shares.lend(chosen)
+                    arbitration = (active.index(chosen) + 1) % len(active)
+                    continue
+                for state in active:
+                    tile_id = state["tile"]["tileId"]
+                    reason = "dashboard_row_limit" if shares.remaining("count", "totalRows") == 0 else "dashboard_byte_limit"
+                    await asyncio.to_thread(console.close_result, owner, None, receipt.id, state["result"].id)
+                    closed.add(state["result"].id)
+                    state["done"] = True
+                    state["rows"] = []
+                    if len(closed) == len(states):
+                        receipt = None
+                    yield {"type": "complete", "tileId": tile_id, "rowCount": state["count"],
+                           "limitReached": True, "reason": reason, "snapshotAt": snapshot_at}
     except asyncio.CancelledError:
         raise
     except Exception as error:
@@ -163,7 +262,7 @@ async def events(services, owner, model, tiles, errors=(), *, export=False):
     finally:
         if receipt is not None:
             with anyio.CancelScope(shield=True):
-                cleanup = asyncio.create_task(_cleanup(console, owner, receipt, pending))
+                cleanup = asyncio.create_task(_cleanup(console, owner, receipt, pending, closed))
                 try:
                     await asyncio.shield(cleanup)
                 except asyncio.CancelledError:
