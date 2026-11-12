@@ -229,3 +229,83 @@ def test_refresh_and_export_contract_compiles_the_identical_final_relation(
     assert preview["sql"] == refreshed["sql"] == export["sql"]
     values = "(1,'A',10::numeric,DATE '2024-01-01'),(2,'B',25,'2024-01-01'),(3,'C',20,'2024-01-01')"
     assert run(execute, preview, values) == [["B", 25], ["C", 20]]
+
+
+@pytest.mark.parametrize(
+    "kind,zoned",
+    [("time(3) without time zone", False), ("time(6) with time zone", True)],
+)
+@pytest.mark.parametrize(
+    "aggregate,operator,threshold,expected_group",
+    [("min", "gte", "09:00:00", "B"), ("max", "lte", "10:00:00", "A")],
+)
+def test_native_time_min_max_output_predicates(
+    execute, monkeypatch, kind, zoned, aggregate, operator, threshold, expected_group
+):
+    from datetime import time
+
+    catalog = {
+        "namespace": "public",
+        "fingerprint": "",
+        "tables": [
+            {
+                "name": "clocks",
+                "columns": [
+                    {"name": "group_name", "dataType": "text"},
+                    {"name": "observed", "dataType": kind},
+                ],
+            }
+        ],
+        "relationships": [],
+    }
+    definition = ModelDefinition.model_validate(
+        {
+            "root": "clock",
+            "nodes": [{"id": "clock", "table": "clocks", "label": "Clock"}],
+        }
+    )
+    model = NS(definition=definition, catalog_fingerprint="")
+    monkeypatch.setattr(tile_queries, "load_model", lambda *args: model)
+    monkeypatch.setattr(tile_queries, "model_catalog", lambda *args, **kwargs: catalog)
+    threshold += "+02:00" if zoned else ""
+    tile = DashboardTile.model_validate(
+        {
+            "id": "time",
+            "title": "Clock comparison",
+            "kind": "aggregate",
+            "dimensions": [{"table": "clock", "column": "group_name"}],
+            "measures": [
+                {"table": "clock", "column": "observed", "aggregate": aggregate}
+            ],
+            "aggregateFilters": [
+                {
+                    "table": "clock",
+                    "column": "observed",
+                    "aggregate": aggregate,
+                    "operator": operator,
+                    "value": threshold,
+                }
+            ],
+        }
+    )
+    dashboard = NS(
+        model_id="model_" + "a" * 32, model_revision=1, selections={}, tiles=[tile]
+    )
+    _, plan = tile_queries.tile_plan(None, None, dashboard, tile.id)
+    sql = plan["sql"].replace('"public"."clocks"', '"clocks"').rstrip(";")
+    typename = "TIME WITH TIME ZONE" if zoned else "TIME"
+    suffix = "+02:00" if zoned else ""
+    values = ",".join(
+        f"('{group}',{typename} '{clock}{suffix}')"
+        for group, clock in [
+            ("A", "08:00:00"),
+            ("A", "10:00:00"),
+            ("B", "09:00:00"),
+            ("B", "11:00:00"),
+        ]
+    )
+    actual = execute(
+        f"WITH clocks(group_name, observed) AS (VALUES {values}) SELECT * FROM ({sql}) AS results"
+    )
+    expected_clock = ("09:00:00" if aggregate == "min" else "10:00:00") + suffix
+    assert actual == [[expected_group, time.fromisoformat(expected_clock)]]

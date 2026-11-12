@@ -459,3 +459,29 @@ def test_aggregate_comparison_literals_follow_native_output_types(context, kind,
     else:
         with pytest.raises(ApiProblem, match="compatible operator"):
             queries.tile_plan(None, None, dashboard, tile.id)
+
+
+@pytest.mark.parametrize("kind,value,valid", [
+    ("time", "09:00:00", True), ("time(3) without time zone", "09:00:00.1234", True),
+    ("time without time zone", "090000", True), ("time", "24:00:00", True),
+    ("time with time zone", "09:00:00+02:00", True), ("timetz(6)", "09:00:00.123456-05:30", True),
+    ("timetz", "09:00Z", True), ("time with time zone", "090000+0730", True),
+    ("time", "09:00:00Z", False), ("timetz", "09:00:00", False), ("time", "24:01:00", False),
+    ("time", "09:60:00", False), ("time", "09:00:60", False), ("time", "09:0000", False),
+    ("time", "09:00:00.1234567", False), ("timetz", "09:00:00+16:00", False),
+    ("timetz", "09:00:00+01:99", False), ("timetz", "09:00:00+02:3000", False),
+    ("time", "not a time", False),
+])
+@pytest.mark.parametrize("aggregate", ["min", "max"])
+def test_native_time_aggregate_predicates_match_offered_types(context, kind, value, valid, aggregate):
+    dashboard, tile, model = context
+    catalog = queries.model_catalog(None, None, model)
+    catalog["tables"][0]["columns"][1]["dataType"] = kind
+    tile.kind = "aggregate"; tile.measures = [field("people", "name", aggregate)]
+    controls(tile, filters=[{"table": "people", "column": "name", "aggregate": aggregate, "operator": "gte", "value": value}])
+    if valid:
+        _, plan = queries.tile_plan(None, None, dashboard, tile.id)
+        assert parse_one(plan["sql"], read="postgres").key == "select"
+    else:
+        with pytest.raises(ApiProblem, match="compatible operator"):
+            queries.tile_plan(None, None, dashboard, tile.id)

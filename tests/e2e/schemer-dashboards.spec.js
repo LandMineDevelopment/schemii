@@ -863,7 +863,7 @@ test('sort priorities aggregate-result filters and semantic Top N persist throug
   await page.getByRole('option', { name: 'NULLs first', exact: true }).click();
   await editor.getByRole('spinbutton', { name: 'Top N results', exact: true }).fill('10');
   await editor.getByRole('button', { name: 'Add aggregate-result filter' }).click();
-  await editor.getByRole('spinbutton', { name: 'Result filter 1 value', exact: true }).fill('20');
+  await editor.getByRole('textbox', { name: 'Result filter 1 value', exact: true }).fill('20');
   await editor.getByRole('button', { name: 'Apply & run' }).click();
   await expect(editor).toHaveCount(0);
   expect(fixture.dashboard.tiles[0]).toMatchObject({ topN: 10, limit: 2,
@@ -875,7 +875,7 @@ test('sort priorities aggregate-result filters and semantic Top N persist throug
   await expect(editor.getByRole('combobox', { name: 'Sort 1 direction', exact: true })).toHaveValue('Descending');
   await expect(editor.getByRole('combobox', { name: 'Sort 1 NULL placement', exact: true })).toHaveValue('NULLs first');
   await expect(editor.getByRole('spinbutton', { name: 'Top N results', exact: true })).toHaveValue('10');
-  await expect(editor.getByRole('spinbutton', { name: 'Result filter 1 value', exact: true })).toHaveValue('20');
+  await expect(editor.getByRole('textbox', { name: 'Result filter 1 value', exact: true })).toHaveValue('20');
   const viewport = page.viewportSize();
   const save = await editor.getByRole('button', { name: 'Apply & run' }).boundingBox();
   expect(save.y + save.height).toBeLessThanOrEqual(viewport.height + 2);
@@ -916,4 +916,52 @@ test('model-upgrade review preserves unavailable sort outputs until an explicit 
   await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
   await expect(review).toHaveCount(0);
   expect(writes).toHaveLength(1); expect(writes[0].tiles[0].sort).toEqual([]); expect(errors).toEqual([]);
+});
+
+
+for (const threshold of ['9007199254740993', '-9007199254740993', '0.10000000000000001', '9.007199254740993e15']) {
+  test(`aggregate threshold ${threshold} remains exact and blocks Apply until corrected`, async ({ page }) => {
+    const { fixture, writes, errors } = await mock(page);
+    await page.goto('/schemer');
+    await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+    const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+    await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+    await editor.getByRole('button', { name: 'Add aggregate-result filter' }).click();
+    const input = editor.getByRole('textbox', { name: 'Result filter 1 value', exact: true });
+    await input.fill(threshold);
+    await editor.getByRole('button', { name: 'Apply & run' }).click();
+    await expect(editor.getByRole('alert')).toContainText('without rounding');
+    await expect(input).toHaveValue(threshold); expect(writes).toHaveLength(0);
+    // Re-rendering the controls must retain the original decimal token too.
+    await editor.getByRole('tab', { name: 'View & fields' }).click();
+    await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+    await expect(input).toHaveValue(threshold);
+    await input.fill('-1.25e-3');
+    await editor.getByRole('button', { name: 'Apply & run' }).click();
+    await expect(editor).toHaveCount(0);
+    expect(fixture.dashboard.tiles[0].aggregateFilters[0].value).toBe(-0.00125);
+    expect(errors).toEqual([]);
+  });
+}
+
+test('offered native time MIN predicate retains malformed values for correction', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page);
+  fixture.catalog.tables[0].columns.find(column => column.name === 'hired_at').dataType = 'time(3) without time zone';
+  fixture.dashboard.tiles[0].kind = 'aggregate';
+  fixture.dashboard.tiles[0].measures = [field('hired_at', 'min')];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+  await editor.getByRole('button', { name: 'Add aggregate-result filter' }).click();
+  const input = editor.getByRole('textbox', { name: 'Result filter 1 value', exact: true });
+  await input.fill('09:00:00+02:00');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor.getByRole('alert')).toContainText('without a UTC offset');
+  await expect(input).toHaveValue('09:00:00+02:00'); expect(writes).toHaveLength(0);
+  await input.fill('09:00:00.123');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor).toHaveCount(0);
+  expect(fixture.dashboard.tiles[0].aggregateFilters[0].value).toBe('09:00:00.123');
+  expect(errors).toEqual([]);
 });

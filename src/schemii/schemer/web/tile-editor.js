@@ -6,7 +6,7 @@ import { fieldLabel } from '#model/model-columns.js';
 import { aggregateChoices } from './report-state.js';
 import { timeDimensions } from './time-analysis.js';
 import { renderTimeAnalysis } from './time-analysis-editor.js';
-import { TILE_TYPES, tileErrors, fieldChoices, fieldKey, reportOutputs, reportOutputKey } from './dashboard-state.js';
+import { TILE_TYPES, tileErrors, fieldChoices, fieldKey, reportOutputs, reportOutputKey, numericFilterValue } from './dashboard-state.js';
 
 function icon(name, label, onClick, disabled = false) {
   const button = createIconButton({ icon: name, label, className: 'ui-button' }); button.onclick = onClick; button.disabled = disabled; return button;
@@ -107,7 +107,7 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, sav
     const aggregateOutputs = outputs.filter(output => measures.has(JSON.stringify([output.table, output.column, output.aggregate])));
     body.append(element('p', { className: 'hint', text: 'Source filters run first. Result filters run after aggregation and complete time comparisons or running totals. Sorting and Top N then choose the final results, before browser delivery limits. Remaining outputs break sort ties in ascending order, with NULLs last.' }));
     const top = element('input', { attrs: { type: 'number', min: 1, max: 2147483647, step: 1, placeholder: 'All qualifying results', 'aria-label': 'Top N results' } });
-    top.value = current.topN ?? ''; top.oninput = () => { current.topN = top.value === '' ? null : Number(top.value); };
+    top.value = current.topN ?? ''; top.oninput = () => { current.topN = numericFilterValue(top.value); };
     body.append(element('label', { className: 'stack' }, ['Top N results (optional)', top]));
     function chooseOutput(label, options, selected, change) {
       const key = reportOutputKey(selected), choices = options.map(output => [reportOutputKey(output), output.label]);
@@ -140,8 +140,8 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, sav
         if (type === 'boolean') card.append(modelSelect(`Result filter ${index + 1} value`, [['', 'Choose a value'], ['true', 'True'], ['false', 'False']], item.value == null ? '' : String(item.value), value => { item.value = value === '' ? null : value === 'true'; }));
         else {
           const numeric = /^(smallint|integer|bigint|numeric|decimal|real|double precision|int[248]|float[48])(?:\b|\()/i.test(type);
-          const input = element('input', { attrs: { type: numeric ? 'number' : type === 'date' ? 'date' : 'text', step: 'any', maxlength: 4000, 'aria-label': `Result filter ${index + 1} value` } });
-          input.value = item.value ?? ''; input.oninput = () => { item.value = numeric ? input.value === '' ? null : Number(input.value) : input.value; }; card.append(input);
+          const input = element('input', { attrs: { type: type === 'date' ? 'date' : 'text', ...(numeric ? { inputmode: 'decimal' } : {}), maxlength: 4000, 'aria-label': `Result filter ${index + 1} value` } });
+          input.value = item.value ?? ''; input.oninput = () => { item.value = numeric ? numericFilterValue(input.value) : input.value; }; card.append(input);
         }
       }
       card.append(icon('close', `Remove result filter ${index + 1}`, () => { current.aggregateFilters.splice(index, 1); render(); })); predicates.append(card);
