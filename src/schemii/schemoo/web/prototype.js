@@ -43,7 +43,7 @@ function setModelName(value) {
 }
 let catalog, draft, canvas, plan, diagnostics = {}, selected, storageKey, timer, version = 0, busy = false;
 let model, saving = false, dirty = false, conflicted = false, catalogTicket = 0;
-let contextHandoffPending = false, incomingSchemaContext = null;
+let contextHandoffPending = false, contextHandoffGeneration = 0, incomingSchemaContext = null;
 let initialLayout;
 let inspectorTab = "model", selectedFilterId = null;
 let sourceAdditions = {tables:[],columns:[],relationships:[],initialized:false};
@@ -770,7 +770,7 @@ $("save-model").onclick=saveModel;
 $("create-dashboard-from-preview").onclick = async () => {
   if (!model || saveBlocked() || contextHandoffPending) return;
   if (dirty) { showError('Save model, layout and preview changes before creating a dashboard from this preview.'); return; }
-  const origin = model, ticket = version, explore = structuredClone(splitDraft(draft).explore);
+  const origin = model, ticket = version, handoffTicket = ++contextHandoffGeneration, explore = structuredClone(splitDraft(draft).explore);
   if (explore.root !== model.definition.root) { showError('Save the intended model starting object or choose a preview that uses the saved model starting object before creating a dashboard.'); return; }
   contextHandoffPending = true; save(); showError();
   try {
@@ -778,6 +778,7 @@ $("create-dashboard-from-preview").onclick = async () => {
     const current = await requestJson(`${API}/models/${encodeURIComponent(origin.id)}`);
     if (current.revision !== origin.revision || current.layoutRevision !== origin.layoutRevision || current.exploreRevision !== origin.exploreRevision) throw new Error('This saved model or preview changed in another tab. Reload the model and send its current preview.');
     await requestJson(`${API}/models/${encodeURIComponent(origin.id)}/plan`, { method: 'POST', body: { expectedRevision: origin.revision, explore }, timeoutMs: 30000 });
+    if (handoffTicket !== contextHandoffGeneration) return;
     if (model !== origin || version !== ticket || dirty || busy || saving) throw new Error('The model or preview changed while checking it. Save and send the current preview again.');
     location.assign(createProductContext('preview', account, { modelId: origin.id, modelRevision: origin.revision, explore }));
   } catch (error) { if (model === origin) showError(error.message); }
@@ -807,12 +808,16 @@ $("delete-model").onclick=async()=>{
   if(await confirmModelDeletion(model)) { clearDeletedModel(); await openLibrary(); }
 };
 window.addEventListener("beforeunload",event=>{if(dirty){event.preventDefault();event.returnValue="";}});
+window.addEventListener('pagehide', () => { contextHandoffGeneration++; });
 try {
   if (contextualArrival) {
+    const arrivalTicket = contextHandoffGeneration;
     const account = await currentAccount();
-    installProductNavigation(document.getElementById('product-navigation'), { activeProduct: canAccessProduct(account, 'schemoo') ? 'schemoo' : null, account });
-    incomingSchemaContext = consumeProductContext(new URLSearchParams(location.search).get('handoff'), account, 'schemoo');
-    await openLibrary();
+    if (arrivalTicket === contextHandoffGeneration) {
+      installProductNavigation(document.getElementById('product-navigation'), { activeProduct: canAccessProduct(account, 'schemoo') ? 'schemoo' : null, account });
+      incomingSchemaContext = consumeProductContext(new URLSearchParams(location.search).get('handoff'), account, 'schemoo');
+      await openLibrary();
+    }
   } else {
     const id=new URL(location.href).searchParams.get("model");
     if(id) await loadModel(id); else await openLibrary();

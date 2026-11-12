@@ -171,6 +171,18 @@ test('cancelled or replayed handoff never opens the first existing dashboard', a
   expect(state.creates).toEqual([]); noFallback(state);
 });
 
+test('leaving a contextual destination abandons its mounted review without creating', async ({ page }) => {
+  const state = fixture(); await mock(page, state);
+  for (const kind of ['schema', 'preview']) {
+    await page.goto(await stage(page, state, kind));
+    const review = kind === 'schema' ? page.locator('#model-library') : page.getByRole('dialog', { name: 'Create dashboard from saved preview', exact: true });
+    await expect(review.getByRole('button', { name: kind === 'schema' ? 'Create model' : 'Create dashboard', exact: true })).toBeEnabled();
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide')));
+    await expect(review).toBeHidden();
+  }
+  expect(state.creates).toEqual([]); noFallback(state);
+});
+
 test('revision changes after review block confirmation and keep recovery in the review', async ({ page }) => {
   const state = fixture(); await mock(page, state);
   await page.goto(await stage(page, state, 'preview'));

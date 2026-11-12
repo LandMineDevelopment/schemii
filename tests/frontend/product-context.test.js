@@ -108,17 +108,17 @@ test('saved-preview action blocks unsaved, root-mismatched and superseded work b
   const module = readFileSync(new URL('../../src/schemii/schemoo/web/prototype.js', import.meta.url), 'utf8');
   const start = '$("create-dashboard-from-preview").onclick = ';
   const handler = module.slice(module.indexOf(start) + start.length, module.indexOf('\nfunction openLibrary()'));
-  for (const variant of ['valid', 'dirty', 'root', 'revision', 'generation']) {
+  for (const variant of ['valid', 'dirty', 'root', 'revision', 'generation', 'pagehide']) {
     const calls = [], transferred = [], errors = [];
     const origin = { id: modelId, revision: 4, layoutRevision: 2, exploreRevision: 3, definition: { root: variant === 'root' ? 'other_alias' : preview.explore.root } };
-    const scope = { model: origin, version: 1, dirty: variant === 'dirty', busy: false, saving: false, contextHandoffPending: false,
+    const scope = { model: origin, version: 1, dirty: variant === 'dirty', busy: false, saving: false, contextHandoffPending: false, contextHandoffGeneration: 0,
       draft: { explore: preview.explore }, splitDraft: draft => draft, structuredClone, saveBlocked: () => false, save() {}, showError: value => value && errors.push(value),
       API: '/api/v1/schemoo', requireContextAccount, createProductContext: (kind, actor, payload) => { transferred.push({ kind, actor, payload }); return '/schemer?handoff=opaque'; },
       location: { assign: path => transferred.push(path) },
       requestJson: async (path, settings) => {
         calls.push({ path, settings });
         if (path.endsWith('/auth/me')) return account;
-        if (path.endsWith('/plan')) { if (variant === 'generation') scope.version++; return {}; }
+        if (path.endsWith('/plan')) { if (variant === 'generation') scope.version++; if (variant === 'pagehide') scope.contextHandoffGeneration++; return {}; }
         return { ...origin, revision: variant === 'revision' ? 5 : 4 };
       } };
     runInNewContext('this.send = ' + handler, scope);
@@ -127,7 +127,7 @@ test('saved-preview action blocks unsaved, root-mismatched and superseded work b
       assert.equal(transferred.length, 2); assert.deepEqual(transferred[0].payload.explore, preview.explore);
       assert.equal(calls.filter(call => call.settings?.method === 'POST').length, 1);
       assert.ok(calls.at(-1).path.endsWith('/plan'));
-    } else { assert.equal(transferred.length, 0); assert.equal(errors.length, 1); }
+    } else { assert.equal(transferred.length, 0); assert.equal(errors.length, variant === 'pagehide' ? 0 : 1); }
     if (['dirty', 'root'].includes(variant)) assert.equal(calls.length, 0);
     assert.equal(scope.contextHandoffPending, false);
   }
@@ -137,15 +137,15 @@ test('Schemii handoff distinguishes detached designs and freezes only the curren
   const module = readFileSync(new URL('../../src/schemii/schemii/web/assets/app.js', import.meta.url), 'utf8');
   const start = 'byId("create-model-from-schema").addEventListener("click", ';
   const handler = module.slice(module.indexOf(start) + start.length, module.indexOf('\n  byId("deploy-design-button")', module.indexOf(start))).trim().slice(0, -2);
-  for (const variant of ['valid', 'detached', 'cancelled-layout', 'navigation', 'source-changed']) {
+  for (const variant of ['valid', 'detached', 'cancelled-layout', 'navigation', 'source-changed', 'pagehide']) {
     const transferred = [], errors = [], calls = [], guidance = [];
     const origin = { id: 'workspace-live', connectionId: variant === 'detached' ? null : source.connectionId, namespace: source.namespace };
-    const scope = { schemaHandoffPending: false, state: { activeWorkspace: origin }, updateHeader() {},
+    const scope = { schemaHandoffPending: false, schemaHandoffGeneration: 0, state: { activeWorkspace: origin }, updateHeader() {},
       requireContextAccount, askConfirmation: options => guidance.push(options), designDeployment: { open() {} },
       flushLayoutBeforeTransition: async () => variant !== 'cancelled-layout',
       requestJson: async path => { calls.push(path); return account; },
       api: { getWorkspace: async () => { if (variant === 'navigation') scope.state.activeWorkspace = { ...origin, id: 'other-workspace' }; return { ...origin, namespace: variant === 'source-changed' ? 'other-schema' : source.namespace }; },
-        getConnection: async () => ({ ownerId: 'shared-owner', revision: 3 }) },
+        getConnection: async () => { if (variant === 'pagehide') scope.schemaHandoffGeneration++; return { ownerId: 'shared-owner', revision: 3 }; } },
       createProductContext: (kind, actor, payload) => { transferred.push({ kind, actor, payload }); return '/schemoo?handoff=opaque'; },
       location: { assign: path => transferred.push(path) }, errorToast: error => errors.push(error.message) };
     runInNewContext('this.send = ' + handler + ';', scope);

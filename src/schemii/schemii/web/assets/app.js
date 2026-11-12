@@ -1,6 +1,6 @@
 import { setAssistantDesignSavedHandler } from "./ai-assistant.js";
 import { createProductContext, requireContextAccount } from "#common/product-context.js";
-let schemaHandoffPending = false;
+let schemaHandoffPending = false, schemaHandoffGeneration = 0;
 import { createInspectorDataController } from "./inspector-data.js";
 import { createTableEditor } from "./table-editor.js";
 import { api } from "./api.js";
@@ -5076,15 +5076,17 @@ function bindEvents() {
       askConfirmation({ title: 'Choose a live source for a model', message: 'This detached desired design has no PostgreSQL source. Copy it to a concrete PostgreSQL target and review/apply its migration, then open that database-backed workspace to create a Schemoo model. Undeployed desired DDL cannot be used as a live model source.', label: 'Choose PostgreSQL target', tone: 'primary', callback: () => designDeployment.open() });
       return;
     }
-    const originId = state.activeWorkspace.id;
+    const originId = state.activeWorkspace.id, handoffTicket = ++schemaHandoffGeneration;
     schemaHandoffPending = true; updateHeader();
     try {
       if (!await flushLayoutBeforeTransition()) return;
+      if (handoffTicket !== schemaHandoffGeneration) return;
       const origin = state.activeWorkspace;
       if (origin?.id !== originId) throw new Error('The workspace changed. Send its current live schema again.');
       const account = await requestJson('/api/v1/auth/me'); requireContextAccount(account, 'schemoo');
       const workspace = await api.getWorkspace(origin.id);
       const connection = await api.getConnection(workspace.connectionId);
+      if (handoffTicket !== schemaHandoffGeneration) return;
       if (state.activeWorkspace?.id !== origin.id || workspace.connectionId !== origin.connectionId || workspace.namespace !== origin.namespace) throw new Error('The workspace source changed. Reload it and send the current live schema.');
       location.assign(createProductContext('schema', account, { connectionId: workspace.connectionId, connectionOwnerId: connection.ownerId || account.user.id, connectionRevision: connection.revision, namespace: workspace.namespace }));
     } catch (error) { errorToast(error); }
@@ -5140,6 +5142,7 @@ function bindEvents() {
     });
   });
   window.addEventListener("pagehide", persistCanvasView);
+  window.addEventListener("pagehide", () => { schemaHandoffGeneration++; });
   window.addEventListener("beforeunload", event => {
     if (!tableEditor.hasDraft && !designEditors.hasDraft && !sqlConsole.hasOpenTransaction()) return;
     event.preventDefault();

@@ -143,6 +143,11 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
   refreshActions = [];
   const dialog = document.getElementById("model-library"), content = document.getElementById("library-content");
   const current = () => ticket === libraryTicket && dialog.open;
+  if (sourceContext) {
+    const abandon = () => { if (current()) { libraryTicket++; dialog.close(); } };
+    window.addEventListener('pagehide', abandon, { once: true });
+    dialog.addEventListener('close', () => window.removeEventListener('pagehide', abandon), { once: true });
+  }
   disposeSelects(content); content.replaceChildren(element("p", { text: "Loading your models and connections…", attrs: { role: "status" } }));
   if (!dialog.open) dialog.showModal();
   try {

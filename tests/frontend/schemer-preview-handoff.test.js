@@ -109,9 +109,9 @@ class Node {
   close() { this.open = false; this.onclose?.(); }
 }
 function dom(t) {
-  const originals = Object.fromEntries(['document', 'Node'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const originals = Object.fromEntries(['document', 'Node', 'window'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const document = { createElement: tag => new Node(tag), createTextNode: text => Object.assign(new Node('#text'), { textContent: text }), body: new Node('body') };
-  Object.assign(globalThis, { document, Node });
+  Object.assign(globalThis, { document, Node, window: new EventTarget() });
   t.after(() => { for (const [key, value] of Object.entries(originals)) { if (value) Object.defineProperty(globalThis, key, value); else delete globalThis[key]; } });
   return document;
 }
@@ -150,6 +150,23 @@ test('late preflight after closing its dialog cannot revive a review or create a
   await until(() => state.calls.some(call => call.path.endsWith('/plan')));
   document.body.children[0].close(); state.hold.resolve(); await pending;
   assert.equal(document.body.children.length, 0); assert.equal(state.created.length, 0);
+});
+
+test('pagehide abandons preflight and pending confirmation before either can create or reopen saved work', async t => {
+  const document = dom(t);
+  for (const phase of ['preflight', 'confirmation']) {
+    const state = requests();
+    if (phase === 'preflight') state.hold = deferred();
+    const open = openPreviewHandoff(context(), { request: state.request, onCreated() { assert.fail('No stale navigation'); } });
+    await until(() => state.calls.some(call => call.path.endsWith('/plan')));
+    let pending = open;
+    if (phase === 'confirmation') {
+      const dialog = await open; state.hold = deferred(); pending = submit(dialog);
+      await until(() => state.calls.filter(call => call.path.endsWith('/plan')).length === 2);
+    }
+    window.dispatchEvent(new Event('pagehide')); state.hold.resolve(); await pending;
+    assert.equal(document.body.children.length, 0); assert.equal(state.created.length, 0);
+  }
 });
 
 test('uncertain create reconciles owned matching saved state and cannot repeat its POST', async t => {

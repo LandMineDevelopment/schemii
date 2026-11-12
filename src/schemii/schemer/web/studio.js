@@ -610,19 +610,23 @@ $('delete-dashboard').onclick = async () => {
   } });
 };
 window.addEventListener('schemii:logout', () => { upgradeReview?.dispose(); slicersDirty = false; void stopRuns(); $('tile-grid').replaceChildren(); });
-window.addEventListener('pagehide', () => { upgradeReview?.dispose(); void dashboardGroup?.close(); for (const group of streams.values()) for (const cache of [group.main, ...group.drills.values()]) void cache.close(); });
+let contextPageActive = true;
+window.addEventListener('pagehide', () => { contextPageActive = false; upgradeReview?.dispose(); void dashboardGroup?.close(); for (const group of streams.values()) for (const cache of [group.main, ...group.drills.values()]) void cache.close(); });
 window.addEventListener('beforeunload', event => { if (slicersDirty || upgradeReview?.dirty()) { event.preventDefault(); event.returnValue = ''; } });
 const contextualArrival = new URLSearchParams(location.search).has('handoff');
 initializeUi(); if (!contextualArrival) installProductNavigation($('product-navigation'), { activeProduct: 'schemer' });
 async function initialize() {
   try {
     const account = await currentAccount();
+    if (contextualArrival && !contextPageActive) return;
     author = canAuthor(account); modelAuthor = canAccessProduct(account, 'schemoo'); renderAccess();
     if (contextualArrival) {
       installProductNavigation($('product-navigation'), { activeProduct: canAccessProduct(account, 'schemer') ? 'schemer' : null, account });
       const context = consumeProductContext(new URLSearchParams(location.search).get('handoff'), account, 'schemer');
       await openPreviewHandoff(context, { onCreated: async saved => {
-        library = (await requestJson(API)).dashboards; renderLibrary();
+        const refreshed = await requestJson(API);
+        if (!contextPageActive) return;
+        library = refreshed.dashboards; renderLibrary();
         await openDashboard(saved.id);
       } });
       return;

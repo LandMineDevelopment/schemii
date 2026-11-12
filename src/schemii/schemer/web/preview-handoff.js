@@ -71,7 +71,9 @@ export async function openPreviewHandoff(context, { onCreated, request = request
   const setPending = value => { pending = value; body.inert = value; submit.disabled = value || blocked || !!uncertain || !source; };
   close.onclick = () => { if (!pending) dialog.close(); };
   dialog.oncancel = event => { if (pending) event.preventDefault(); };
-  dialog.onclose = () => { closed = true; dialog.remove(); };
+  const abandon = () => { closed = true; dialog.close(); };
+  window.addEventListener('pagehide', abandon, { once: true });
+  dialog.onclose = () => { closed = true; window.removeEventListener('pagehide', abandon); dialog.remove(); };
   dialog.append(element('header', { className: 'ui-dialog__head' }, [element('h2', { text: 'Create dashboard from saved preview' })]), body);
   body.append(status, error);
   submit.disabled = true;
