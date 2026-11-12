@@ -198,6 +198,9 @@ class CatalogArguments(Contract):
 
 class DeleteArguments(ModelReference):
     expected_revision: int = Field(ge=1)
+    expected_layout_revision: int | None = Field(default=None, ge=1)
+    expected_explore_revision: int | None = Field(default=None, ge=1)
+    require_no_previews: Literal["true", "false"] = "false"
 
 
 class PreviewReference(ModelReference):
@@ -424,7 +427,9 @@ def execute_action(services, owner, current_model_id, action):
     elif name == "catalog":
         kwargs.update(connection_id=args.connection_id, namespace=args.namespace, namespaces=args.namespaces)
     elif name == "delete_model":
-        kwargs["expected_revision"] = args.expected_revision
+        # Direct route calls need concrete values for every query argument;
+        # FastAPI resolves its Query defaults only during HTTP dispatch.
+        kwargs.update(args.model_dump(exclude={"model_id"}))
     elif name == "delete_preview":
         kwargs["expected_revision"] = args.expected_revision
     elif name in {"get_execution", "get_activity", "cancel_execution", "get_result_page", "close_result"}:
