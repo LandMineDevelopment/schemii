@@ -1,3 +1,4 @@
+import { rawCsvValue } from './number-format.js';
 import { exposedFields } from '#model/model-state.js';
 import { fieldLabel, nodeColumns } from '#model/model-columns.js';
 import { serializeCsv } from '#common/csv.js';
@@ -26,5 +27,5 @@ export function aggregateChoices(draft, catalog, field) {
     ...(numeric ? [['sum', 'Sum'], ['avg', 'Average']] : []), ...(comparable ? [['min', 'Minimum'], ['max', 'Maximum']] : [])];
 }
 export function csvContent(result) {
-  return serializeCsv(result.columns.map(column => column.name), result.rows);
+  return serializeCsv(result.columns.map(column => column.name), result.rows.map(row=>row.map((value,index)=>rawCsvValue(value,result.columns[index]?.dataType))));
 }

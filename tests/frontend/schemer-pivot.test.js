@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pivotMatrix, pivotSelection, renderPivot } from '../../src/schemii/schemer/web/pivot.js';
+import { pivotMatrix, pivotSelection, renderPivot, displayedPivot } from '../../src/schemii/schemer/web/pivot.js';
+import { freezeDisplayedResult } from '../../src/schemii/schemer/web/result-cache.js';
 import { pivotDefaults, tileErrors, tileAggregateChoices } from '../../src/schemii/schemer/web/dashboard-state.js';
 
 const field = (column, aggregate = 'none') => ({ table: 'facts', column, aggregate });
@@ -16,7 +17,7 @@ test('sparse matrix separates real NULLs, literal total names and explicit group
     record(null, null, 235 / 6, 4, 0, 0), record(null, null, 20, 1, 1, 0)]));
   assert.equal(matrix.rows.length, 3); assert.equal(matrix.columns.length, 2);
   assert.deepEqual(matrix.rows.map(row => [row.depth, ...row.values]), [[1, 'All rows'], [1, null], [0]]);
-  assert.ok([...matrix.cells.values()].some(([avg, count]) => avg === 235 / 6 && count === 4));
+  assert.ok([...matrix.cells.values()].some(([, , avg, count]) => avg === 235 / 6 && count === 4));
   assert.equal(matrix.cells.size, 4); // Absent combinations are absent, not invented zeroes.
 });
 
@@ -91,6 +92,42 @@ test('bounded row window keeps scrolling usable with fixed 44px rows and does no
   assert.ok(body.children.length <= 52); assert.match(body.children.at(-1).children[0].style.height, /px$/);
   viewport.scrollTop = 5000; viewport.events.scroll();
   assert.ok(body.children.length <= 52); assert.ok(Number(body.children[1].attributes['aria-rowindex']) > 90);
+});
+
+test('displayed pivot uses the mounted sparse window, axis headers and explicit NULL-versus-total scopes', () => {
+  const config = tile({ formatLocale: 'en-US', numberFormats: [{ output: { ...field('amount', 'avg'), kind: 'value' }, style: 'currency', currency: 'USD', precision: 2, unit: '', rules: [] }] }), data = result([record(null, 'A', 23.5, 7), record(null, null, 101.25, 19, 0, 0), record(null, null, 33.75, 11, 1, 0)], { snapshotAt: '2026-11-12T00:00:00Z' });
+  const view = mounted(config, data), captured = displayedPivot(view.host, config, data);
+  assert.deepEqual(captured.columns.map(item => item.name), ['Region', 'Category', 'Average amount', 'Distinct customers', 'Row grouping depth', 'Column grouping depth', 'Pivot record type', 'Column group count', 'Preview row cap reached', 'Qualifying source groups', 'Pivot scope']);
+  const scopes = new Map(captured.rows.map(row => [row.at(-1), row]));
+  assert.deepEqual(scopes.get('cell'), [...data.rows[0], 'cell']);
+  assert.deepEqual(scopes.get('row'), [...data.rows[2], 'row']);
+  assert.deepEqual(scopes.get('grand_total'), [...data.rows[1], 'grand_total']);
+  assert.equal(captured.projection.rowAxes, 1); assert.equal(captured.projection.columnAxes, 1);
+  assert.equal(captured.columns[2].display.currency, 'USD'); assert.equal(captured.columns[2].output.aggregate, 'avg');
+  assert.ok(view.nodes().some(node => node.tag === 'td' && node.textContent === '$23.50'));
+  const frozen = freezeDisplayedResult(captured, { pane: 'main' }); data.rows[0][2] = 999;
+  assert.equal(frozen.rows.find(row => row.at(-1) === 'cell')[2], 23.5); assert.equal(Object.isFrozen(frozen.projection), true);
+  const many = result(Array.from({ length: 180 }, (_, i) => record(`R${String(i).padStart(3, '0')}`, 'A', 1000 + i, 2000 + i)), { snapshotAt: data.snapshotAt });
+  const largeConfig = tile({ pivotTotals: { ...pivotDefaults(), maximumRows: 200 } });
+  const window = mounted(largeConfig, many), first = displayedPivot(window.host, largeConfig, many);
+  assert.equal(first.rows.length, 50); assert.equal(first.projection.rowStart, 0); assert.equal(first.projection.rowEnd, 50);
+  const viewport = window.nodes().find(node => node.events.scroll); viewport.scrollTop = 5000; viewport.events.scroll();
+  const moved = displayedPivot(window.host, largeConfig, many); assert.equal(moved.rows.length, 50); assert.ok(moved.projection.rowStart > 90);
+  assert.equal(moved.rows[0][2], 1000 + moved.projection.rowStart); assert.equal(moved.cachedRows, 180); assert.equal(moved.visualTruncated, true);
+  const sample = freezeDisplayedResult(moved, { pane: 'main' }, { maxRows: 3 });
+  assert.equal(sample.displayedRows, 50); assert.equal(sample.cachedRows, 180); assert.equal(sample.rows.length, 3);
+  assert.equal(sample.chartTruncated, true); assert.equal(sample.clientSampleTruncated, true);
+});
+
+test('pivot capacity diagnostics never become attached numeric facts and compact capture keeps its actual window', () => {
+  const config = tile({ pivotTotals: { ...pivotDefaults(), maximumColumns: 1 } });
+  const sentinel = record(null, null, 9123, 8456, 0, 0); sentinel[6] = 'column_capacity'; sentinel[7] = 2;
+  const data = result([sentinel], { snapshotAt: '2026-11-12T00:00:00Z' }), view = mounted(config, data);
+  const captured = displayedPivot(view.host, config, data);
+  assert.deepEqual(captured.rows, []); assert.deepEqual(captured.columns, []); assert.equal(captured.projection.status, 'capacity');
+  assert.match(captured.projection.notice, /No numeric cells/); assert.equal(freezeDisplayedResult(captured, { pane: 'main' }).displayedRows, 0);
+  const rows = result(Array.from({ length: 80 }, (_, i) => record(`R${i}`, 'A', i, i + 10)));
+  const compact = mounted(config, rows, { compact: true }); assert.equal(displayedPivot(compact.host, config, rows).rows.length, 12);
 });
 
 for (const [data, message] of [[result([], { loading: true }), /Waiting for pivot/], [result([]), /No qualifying groups/],

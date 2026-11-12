@@ -335,6 +335,141 @@ def test_displayed_automatic_uses_frozen_rows_zero_source_work_and_no_tools(repo
     assert "no source query" in service.store.get("viewer", chat["id"])["messages"][-1]["text"]
 
 
+def test_displayed_pivot_window_and_null_grouping_metadata_reach_provider_without_query_work(report, monkeypatch):
+    import json
+
+    service, chat, packet = _displayed(report)
+    monkeypatch.setattr(ai_tools, "model_catalog", lambda *a, **kw: pytest.fail("No catalog"))
+    monkeypatch.setattr(ai_tools, "tile_plan", lambda *a, **kw: pytest.fail("No planning"))
+    packet["projection"] = {"kind": "pivot", "status": "data", "rowStart": 40, "rowEnd": 42,
+        "rowGroups": 80, "columnGroups": 2, "rowAxes": 1, "columnAxes": 1, "rowsOmitted": True,
+        "notice": "NULL at an included depth is SQL NULL. Totals use the qualifying population before Top N."}
+    packet["columns"] = [{"name": name} for name in ["Region", "Category", "Amount", "Row depth", "Column depth", "Scope"]]
+    packet["rows"] = [[None, "A", 23.5, 1, 1, "cell"], [None, None, 101.25, 0, 0, "grand_total"]]
+    packet.update(cachedRows=180, displayedRows=2, chartTruncated=True, partial=True)
+    turn = _attach(report, service, chat, packet)
+    packet["projection"]["rowStart"] = 0
+    packet["rows"][0][2] = 999
+    service.run("viewer", chat["id"], turn["turnId"])
+    evidence = json.loads(service.runtime.calls[0][1][0]["content"])["displayedEvidence"]
+    assert evidence["projection"]["rowStart"] == 40
+    assert evidence["rows"] == [[None, "A", 23.5, 1, 1, "cell"], [None, None, 101.25, 0, 0, "grand_total"]]
+    assert evidence["chartTruncated"] is True and evidence["partial"] is True
+    assert report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_pivot_projection_metadata_is_typed_bounded_and_sanitized(report):
+    service, chat, packet = _displayed(report)
+    packet["projection"] = {"kind": "pivot", "status": "data", "rowStart": 50, "rowEnd": 1,
+        "rowGroups": 10, "columnGroups": 2, "rowAxes": 1, "columnAxes": 1, "rowsOmitted": False,
+        "notice": "Grouping metadata"}
+    with pytest.raises(ApiProblem) as problem:
+        _attach(report, service, chat, packet)
+    assert problem.value.code == "ai_displayed_result_invalid"
+    assert DISPLAYED_SECRET not in str(problem.value)
+    packet["projection"].update(rowStart=0, rowEnd=1, notice="x" * 513)
+    with pytest.raises(ApiProblem) as problem:
+        _attach(report, service, chat, packet)
+    assert problem.value.code == "ai_displayed_result_invalid"
+    assert service.runtime.calls == [] and report.calls == []
+
+
+@pytest.mark.parametrize("mode", ["automatic", "ask"])
+def test_displayed_raw_values_and_typed_format_semantics_stay_frozen_through_provider_approval(report, monkeypatch, mode):
+    import json
+
+    service, chat, packet = _displayed(report, mode)
+    monkeypatch.setattr(ai_tools, "model_catalog", lambda *a, **kw: pytest.fail("No catalog"))
+    monkeypatch.setattr(ai_tools, "tile_plan", lambda *a, **kw: pytest.fail("No planning"))
+    output = {"table": "@report", "column": "share", "aggregate": "none", "kind": "calculated"}
+    display = {"output": output, "style": "percent", "precision": 1, "currency": None,
+        "percentScale": "fraction", "unit": "", "locale": "en-US", "localeMode": "viewer",
+        "queryUnit": "number", "queryScale": 1, "displayScale": 1, "minimumFractionDigits": 1,
+        "maximumFractionDigits": 1, "rules": [{"operator": "gte", "value": "0.2", "upper": None,
+        "label": "Above goal", "tone": "positive", "symbol": "check"}]}
+    packet["columns"] = [{"name": "Share", "type": "numeric", "output": output, "display": display}]
+    packet["rows"] = [[.25]]
+    turn = _attach(report, service, chat, packet)
+    packet["rows"][0][0] = 99
+    packet["columns"][0]["display"]["percentScale"] = "whole"
+    packet["columns"][0]["display"]["rules"][0]["label"] = "Later"
+    service.run("viewer", chat["id"], turn["turnId"])
+    if mode == "ask":
+        assert service.runtime.calls == [] and report.calls == []
+        approved, actions, rejected = service.approval("viewer", chat["id"], {
+            "pendingId": turn["pending"]["id"], "approved": True,
+            "expectedRevision": turn["revision"]}, report.request)
+        service.run("viewer", chat["id"], approved["turnId"], actions, rejected)
+    evidence = json.loads(service.runtime.calls[0][1][0]["content"])["displayedEvidence"]
+    assert evidence["rows"] == [[.25]]
+    assert evidence["columns"][0]["display"]["percentScale"] == "fraction"
+    assert evidence["columns"][0]["display"]["queryScale"] == 1
+    assert evidence["columns"][0]["display"]["rules"][0]["label"] == "Above goal"
+    assert evidence["columns"][0]["output"] == output
+    assert "Rows retain raw values" in evidence["sampling"]["notice"]
+    assert report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_format_metadata_rejects_oversized_or_untyped_descriptors_without_reflecting_rows(report):
+    service, chat, packet = _displayed(report)
+    packet["columns"][0]["display"] = {"locale": DISPLAYED_SECRET * 1000, "queryScale": True}
+    with pytest.raises(ApiProblem) as problem:
+        _attach(report, service, chat, packet)
+    assert problem.value.code == "ai_displayed_result_invalid"
+    assert DISPLAYED_SECRET not in str(problem.value)
+    assert service.runtime.calls == [] and report.calls == []
+    _assert_private(service, chat["id"])
+
+
+@pytest.mark.parametrize("kind", ["bar", "line", "donut"])
+@pytest.mark.parametrize("mode", ["automatic", "ask"])
+def test_displayed_diagnostic_only_notice_reaches_provider_without_hidden_cached_facts(report, monkeypatch, kind, mode):
+    import json
+
+    service, chat, packet = _displayed(report, mode)
+    monkeypatch.setattr(ai_tools, "model_catalog", lambda *a, **kw: pytest.fail("No catalog"))
+    monkeypatch.setattr(ai_tools, "tile_plan", lambda *a, **kw: pytest.fail("No planning"))
+    notice = ("A donut chart requires nonnegative values and a positive total. Use a bar chart for signed values."
+        if kind == "donut" else "This chart needs numeric measures. Very large exact values can exceed finite chart geometry; use a table or RAW CSV, or edit the measure.")
+    packet.update(columns=[], rows=[], cachedRows=1, displayedRows=0,
+        projection={"kind": kind, "status": "diagnostic", "notice": notice})
+    turn = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], turn["turnId"])
+    if mode == "ask":
+        assert service.runtime.calls == [] and report.calls == []
+        approved, actions, rejected = service.approval("viewer", chat["id"], {
+            "pendingId": turn["pending"]["id"], "approved": True,
+            "expectedRevision": turn["revision"]}, report.request)
+        service.run("viewer", chat["id"], approved["turnId"], actions, rejected)
+    evidence = json.loads(service.runtime.calls[0][1][0]["content"])["displayedEvidence"]
+    assert evidence["projection"] == {"kind": kind, "status": "diagnostic", "notice": notice}
+    assert evidence["rows"] == [] and evidence["columns"] == [] and evidence["displayedRows"] == 0
+    assert evidence["chartTruncated"] is False and evidence["cachedRows"] == 1
+    assert "1e5000" not in json.dumps(evidence)
+    assert report.calls == []
+    _assert_private(service, chat["id"])
+
+
+@pytest.mark.parametrize("change", ["facts", "columns", "notice_bound"])
+def test_displayed_diagnostic_projection_rejects_contradictory_facts_or_unbounded_notice(report, change):
+    service, chat, packet = _displayed(report)
+    packet.update(rows=[], columns=[], displayedRows=0, projection={"kind": "bar", "status": "diagnostic", "notice": "No finite chart geometry."})
+    if change == "facts":
+        packet.update(rows=[[DISPLAYED_SECRET]], displayedRows=1, columns=[{"name": "Hidden"}])
+    elif change == "columns":
+        packet["columns"] = [{"name": DISPLAYED_SECRET}]
+    else:
+        packet["projection"]["notice"] = DISPLAYED_SECRET * 1000
+    with pytest.raises(ApiProblem) as problem:
+        _attach(report, service, chat, packet)
+    assert problem.value.code == "ai_displayed_result_invalid"
+    assert DISPLAYED_SECRET not in str(problem.value)
+    assert service.runtime.calls == [] and report.calls == []
+    _assert_private(service, chat["id"])
+
+
 def test_displayed_ask_pauses_before_first_disclosure_and_approval_contains_no_rows(report):
     service, chat, packet = _displayed(report, "ask")
     waiting = _attach(report, service, chat, packet)

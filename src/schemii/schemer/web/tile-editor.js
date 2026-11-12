@@ -1,3 +1,4 @@
+import { numberFormatEditor, formattingOutputs } from './number-format.js';
 import { measureEditor } from "./measures.js";
 import { element } from '#common/dom.js';
 import { createIconButton } from '#common/ui.js';
@@ -86,7 +87,7 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, sav
   function render() {
     disposeSelects(body); body.replaceChildren();
     tabbar.replaceChildren();
-    const tabs = [['fields', 'View & fields'], ['filters', 'Optional filters'], ['results', 'Sort & result filters'], ...(current.kind === 'detail' ? [] : [['drill', 'Drill-through columns']])];
+    const tabs = [['fields', 'View & fields'], ['filters', 'Optional filters'], ['results', 'Sort & result filters'], ['formats', 'Number formats'], ...(current.kind === 'detail' ? [] : [['drill', 'Drill-through columns']])];
     if (!tabs.some(([id]) => id === tab)) tab = 'fields';
     for (const [id, label] of tabs) {
       const button = element('button', { type: 'button', className: 'ui-button', text: label, attrs: { role: 'tab', 'aria-selected': id === tab, 'aria-controls': `tile-${id}-pane` } });
@@ -103,7 +104,8 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, sav
       }
       body.append(element('p', { className: 'hint', text: 'Results stream automatically into a bounded browser cache. Scroll to browse received rows or groups; scrolling does not run another query. Previews stop at row or memory limits, and charts may display fewer groups. Refresh runs the query again. Expand a tile and choose Download full results to run the full query against a fresh snapshot.' }));
 
-    } else if (tab === 'results') renderResultControls();
+    } else if (tab === 'formats') body.append(numberFormatEditor(current,{outputs:formattingOutputs(current,reportOutputs(current,model,catalog)),onChange:render,element,modelSelect}));
+    else if (tab === 'results') renderResultControls();
     else if (tab === 'filters') {
       const parameters = element('section'), filters = element('section'); body.append(parameters, filters);
       const optionalDraft = { ...modelDraft, scopes: modelDraft.scopes.filter(scope => scope.kind !== 'required' && scope.requirement !== 'optional') };

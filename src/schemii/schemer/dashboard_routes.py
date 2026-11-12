@@ -118,6 +118,26 @@ def validate_dashboard(services, owner, body):
                 graph.validate_grain(candidate)
         validate_time_analysis(tile.model_copy(update={"dimensions": tile_dimensions(tile)}) if tile.kind == "pivot" else tile, catalog, definition)
         validate_report_controls(tile, catalog, definition)
+        from .time_analysis import source_type
+        from schemii.schemoo.derived import normalized_type, output_type, NUMERIC_ORDER
+        available = {(o.table, o.column, o.aggregate, o.kind): o for i, o in enumerate(graph.outputs) if i in graph.visible_indices()}
+        for setting in tile.number_formats:
+            output = setting.output
+            if output.kind.startswith("kpi_"):
+                if tile.kind != "kpi" or not tile.kpi_comparison or (output.table, output.column, output.aggregate, output.kind) not in {
+                    ("@kpi", "baseline", "none", "kpi_baseline"), ("@kpi", "absolute", "none", "kpi_absolute"), ("@kpi", "percent", "none", "kpi_percent")}:
+                    raise ValueError("A formatted KPI comparison was removed. Rebind or remove its format.")
+                continue
+            key = (output.table, output.column, output.aggregate, output.kind)
+            if key not in available:
+                raise ValueError("A formatted output was removed or hidden. Rebind or remove its format.")
+            if output.kind in {"calculated", "change", "percent_change", "running_total"}:
+                continue
+            kind = source_type(catalog, definition, output.table, output.column)
+            if output.aggregate != "none":
+                kind = output_type(output.aggregate, kind)
+            if normalized_type(kind) not in NUMERIC_ORDER:
+                raise ValueError("Number formats and threshold rules require numeric output fields.")
         for field in base_measures(tile):
             if field in tile.measures and tile.kind in {"bar", "line", "donut"} and field.aggregate not in {"count", "count_distinct"} and not numeric(field.table, field.column):
                 raise ValueError("Charts require numeric measures")

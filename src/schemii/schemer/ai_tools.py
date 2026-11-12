@@ -10,7 +10,7 @@ import secrets
 from types import SimpleNamespace
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError, create_model
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError, create_model, model_validator
 
 from schemii.common.ai.tool_schema import provider_schema
 from schemii.common.api.errors import ApiProblem
@@ -18,7 +18,7 @@ from schemii.schemoo.models import Contract, ScopeSelection, ReportFilter
 from schemii.schemoo.service import load_model, model_catalog, domain_query
 from schemii.schemoo.routes import ParameterValuesRequest
 from .access import available_dashboards, prepare_dashboard
-from .dashboard_models import DashboardUpdate, MeasureOperand
+from .dashboard_models import DashboardUpdate, MeasureOperand, FormatOutput, OutputNumberFormat
 from .dashboard_store import DashboardNotFoundError, DashboardConflictError
 from .tile_queries import tile_plan
 
@@ -132,10 +132,53 @@ class DrillSelection(Contract):
 class DrillTile(Tile):
     selection: DrillSelection
 
+class DisplayedNumberPresentation(OutputNumberFormat):
+    """The same bounded format descriptor used by the mounted presentation."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    locale: str = Field(min_length=1, max_length=64)
+    localeMode: Literal["viewer", "report"]
+    queryUnit: Literal["number", "percent", "percentage_points"]
+    queryScale: int = Field(ge=1, le=100)
+    displayScale: int = Field(ge=1, le=100)
+    minimumFractionDigits: int = Field(ge=0, le=12)
+    maximumFractionDigits: int = Field(ge=0, le=12)
+
+    @model_validator(mode="after")
+    def valid_presentation(self):
+        if self.queryScale not in (1, 100) or self.displayScale not in (1, 100) or self.minimumFractionDigits > self.maximumFractionDigits:
+            raise ValueError("Invalid displayed number presentation")
+        return self
+
+
 class DisplayedColumn(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     name: str = Field(max_length=256)
     type: str = Field(default="unknown", max_length=256)
+    output: FormatOutput | None = None
+    display: DisplayedNumberPresentation | None = None
+
+
+class DisplayedPivotProjection(BaseModel):
+    """Bounded client view metadata; never source or execution authority."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    kind: Literal["pivot"]
+    status: Literal["data", "capacity", "invalid"]
+    rowStart: int = Field(ge=0, le=10000)
+    rowEnd: int = Field(ge=0, le=10000)
+    rowGroups: int = Field(ge=0, le=10000)
+    columnGroups: int = Field(ge=0, le=10000)
+    rowAxes: int = Field(ge=1, le=4)
+    columnAxes: int = Field(ge=1, le=3)
+    rowsOmitted: bool
+    notice: str = Field(max_length=512)
+
+
+class DisplayedDiagnosticProjection(BaseModel):
+    """Only the bounded visible notice is shared when no facts are rendered."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    kind: Literal["bar", "line", "donut", "detail", "aggregate", "kpi"]
+    status: Literal["diagnostic", "empty", "loading", "error"]
+    notice: str = Field(min_length=1, max_length=512)
 
 
 class DisplayedResult(BaseModel):
@@ -154,6 +197,7 @@ class DisplayedResult(BaseModel):
     tileSelections: dict[str, ScopeSelection] | None = Field(default=None, max_length=20)
     reportFilters: list[ReportFilter] | None = Field(default=None, max_length=32)
     drillSelection: DrillSelection | None = None
+    projection: DisplayedPivotProjection | DisplayedDiagnosticProjection | None = None
     columns: list[DisplayedColumn] = Field(max_length=128)
     rows: list[list[JsonValue]] = Field(max_length=10000)
     cachedRows: int = Field(ge=0, le=10000)
@@ -171,6 +215,10 @@ def validate_displayed_result(value):
         result = DisplayedResult.model_validate(value)
         if (result.displayedRows > result.cachedRows or len(result.rows) > result.displayedRows
                 or any(len(row) != len(result.columns) for row in result.rows)
+                or (isinstance(result.projection, DisplayedPivotProjection) and not
+                    0 <= result.projection.rowStart <= result.projection.rowEnd <= result.projection.rowGroups)
+                or (isinstance(result.projection, DisplayedDiagnosticProjection) and
+                    (result.rows or result.columns or result.displayedRows))
                 or (result.pane == "drill") != (result.drillSelection is not None)):
             raise ValueError("Invalid displayed result shape")
         return result
@@ -238,7 +286,9 @@ def capture_displayed(services, owner, dashboard_id, request, value):
     packet["selections"] = {**packet["selections"], **tile_selections}
     packet["reportFilters"] = report_filters
     packet = bounded_page(services, packet)
-    packet["sampling"]["notice"] = "Client-supplied, unverified displayed evidence; sampled rows are not database totals."
+    # Keep this ASCII notice shorter than bounded_page's reserved notice, so
+    # replacing it cannot increase the already enforced provider byte budget.
+    packet["sampling"]["notice"] = "Unverified client sample, not totals. Rows retain raw values; display gives units/scales. Pivot depth/scope separates NULL and totals."
     return packet, binding
 
 class ParameterValues(Contract):

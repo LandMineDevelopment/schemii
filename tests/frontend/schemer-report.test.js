@@ -1,3 +1,4 @@
+import { numberFormatEditor, formattingOutputs } from '../../src/schemii/schemer/web/number-format.js';
 import { measureEditor, calculationErrors } from "../../src/schemii/schemer/web/measures.js";
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -108,7 +109,7 @@ function editorFixture({ tile = reportTile(), sourceModel = model, schema = cata
     modelSelect: (label, choices, selected, change) => element('select', { text: label, choices, selected, change }),
     disposeSelects() {}, timeDimensions: () => [], fieldLabel: (_draft, _catalog, field) => field.column,
     aggregateChoices, fieldChoices: (...args) => pivot ? fieldChoices(...args) : [], fieldKey: field => JSON.stringify([field.table, field.column]),
-    measureEditor, TILE_TYPES, tileErrors: (tile, source, schema) => pivot ? tileErrors(tile, source, schema) : [...reportControlErrors(tile, source, schema),...calculationErrors(tile,reportOutputs(tile,source,schema))], reportOutputs, reportOutputKey, numericFilterValue, tileDimensions, pivotDefaults, tileAggregateChoices,
+    numberFormatEditor, formattingOutputs, measureEditor, TILE_TYPES, tileErrors: (tile, source, schema) => pivot ? tileErrors(tile, source, schema) : [...reportControlErrors(tile, source, schema),...calculationErrors(tile,reportOutputs(tile,source,schema))], reportOutputs, reportOutputKey, numericFilterValue, tileDimensions, pivotDefaults, tileAggregateChoices,
     tile, model: sourceModel, catalog: schema, onSave: async tile => saves.push(structuredClone(tile)),
   });
   vm.runInContext(tileEditorSource.replace(/^import .*;\n/gm, '').replace('export function openTileEditor', 'function openTileEditor'), context);
@@ -285,4 +286,24 @@ test('KPI editor retains exact baseline input and explicit favorable direction',
   await f.node('Apply & run').onclick();
   assert.equal(f.saves.length,1);assert.equal(f.saves[0].kpiComparison.baseline.constant,'9007199254740993.00001');
   assert.equal(f.saves[0].kpiComparison.favorable,'lower');assert.equal(original.kpiComparison,undefined);
+});
+
+test('actual editor authors exact ordered formats, locale and percentage scaling without replacing measure values',async()=>{
+  const f=editorFixture({pivot:true});f.node('Number formats').onclick();f.node('Add output number format').onclick();
+  f.node('Report number locale').change('de-DE');f.node('Format 1 style').change('currency');
+  f.node('Format 1 currency').value='EUR';f.node('Format 1 currency').oninput();
+  f.node('Format 1 decimal places').value='2';f.node('Format 1 decimal places').oninput();
+  f.node('Add Format 1 rule').onclick();
+  f.node('Format 1 rule 1 threshold').value='9007199254740993.000000001';f.node('Format 1 rule 1 threshold').oninput();
+  f.node('Format 1 rule 1 label').value='Large revenue';f.node('Format 1 rule 1 label').oninput();
+  await f.node('Apply & run').onclick();assert.equal(f.saves.length,1);
+  assert.equal(f.saves[0].numberFormats[0].rules[0].value,'9007199254740993.000000001');
+  assert.equal(f.saves[0].formatLocale,'de-DE');assert.equal(f.saves[0].numberFormats[0].precision,2);
+  assert.deepEqual(f.saves[0].measures,reportTile().measures);
+  const reopened=editorFixture({tile:f.saves[0],pivot:true});reopened.node('Number formats').onclick();
+  reopened.node('Format 1 style').change('percent');reopened.node('Format 1 percent scale').change('whole');
+  reopened.node('Format 1 decimal places').value='2.0000000000000001';reopened.node('Format 1 decimal places').oninput();
+  await reopened.node('Apply & run').onclick();assert.equal(reopened.saves.length,0);
+  reopened.node('Format 1 decimal places').value='4';reopened.node('Format 1 decimal places').oninput();
+  await reopened.node('Apply & run').onclick();assert.equal(reopened.saves[0].numberFormats[0].percentScale,'whole');
 });

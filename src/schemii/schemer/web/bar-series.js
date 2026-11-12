@@ -10,6 +10,7 @@ export function dimensionName(tile, index) {
 }
 export function barDimensionValue(tile, index, value) {
   if (value === null) return 'NULL';
+  if (tile.formatDimension) { const formatted=tile.formatDimension(index,value);if(formatted!==undefined) return formatted; }
   const field = tile.dimensions[index], time = tile.timeAnalysis;
   if (time && time.table === field.table && time.column === field.column && typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
     const date = new Date(`${value}T00:00:00Z`);

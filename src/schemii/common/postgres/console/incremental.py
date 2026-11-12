@@ -18,6 +18,8 @@ def execute_incremental(
     connection: Any,
     statement: str,
     consume: Callable[[tuple[Any, ...]], None],
+    *,
+    on_description: Callable[[tuple[tuple[str, int], ...]], None] | None = None,
 ) -> tuple[tuple[tuple[str, int], ...], str]:
     """Dispatch exactly once, adapt one row, and restore protocol on all exits.
 
@@ -57,6 +59,12 @@ def execute_incremental(
                             )
                             for index in range(response.nfields)
                         )
+                        if on_description is not None:
+                            try:
+                                on_description(columns)
+                            except BaseException:
+                                consumer_failed = True
+                                raise
                     if status == pq.ExecStatus.SINGLE_TUPLE:
                         try:
                             check_query_authority()

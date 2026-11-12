@@ -876,3 +876,32 @@ def test_migration_namespace_or_authored_sql_denial_rolls_back_before_commit(mon
             on_started=lambda *_: None, on_intended=lambda *_: None)
     connection = factory.connections[0]
     assert connection.commits == 0 and connection.rollbacks == 1 and connection.closed
+
+
+def test_incremental_returning_uses_first_pgresult_type_metadata_before_scalar_caps(monkeypatch):
+    from decimal import Decimal
+    from types import SimpleNamespace
+    import threading
+    from psycopg import pq
+    from schemii.common.postgres.console import gateway, incremental
+    from tests.test_raw_console import PgResult
+    big=9007199254740993
+    oids=(20,3802,1016,1700)
+    row=(big,big,[big],Decimal('-12345678901234567890.123456789'))
+    class TypedResult(PgResult):
+        def __init__(self,status,rows=()):
+            super().__init__(status,rows);self.nfields=len(oids)
+        def ftype(self,index): return oids[index]
+    responses=iter([TypedResult(pq.ExecStatus.SINGLE_TUPLE,[row]),TypedResult(pq.ExecStatus.TUPLES_OK),None])
+    pg=SimpleNamespace(transaction_status=pq.TransactionStatus.INTRANS,send_query_params=lambda *args:None,set_single_row_mode=lambda:None)
+    connection=SimpleNamespace(lock=threading.RLock(),info=SimpleNamespace(encoding='utf-8'),pgconn=pg,_start_query=lambda:None,wait=lambda action:next(responses) if action=='fetch' else None)
+    class Loader:
+        def set_pgresult(self,response,set_loaders): self.response=response
+        def load_row(self,index,factory): return self.response.rows[index]
+    monkeypatch.setattr(incremental.generators,'send',lambda pg:None)
+    monkeypatch.setattr(incremental.generators,'fetch',lambda pg:'fetch')
+    monkeypatch.setattr(incremental,'Transformer',lambda connection:Loader())
+    monkeypatch.setattr(gateway,'_console_type_names',lambda *args:{20:'bigint',3802:'jsonb',1016:'bigint[]',1700:'numeric'})
+    result,=gateway.execute_console_statements(connection,['UPDATE x RETURNING values'])
+    assert result.rows == ((str(big),big,[big],str(row[-1])),)
+    assert [column.data_type for column in result.columns] == ['bigint','jsonb','bigint[]','numeric']
