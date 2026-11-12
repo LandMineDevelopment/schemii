@@ -53,7 +53,7 @@ async def reserve(services, owner, model, tiles):
         raise
 
 
-async def _cleanup(console, owner, receipt, pending):
+async def _cleanup(console, owner, receipt, pending, closed):
     # Interrupt any database call before joining its worker. Never close a cursor
     # concurrently with a worker that is still fetching from it.
     cancel_error = None
@@ -69,12 +69,20 @@ async def _cleanup(console, owner, receipt, pending):
     execution = await asyncio.to_thread(console.get_owned, owner, receipt.id)
     first_error = cancel_error
     for result in execution.results:
+        if result.id in closed:
+            continue
         try:
             await asyncio.to_thread(console.close_result, owner, None, receipt.id, result.id)
+            closed.add(result.id)
         except Exception as error:
             first_error = first_error or error
     if first_error:
         raise first_error
+
+
+def _retire_result(console, owner, execution_id, result_id, closed):
+    console.close_result(owner, None, execution_id, result_id)
+    closed.add(result_id)
 
 
 async def events(services, owner, model, tiles, errors=(), *, export=False):
@@ -87,6 +95,7 @@ async def events(services, owner, model, tiles, errors=(), *, export=False):
         return
     console, receipt, pending = services.console, None, None
     tile_id = None
+    closed = set()
     total_bytes = 0
     total_rows = 0
     failure = None
@@ -146,7 +155,10 @@ async def events(services, owner, model, tiles, errors=(), *, export=False):
                 cursor = page.next_cursor
                 if reason or cursor is None:
                     break
-            await asyncio.to_thread(console.close_result, owner, None, receipt.id, result.id)
+            pending = asyncio.create_task(asyncio.to_thread(
+                _retire_result, console, owner, receipt.id, result.id, closed))
+            await asyncio.shield(pending)
+            pending = None
             if index == len(tiles) - 1:
                 receipt = None  # All source results are closed before final completion.
             yield {"type": "complete", "tileId": tile_id, "rowCount": count,
@@ -163,7 +175,7 @@ async def events(services, owner, model, tiles, errors=(), *, export=False):
     finally:
         if receipt is not None:
             with anyio.CancelScope(shield=True):
-                cleanup = asyncio.create_task(_cleanup(console, owner, receipt, pending))
+                cleanup = asyncio.create_task(_cleanup(console, owner, receipt, pending, closed))
                 try:
                     await asyncio.shield(cleanup)
                 except asyncio.CancelledError:
