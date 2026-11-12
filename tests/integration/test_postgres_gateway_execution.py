@@ -508,14 +508,30 @@ def test_fixed_scalar_named_batch_remains_cancellable_and_releases_admission(
 
 
 
-def test_named_fixed_scalar_extremes_preserve_every_row_and_export_snapshot(gateway_target: GatewayTarget) -> None:
+def test_named_fixed_scalar_extremes_preserve_every_row_and_export_snapshot(
+    gateway_target: GatewayTarget,
+) -> None:
     import json
+
     gateway = PsycopgPostgresGateway()
     session = gateway.open_console_read_session(
         gateway_target.connection, gateway_target.namespace,
-        ["SELECT n::bigint, '-9223372036854775808'::bigint, '-1.7976931348623157e308'::float8, 'Infinity'::float4, CASE WHEN n % 2 = 0 THEN NULL::boolean ELSE true END FROM generate_series(1, 100) AS n"],
+        [
+            "SELECT n::bigint, '-9223372036854775808'::bigint, "
+            "'-1.7976931348623157e308'::float8, 'Infinity'::float4, "
+            "CASE WHEN n % 2 = 0 THEN NULL::boolean ELSE true END "
+            "FROM generate_series(1, 100) AS n ORDER BY n"
+        ],
         on_started=lambda pid: True, page_memory_bytes=4096,
     )
+    # Unsafe SQL bigint scalars use exact text for JavaScript consumers; floats
+    # retain the driver's value, including non-finite values at this boundary.
+    expected = [
+        (n, "-9223372036854775808", -1.7976931348623157e308, float("inf"),
+         None if n % 2 == 0 else True)
+        for n in range(1, 101)
+    ]
+    snapshots = []
     try:
         for fetch in (session.page, session.export_page):
             received = []
@@ -523,10 +539,17 @@ def test_named_fixed_scalar_extremes_preserve_every_row_and_export_snapshot(gate
                 page = fetch(0, len(received), 30)
                 assert page
                 assert sum(len(json.dumps(row).encode()) for row in page) <= 4096
-                assert all(row[1] == -9223372036854775808 and row[2] == -1.7976931348623157e308 for row in page)
-                received.extend(row[0] for row in page)
-            assert received == list(range(1, 101))
+                for row in page:
+                    assert tuple(type(value) for value in row[:4]) == (
+                        int, str, float, float,
+                    )
+                    assert row[2].hex() == "-0x1.fffffffffffffp+1023"
+                    assert row[4] is (None if row[0] % 2 == 0 else True)
+                received.extend(page)
+            assert received == expected
             assert fetch(0, 100, 30) == ()
+            snapshots.append(received)
+        assert snapshots[0] == snapshots[1]
     finally:
         session.close()
     assert gateway._connection_capacity._total == 0
