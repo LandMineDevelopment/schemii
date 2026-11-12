@@ -240,7 +240,7 @@ def source_dependencies(catalog, definition, *, previous=None):
             contributor = output.get("nodeId", source)
             reference(contributor, output["column"])
             if output.get("operand"):
-                reference(contributor, output["operand"])
+                reference(output.get("operandNodeId", source), output["operand"])
             for item in output.get("conditions", []):
                 condition(item)
     # Grain and identity assumptions need their columns even when hidden.
@@ -347,7 +347,7 @@ def source_drift(catalog, definition):
             contributor = output.get("nodeId", source)
             referenced.add((contributor, output.get("column")))
             if output.get("operand"):
-                referenced.add((contributor, output["operand"]))
+                referenced.add((output.get("operandNodeId", source), output["operand"]))
             referenced.update((condition.get("table"), condition[key]) for condition in output.get("conditions", [])
                               for key in ("column", "compareColumn") if condition.get(key))
     issues = []
@@ -467,7 +467,7 @@ def source_issues(catalog, definition):
             contributor = output.get("nodeId", source)
             check({"table": contributor, "column": output["column"]}, node["id"])
             if output.get("operand"):
-                check({"table": contributor, "column": output["operand"]}, node["id"])
+                check({"table": output.get("operandNodeId", source), "column": output["operand"]}, node["id"])
             for condition in output.get("conditions", []):
                 check(condition, node["id"])
                 if condition.get("domain"):

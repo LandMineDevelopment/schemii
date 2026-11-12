@@ -81,3 +81,33 @@ test("summary mapping suggestions follow one explicit FK without choosing betwee
   catalog.relationships.push({id:"approver_fk",sourceTable:"cert",targetTable:"people",sourceColumn:"approver_id",targetColumn:"id"});
   assert.deepEqual(suggestSummaryConnection(draft,catalog,"certs","people"),[]);
 });
+
+test("calculated metadata resolves later-authored inputs with PostgreSQL promotions",()=>{
+  const {draft,catalog}=fixture();
+  catalog.tables[0].columns.find(column=>column.name==="salary").dataType="integer";
+  catalog.tables[0].columns.find(column=>column.name==="bonus").dataType="smallint";
+  draft.nodes.unshift({id:"downstream",table:"people",label:"Downstream",derivation:{kind:"row",source:"people",groupBy:[],outputs:[
+    {id:"scaled",label:"Scaled",operation:"multiply",nodeId:"calc",column:"total",operandNodeId:"people",operand:"bonus"}]}});
+  assert.equal(nodeColumns(draft,catalog,draft.nodes[0])[0].dataType,"integer");
+  draft.nodes.push({id:"summary",table:"people",label:"Summary",derivation:{kind:"aggregate",source:"people",groupBy:["id"],outputs:[
+    {id:"sum",operation:"sum",column:"salary"},{id:"avg",operation:"avg",column:"salary"},{id:"min",operation:"min",column:"id"},{id:"count",operation:"count",column:"id"}]}});
+  assert.deepEqual(nodeColumns(draft,catalog,draft.nodes.at(-1)).map(column=>column.dataType),["uuid","bigint","numeric","uuid","bigint"]);
+  const reopened=joinModel(splitDraft(draft));
+  assert.equal(reopened.nodes[0].derivation.outputs[0].operandNodeId,"people");
+});
+test("invalid dependencies retain their output identity and an actionable repair path",()=>{
+  const {draft,catalog}=fixture();
+  draft.nodes[1].derivation.outputs.unshift({id:"later",operation:"multiply",nodeId:"calc",column:"total",operand:"bonus"});
+  assert.equal(nodeColumns(draft,catalog,draft.nodes[1])[0].dataType,"numeric");
+  draft.nodes[1].derivation.outputs[1].nodeId="calc";draft.nodes[1].derivation.outputs[1].column="later";
+  const columns=nodeColumns(draft,catalog,draft.nodes[1]);
+  assert.equal(columns[0].name,"later");assert.match(columns[0].issue,/cycle.*calc.later.*calc.total/);
+  draft.nodes[1].derivation.outputs[1].column="missing";
+  assert.match(nodeColumns(draft,catalog,draft.nodes[1])[0].issue,/calc.later.*calc.total.*calc.missing/);
+});
+test("row conditions may use another calculation at the same mapped owner grain",()=>{
+  const {draft}=fixture();
+  draft.nodes.push({id:"other",table:"people",derivation:{kind:"row",source:"people",outputs:[]}});
+  draft.nodes.push({id:"history",table:"people"});
+  assert.deepEqual([...conditionSources(draft,draft.nodes[1].derivation,{})].sort(),["calc","other","people"]);
+});

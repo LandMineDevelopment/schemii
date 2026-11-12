@@ -692,3 +692,26 @@ def test_qualified_model_create_save_patch_and_scalar_domain_ambiguity_are_ident
     source['relationships'][0]['columns'].append({'source':'name','target':'name'})
     with pytest.raises(ApiProblem,match='explicit domain'):
         domain_query(source,scoped,body)
+
+
+def test_shuffled_calculated_dependencies_and_filters_roundtrip_server_contract(setup):
+    api, model, catalog, _ = setup
+    catalog["tables"][0]["columns"] += [{"name":"salary","dataType":"integer"},{"name":"allowance","dataType":"integer"}]
+    nodes = [{"id":"later","table":"people","label":"Later","derivation":{"kind":"row","source":"people","outputs":[
+        {"id":"scaled","label":"Scaled","operation":"multiply","nodeId":"base","column":"total","operandNodeId":"people","operand":"allowance"}]}},
+        *DEFINITION["nodes"],{"id":"base","table":"people","label":"Base","derivation":{"kind":"row","source":"people","outputs":[
+            {"id":"total","label":"Total","operation":"add","column":"salary","operand":"allowance"}]}}]
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    saved = api.put(url,json={"expectedRevision":1,"name":"Composed","definition":{"root":"people","nodes":nodes,"edges":[],"scopes":[]}})
+    assert saved.status_code == 200, saved.text
+    reopened = api.get(url).json()
+    assert reopened["definition"]["nodes"][0]["derivation"]["outputs"][0]["operandNodeId"] == "people"
+    explore = {"fields":[{"table":"people","column":"name"}],"reportFilters":[{"id":"positive","mode":"rows","conditions":[{"table":"later","column":"scaled","operator":"gt","value":0}]}]}
+    planned = api.post(url+"/plan",json={"expectedRevision":2,"explore":explore})
+    assert planned.status_code == 200, planned.text
+    assert '"salary" +' in planned.json()["sql"] and '"allowance") > 0' in planned.json()["sql"]
+    assert "JOIN" not in planned.json()["sql"]
+    nodes[0]["derivation"]["outputs"][0]["column"] = "missing"
+    invalid = api.put(url,json={"expectedRevision":2,"name":"Broken","definition":{"root":"people","nodes":nodes,"edges":[],"scopes":[]}})
+    assert invalid.status_code == 422
+    assert api.get(url).json()["revision"] == 2

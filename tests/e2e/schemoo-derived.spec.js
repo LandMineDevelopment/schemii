@@ -196,3 +196,45 @@ test("date conditions distinguish today from fixed values and survive cancel and
   await page.reload();
   await expect(page.getByRole("button",{name:"Save model",exact:true})).toBeDisabled();
 });
+
+test("calculated dependencies offer typed outputs, preserve them on save and allow output filters",async({page,request})=>{
+  const model=await(await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
+  const root="pay_band_class_dim";
+  const nodes=[{id:"base",table:root,label:"Pay calculation",derivation:{kind:"row",source:root,groupBy:[],outputs:[
+    {id:"total",label:"Total pay",operation:"add",column:"min_pay_range",operand:"level"}]}},...model.definition.nodes];
+  const saved=await request.put(`/api/v1/schemoo/models/${modelId}`,{data:{expectedRevision:model.revision,name:model.name,
+    definition:{...model.definition,nodes,scopes:[{id:"positive",label:"Positive calculation",kind:"conditional",rowBehavior:"require_matching",
+      alternatives:[{id:"default",label:"Default",inputs:[],conditions:[]}]}]}}});
+  expect(saved.ok(),await saved.text()).toBeTruthy();
+  await page.goto(`/schemoo?model=${modelId}`);
+  if(await page.locator("#inspector").isVisible())await page.getByRole("button",{name:"Close inspector",exact:true}).click();
+  await page.locator('[data-node-id="base"] .sc-node-header').click();
+  await page.getByRole("button",{name:"Add calculation using this source",exact:true}).click();
+  const dialog=page.getByRole("dialog",{name:"Add calculated source",exact:true});
+  await dialog.getByRole("textbox",{name:"Calculated source name",exact:true}).fill("Nested pay");
+  await dialog.getByRole("textbox",{name:"Field 1 name",exact:true}).fill("Double pay");
+  await chooseModelOption(page,"Field 1 source","Pay calculation");
+  await chooseModelOption(page,"Field 1 column","Total pay · integer");
+  await chooseModelOption(page,"Field 1 second column","Total pay · integer");
+  await dialog.getByRole("button",{name:"Apply to model",exact:true}).click();
+  await page.getByRole("button",{name:"Save model",exact:true}).click();
+  await expect(page.locator("#draft-status")).toContainText("Saved");
+  const persisted=await(await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
+  const nested=persisted.definition.nodes.find(node=>node.label==="Nested pay");
+  expect(nested.derivation.outputs[0]).toMatchObject({nodeId:"base",column:"total",operand:"total"});
+  const column=nested.derivation.outputs[0].id;
+  await expect(page.getByRole("button",{name:`Add filter to Nested pay.${column}`,exact:true})).toBeEnabled();
+  await page.getByRole("button",{name:`Add filter to Nested pay.${column}`,exact:true}).click();
+  const editor=page.getByRole("region",{name:`Add filter binding for ${column}`,exact:true});
+  await expect(editor).toBeVisible();
+  await editor.getByRole("button",{name:"Apply binding",exact:true}).click();
+  await page.getByRole("button",{name:"Save model",exact:true}).click();
+  await expect(page.locator("#draft-status")).toContainText("Saved");
+  const filtered=await(await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
+  expect(filtered.definition.scopes[0].alternatives[0].conditions).toContainEqual(expect.objectContaining({table:nested.id,column,operator:"not_null"}));
+  await page.reload();
+  await page.locator(`[data-node-id="${nested.id}"] .sc-node-header`).click();
+  await page.getByRole("button",{name:"Edit calculated source",exact:true}).click();
+  await expect(page.getByRole("combobox",{name:"Field 1 column",exact:true})).toHaveValue("Total pay · integer");
+  await page.getByRole("dialog",{name:"Edit calculated source",exact:true}).getByRole("button",{name:"Cancel",exact:true}).click();
+});

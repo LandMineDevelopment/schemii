@@ -115,3 +115,22 @@ def test_timestamp_precision_preserves_timezone_semantics(context, kind, zoned):
     catalog['tables'][0]['columns'][-1]['dataType'] = kind
     _, plan = queries.tile_plan(None, None, dashboard, tile.id)
     assert ("AT TIME ZONE 'America/New_York'" in plan['sql']) is zoned
+
+
+def test_calculated_source_types_share_validated_order_independent_model_metadata():
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemer.time_analysis import source_type
+    catalog = {"tables":[{"namespace":"reporting","name":"values","primaryKey":["id"],"columns":[
+        {"name":"id","dataType":"integer"},{"name":"value","dataType":"integer"},{"name":"big","dataType":"bigint"},{"name":"at","dataType":"date"}]}],"relationships":[]}
+    definition = ModelDefinition.model_validate({"root":"source","nodes":[
+        {"id":"row","namespace":"reporting","table":"values","label":"Row","derivation":{"kind":"row","source":"source","outputs":[
+            {"id":"total","label":"Total","operation":"add","nodeId":"summary","column":"n","operand":"value"}]}},
+        {"id":"source","namespace":"reporting","table":"values","label":"Source"},
+        {"id":"summary","namespace":"reporting","table":"values","label":"Summary","derivation":{"kind":"aggregate","source":"source","groupBy":["id"],"outputs":[
+            {"id":"n","label":"Count","operation":"count","column":"id"},{"id":"sum","label":"Sum","operation":"sum","column":"value"},
+            {"id":"big","label":"Big sum","operation":"sum","column":"big"},{"id":"date","label":"Date","operation":"min","column":"at"}]}}]})
+    assert [source_type(catalog,definition,"summary",name) for name in ["n","sum","big","date"]] == ["bigint","bigint","numeric","date"]
+    assert source_type(catalog,definition,"row","total") == "bigint"
+    definition.nodes[0].derivation.outputs[0].column = "missing"
+    with pytest.raises(ValueError,match=r"row.total.*summary.missing"):
+        source_type(catalog,definition,"row","total")

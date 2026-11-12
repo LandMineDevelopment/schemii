@@ -397,3 +397,103 @@ cert(person_id, name, effective, expires) AS (VALUES
         ["Bea", 1, 1, "No expiry"],
         ["Cy", 0, 0, None],
     ]
+
+
+def calculated_fixture():
+    catalog = {"tables":[
+        {"name":"people","primaryKey":["id"],"columns":[{"name":name,"dataType":kind} for name,kind in [
+            ("id","integer"),("salary","integer"),("allowance","integer"),("big","bigint"),("at","date")]]},
+        {"name":"cert","columns":[{"name":"person_id","dataType":"integer"},{"name":"name","dataType":"text"},{"name":"active","dataType":"boolean"}]}],
+        "relationships":[{"id":"cert_fk","sourceTable":"cert","targetTable":"people","sourceColumn":"person_id","targetColumn":"id"}]}
+    nodes = [{"id":"people","table":"people","label":"People"},{"id":"cert","table":"cert","label":"Certifications"},
+        {"id":"summary","table":"cert","label":"Summary","derivation":{"kind":"aggregate","source":"cert","groupBy":["person_id"],
+            "connection":{"target":"people","columns":[{"source":"person_id","target":"id"}]},
+            "outputs":[{"id":"n","label":"Count","operation":"count","column":"name"},
+                {"id":"active","label":"Active","operation":"count","column":"name","conditions":[{"table":"cert","column":"active","operator":"eq","value":True}]}]}}]
+    query = {"root":"people","nodes":nodes,"relationships":["cert_fk"],"fields":[{"table":"people","column":"id"},{"table":"summary","column":"n"}]}
+    return catalog, query
+
+
+def calculated_sql(plan):
+    sql = plan["sql"].replace('"public"."people"','"people"').replace('"public"."cert"','"cert"').removesuffix(";")
+    return """WITH people(id,salary,allowance,big,at) AS (VALUES
+        (1,100,20,100::bigint,DATE '2024-01-01'),(2,80,10,200::bigint,DATE '2024-02-01'),(3,NULL,0,NULL::bigint,NULL::date)),
+        cert(person_id,name,active) AS (VALUES (1,'CPR'::text,TRUE),(1,'First aid',FALSE),(2,'CPR',TRUE))
+    """, sql
+
+
+@pytest.mark.parametrize("mode",["rows","exists","not_exists"])
+def test_calculated_filter_only_certification_count_and_zero_have_postgres_values(execute,mode):
+    catalog, query = calculated_fixture()
+    query["fields"] = [{"table":"people","column":"id"}]
+    query["reportFilters"] = [{"mode":mode,"conditions":[{"table":"summary","column":"n","operator":"eq","value":0}]}]
+    plan = compile_preview(catalog,query)
+    prefix, sql = calculated_sql(plan)
+    assert sorted(execute(prefix+sql)) == ([[1],[2]] if mode=="not_exists" else [[3]])
+    assert '"active"' not in sql and "FILTER" not in sql
+
+
+def test_calculated_row_dependencies_keep_case_null_division_and_authored_order(execute):
+    catalog, query = calculated_fixture()
+    query["nodes"] = [
+        {"id":"downstream","table":"people","label":"Downstream","derivation":{"kind":"row","source":"people","outputs":[
+            {"id":"value","label":"Value","operation":"divide","nodeId":"base","column":"total","operand":"allowance"}]}},
+        *query["nodes"],
+        {"id":"base","table":"people","label":"Base","derivation":{"kind":"row","source":"people","outputs":[
+            {"id":"total","label":"Total","operation":"add","column":"salary","operand":"allowance","conditions":[{"table":"people","column":"salary","operator":"gt","value":80}]}]}}]
+    query["fields"] = [{"table":"people","column":"id"},{"table":"downstream","column":"value"}]
+    prefix, sql = calculated_sql(compile_preview(catalog,query))
+    assert sorted(execute(prefix+sql)) == [[1,6],[2,None],[3,None]]
+    query["reportFilters"] = [{"mode":"rows","conditions":[{"table":"downstream","column":"value","operator":"not_null"}]}]
+    query["nodes"].reverse()
+    prefix, sql = calculated_sql(compile_preview(catalog,query))
+    assert execute(prefix+sql) == [[1,6]]
+    assert "JOIN" not in sql and "NULLIF" in sql and "CASE WHEN" in sql
+
+
+def test_calculated_row_on_summary_and_reaggregation_preserve_materialized_grain(execute):
+    catalog, query = calculated_fixture()
+    query["nodes"].insert(0,{"id":"row","table":"people","label":"Row","derivation":{"kind":"row","source":"people","outputs":[
+        {"id":"value","label":"Value","operation":"add","nodeId":"summary","column":"n","operand":"allowance"}]}})
+    query["fields"] = [{"table":"people","column":"id"},{"table":"row","column":"value"}]
+    prefix, sql = calculated_sql(compile_preview(catalog,query))
+    assert sorted(execute(prefix+sql)) == [[1,22],[2,11],[3,0]]
+    query["fields"] = [{"table":"row","column":"value","aggregate":"sum"}]
+    prefix, sql = calculated_sql(compile_preview(catalog,query))
+    assert execute(prefix+sql) == [[33]]
+    query["fields"].append({"table":"cert","column":"name"})
+    with pytest.raises(ValueError,match="materialized grain"):
+        compile_preview(catalog,query)
+    query["nodes"][0] = {"id":"nested","table":"cert","label":"Nested","derivation":{"kind":"aggregate","source":"summary","groupBy":["person_id"],
+        "outputs":[{"id":"n","label":"Nested count","operation":"sum","column":"n"}]}}
+    query["fields"] = [{"table":"people","column":"id"},{"table":"nested","column":"n"}]
+    prefix, sql = calculated_sql(compile_preview(catalog,query))
+    assert sorted(execute(prefix+sql)) == [[1,2],[2,1],[3,None]]
+    assert "SUM(COUNT" not in sql
+
+
+@pytest.mark.parametrize("behavior,expected",[("keep_unmatched",[[1,2],[2,0],[3,0]]),("require_matching",[[1,2]])])
+def test_calculated_summary_model_input_is_applied_after_grouping(execute,behavior,expected):
+    catalog, query = calculated_fixture()
+    query["scopes"] = [{"id":"count","kind":"required","rowBehavior":behavior,"alternatives":[{"id":"enough","inputs":[{"id":"minimum","type":"integer","defaultValue":1}],
+        "conditions":[{"table":"summary","column":"n","operator":"gt","parameterId":"minimum"}]}]}]
+    plan = compile_preview(catalog,query)
+    prefix, sql = calculated_sql(plan)
+    assert sorted(execute(prefix+sql)) == expected
+    assert plan["parameterValues"] == {"count":{"minimum":1}}
+    assert "summary_filter" in sql
+
+
+def test_calculated_postgres_type_promotions_match_validated_field_metadata(execute):
+    from schemii.schemoo.prototype import model_field_details
+    catalog, query = calculated_fixture()
+    query["nodes"][-1] = {"id":"types","table":"people","label":"Types","derivation":{"kind":"aggregate","source":"people","groupBy":["id"],"outputs":[
+        {"id":"n","label":"N","operation":"count","column":"id"},{"id":"sum","label":"Sum","operation":"sum","column":"salary"},
+        {"id":"big","label":"Big","operation":"sum","column":"big"},{"id":"avg","label":"Average","operation":"avg","column":"salary"},
+        {"id":"date","label":"Date","operation":"min","column":"at"},{"id":"list","label":"List","operation":"list","column":"id"}]}}
+    ids = ["n","sum","big","avg","date","list"]
+    query["fields"] = [{"table":"types","column":name} for name in ids]
+    prefix, sql = calculated_sql(compile_preview(catalog,query))
+    labels = ["N","Sum","Big","Average","Date","List"]
+    actual = execute(prefix+"SELECT "+", ".join(f'pg_typeof(q."Types.{label}")::text' for label in labels)+f" FROM ({sql}) AS q LIMIT 1")[0]
+    assert actual == [model_field_details(catalog,query,"types",name)["dataType"] for name in ids] == ["bigint","bigint","numeric","numeric","date","text"]
