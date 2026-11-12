@@ -238,7 +238,7 @@ async function workerRequest(req){
       if(l.currentScenario?.scenario!==s.id)throw new Error('Finding must belong to the current assigned scenario.');
       const evidence=await ownedEvidence(req.evidence,l);
       if(!evidence.length || !evidence.some(path=>(l.captures||[]).some(c=>c.path===path&&c.generation===l.generation&&c.scenario===s.id&&c.scenarioAttempt===l.currentScenario.id&&c.phase==='scenario')))throw new Error('Finding needs at least one screenshot captured by this lane in its current session.');
-      const finding={id:`finding-${randomUUID()}`,lane:l.id,username:l.username,scenario:s.id,agent:l.agent,...fields,evidence,verificationStatus:'unverified',at:stamp()};
+      const finding={id:`finding-${randomUUID()}`,lane:l.id,username:l.username,scenario:s.id,agent:l.agent,generation:l.generation,scenarioAttempt:l.currentScenario.id,source:run.deployment.identity.fingerprint,...fields,evidence,verificationStatus:'unverified',at:stamp()};
       run.findings ||= [];run.findings.push(finding);
       await event(dir,{kind:'finding',id:finding.id,lane:l.id,scenario:s.id,severity:finding.severity,title:finding.title,evidence});
       await persist();return finding;

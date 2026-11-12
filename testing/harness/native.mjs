@@ -385,10 +385,11 @@ function filesUnchanged(files) {
 const verificationImport = `
 import json,sys
 from pathlib import Path
-from scripts.ci.local_ci import selected_plan, source_identity, lane_for, evidence, git
+from scripts.ci.local_ci import selected_plan, source_identity, lane_for, evidence, verify_original_run, git
 root,path,phase,base=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3],sys.argv[4]
 r=json.loads(path.read_text()); identity=source_identity(root)
 if r.get('schema')!=1 or r.get('source')!=identity: raise ValueError('wrong or stale source')
+origin=verify_original_run(root,path,r)
 if phase not in ('focused','final'): raise ValueError('invalid verification phase')
 if git(root,'rev-parse','--verify','--end-of-options',r['base_ref']+'^{commit}').decode().strip()!=base: raise ValueError('receipt base differs from frozen acceptance scope')
 plan=selected_plan(root,r['base_ref'],r.get('mode')=='full')
@@ -399,7 +400,7 @@ chosen=entries[:len(required)]
 if not required or [x['command'] for x in chosen]!=required: raise ValueError('wrong required command inventory')
 if phase=='final' and (len(entries)!=len(required) or r.get('status')!='passed' or r.get('acceptance') is not True or r.get('pending_layers') or r.get('pending_commands')): raise ValueError('failed pending cancelled or incomplete acceptance')
 if phase=='focused' and r.get('status') not in ('passed','feedback-passed'): raise ValueError('failed or incomplete focused checks')
-out=[]; files=[str(path.resolve())]
+out=[]; files=[str(path.resolve()),origin['path']]
 for entry in chosen:
  if entry.get('status')!='passed' or entry.get('exit_code')!=0: raise ValueError('required check did not pass')
  item={'command':entry['command'],'status':entry['status'],'duration_ms':entry['duration_ms']}
@@ -412,7 +413,7 @@ for entry in chosen:
   item['summary']=summary;files.append(str(timing.resolve()))
  out.append(item)
 if source_identity(root)!=identity: raise ValueError('source changed during receipt import')
-print(json.dumps({'source':identity,'commands':out,'files':files,'profile':r['profile'],'mode':r['mode']}))
+print(json.dumps({'source':identity,'commands':out,'files':files,'profile':r['profile'],'mode':r['mode'],'origin':{'path':origin['path'],'sha256':origin['sha256']}}))
 `;
 export function importVerification(run, receiptPath, { root, phase = 'final', note, python = 'python3' }) {
   const attempt = { id: randomUUID(), phase, at: new Date().toISOString(), status: 'rejected', note: requiredText(note, 'Verification provenance') };
@@ -431,7 +432,7 @@ export function importVerification(run, receiptPath, { root, phase = 'final', no
     const files = validated.files.map(boundFile);
     if (files[0].sha256 !== file.sha256 || !isDeepStrictEqual(before, sourceIdentity(root))) throw new Error('Source or receipt changed during import.');
     Object.assign(attempt, { status: 'passed', source: validated.source, profile: validated.profile,
-      commands: validated.commands, files, assurance: 'validated-original-local-ci-receipt' });
+      commands: validated.commands, files, origin: validated.origin, assurance: 'validated-original-local-ci-receipt' });
     return attempt;
   } catch (error) { attempt.reason = error.message; throw error; }
 }
@@ -451,12 +452,43 @@ function reproductionProof(run, targetLane, scenarioId) {
       && capture.scenarioAttempt === attempt.scenarioAttempt && capture.inspections?.some(item => item.agent === review.agent && item.sha256 === capture.sha256))) throw new Error('Remediation review lacks hash-bound original image inspection.');
   return { targetLane, scenarioId, attempt, review, captures: captures.map(capture => ({ path: capture.path, sha256: capture.sha256 })) };
 }
+function originalFindingProof(run, finding, manifestPath) {
+  const source = run.deployment?.identity?.fingerprint;
+  const lane = run.lanes?.find(item => item.id === finding.lane);
+  const scenario = lane?.scenarios?.find(item => item.id === finding.scenario);
+  if (!/^[0-9a-f]{64}$/.test(source || '') || !lane || !scenario || !finding.agent
+      || !finding.username || lane.username !== finding.username) throw new Error('Original finding lacks authentic lane/scenario/source provenance; preserve it as unverified.');
+  const captures = [];
+  for (const path of finding.evidence) {
+    const matched = (lane.captures || []).filter(capture => capture.path === path);
+    if (matched.length !== 1) throw new Error('Original evidence needs one authentic retained capture.');
+    const capture = matched[0];
+    const attempts = (scenario.attempts || []).filter(attempt => attempt.evidence?.includes(path)
+      && attempt.scenarioAttempt === capture.scenarioAttempt && attempt.generation === capture.generation
+      && attempt.source === source && attempt.reviewer === finding.agent);
+    if (capture.kind !== 'image' || capture.phase !== 'scenario' || capture.scenario !== finding.scenario
+        || capture.source !== source || capture.agent !== finding.agent || !capture.scenarioAttempt
+        || !Number.isSafeInteger(capture.generation) || capture.generation < 1
+        || !/^[0-9a-f]{64}$/.test(capture.sha256 || '') || attempts.length !== 1 || !attempts[0].id
+        || finding.source && finding.source !== source
+        || finding.scenarioAttempt && finding.scenarioAttempt !== capture.scenarioAttempt
+        || finding.generation !== undefined && finding.generation !== capture.generation) throw new Error('Original capture and checkpoint attempt/source/scenario binding is missing or changed.');
+    const file = ownedImportFile(dirname(manifestPath), path);
+    if (file.sha256 !== capture.sha256) throw new Error('Original evidence bytes differ from the authentic retained capture digest.');
+    captures.push({ capture: { path: capture.path, kind: capture.kind, phase: capture.phase, scenario: capture.scenario,
+      scenarioAttempt: capture.scenarioAttempt, generation: capture.generation, source: capture.source,
+      agent: capture.agent, sha256: capture.sha256, viewport: capture.viewport, url: capture.url, resources: capture.resources }, attempt: attempts[0] });
+  }
+  if (new Set(finding.evidence).size !== finding.evidence.length) throw new Error('Original finding evidence cannot repeat capture paths.');
+  return { finding, source, lane: lane.id, username: lane.username, scenario: scenario.id, captures };
+}
 export function importRemediation(original, current, findingId, input, { originalPath, currentPath }) {
   const finding = (original.findings || []).find(item => item.id === findingId);
   if (!finding || !Array.isArray(finding.evidence) || !finding.evidence.length || original.id === current.id) throw new Error('Import requires an original finding with retained evidence and a separately prepared reproduction run.');
   if (!['resolved-defect','not-reproduced','prerequisite-mistake','unsupported-action'].includes(input.disposition)) throw new Error('Import requires an explicit remediation/adjudication disposition.');
   if ((finding.verificationStatus === 'confirmed-defect' || finding.reviews?.some(review => review.verdict === 'confirmed-defect')) && input.disposition !== 'resolved-defect') throw new Error('A confirmed defect requires independently verified remediation, not reclassification.');
   if (!original.deployment?.identity?.fingerprint || original.deployment.identity.fingerprint === current.deployment?.identity?.fingerprint && input.disposition === 'resolved-defect') throw new Error('Confirmed defect remediation requires a later changed source in a new prepared run.');
+  const originalProof = originalFindingProof(original, finding, originalPath);
   const proof = reproductionProof(current, input.targetLane, input.scenario);
   if (proof.review.agent === finding.agent || proof.review.username?.toLowerCase() === finding.username?.toLowerCase()) throw new Error('The original reporter cannot independently resolve their own finding.');
   const files = [
@@ -466,7 +498,7 @@ export function importRemediation(original, current, findingId, input, { origina
   const receipt = { id: randomUUID(), at: new Date().toISOString(), originalRun: original.id, findingId,
     originalPath, currentPath, source: current.deployment.identity.fingerprint, disposition: input.disposition,
     provenance: requiredText(input.provenance, 'External review provenance'), note: requiredText(input.note, 'Resolution expected/actual reason'),
-    originalDigest: hash(Buffer.from(JSON.stringify(finding))), proofDigest: hash(Buffer.from(JSON.stringify(proof))),
+    originalDigest: hash(Buffer.from(JSON.stringify(originalProof))), proofDigest: hash(Buffer.from(JSON.stringify(proof))),
     reproduction: { targetLane: input.targetLane, scenario: input.scenario, attempt: proof.attempt.id, review: proof.review.id, reviewer: proof.review.agent }, files };
   original.remediations ||= []; original.remediations.push(receipt);
   current.importedFindings ||= []; current.importedFindings.push(receipt);
@@ -478,7 +510,7 @@ function remediationCurrent(receipt, run) {
     const original = JSON.parse(readFileSync(receipt.originalPath, 'utf8'));
     const current = JSON.parse(readFileSync(receipt.currentPath, 'utf8'));
     const finding = original.findings.find(item => item.id === receipt.findingId);
-    return receipt.originalDigest === hash(Buffer.from(JSON.stringify(finding)))
+    return receipt.originalDigest === hash(Buffer.from(JSON.stringify(originalFindingProof(original, finding, receipt.originalPath))))
       && receipt.proofDigest === hash(Buffer.from(JSON.stringify(reproductionProof(current, receipt.reproduction.targetLane, receipt.reproduction.scenario))));
   } catch { return false; }
 }
@@ -489,7 +521,9 @@ export function acceptance(run) {
   if(run.recordingStatus === 'unavailable')reasons.push('evidence recording unavailable');
   if (run.acceptanceContract >= 2) {
     const final = run.verificationHistory?.filter(item => item.phase === 'final').at(-1);
-    if (!final || final.status !== 'passed' || final.source?.fingerprint !== run.deployment?.identity?.fingerprint || !filesUnchanged(final.files)) reasons.push('current-source final application verification pending or changed');
+    if (!final || final.status !== 'passed' || !final.origin
+        || !final.files?.some(file => file.path === final.origin.path && file.sha256 === final.origin.sha256)
+        || final.source?.fingerprint !== run.deployment?.identity?.fingerprint || !filesUnchanged(final.files)) reasons.push('current-source final application verification pending or changed; original runner provenance required');
   }
   for (const receipt of run.importedFindings || []) if (!remediationCurrent(receipt, run)) reasons.push(`${receipt.findingId}: imported remediation evidence changed or no longer matches current source/review`);
   for (const lane of run.lanes) for (const reason of workerCleanupReasons(lane)) reasons.push(`${lane.id}: ${reason}`);

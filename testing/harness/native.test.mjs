@@ -489,8 +489,13 @@ async function remediationFixture(t) {
   const directory=await mkdtemp(join(tmpdir(),'schemii-remediation-test-'));
   t.after(()=>rm(directory,{recursive:true,force:true}));
   const f=reviewedLegacyFixture();f.run.id='qa-current-run';
-  const original={id:'qa-original-run',deployment:{identity:{fingerprint:'b'.repeat(64)}},lanes:[],
-    findings:[{id:'finding-original',agent:'original-reporter',username:'qa_designer_002',scenario:'old-case',evidence:['lane-old/failure.png'],verificationStatus:'confirmed-defect',reviews:[{verdict:'confirmed-defect'}]}]};
+  const oldSource='b'.repeat(64), oldHash=createHash('sha256').update(png()).digest('hex');
+  const original={id:'qa-original-run',deployment:{identity:{fingerprint:oldSource}},lanes:[{
+    id:'lane-old',username:'qa_designer_002',scenarios:[{id:'old-case',attempts:[{
+      id:'original-failed-attempt',scenarioAttempt:'old-begin',generation:1,source:oldSource,reviewer:'original-reporter',
+      functional:'failed',visual:'failed',evidence:['lane-old/failure.png']}]}],
+    captures:[{kind:'image',phase:'scenario',path:'lane-old/failure.png',source:oldSource,scenario:'old-case',scenarioAttempt:'old-begin',generation:1,agent:'original-reporter',sha256:oldHash}]}],
+    findings:[{id:'finding-original',lane:'lane-old',agent:'original-reporter',username:'qa_designer_002',scenario:'old-case',source:oldSource,scenarioAttempt:'old-begin',generation:1,evidence:['lane-old/failure.png'],verificationStatus:'confirmed-defect',reviews:[{verdict:'confirmed-defect'}]}]};
   const originalPath=join(directory,original.id,'manifest.json'),currentPath=join(directory,f.run.id,'manifest.json');
   await mkdir(join(directory,original.id,'lane-old'),{recursive:true,mode:0o700});
   await mkdir(join(directory,f.run.id,'lane-1'),{recursive:true,mode:0o700});
@@ -516,7 +521,7 @@ test('cross-run remediation preserves original finding and binds exact independe
 test('remediation rejects self-review stale source failed attempts changed bytes and confirmed-defect relabeling',async t=>{
   const f=await remediationFixture(t);
   const invoke=()=>importRemediation(f.original,f.run,'finding-original',f.input,f);
-  f.original.findings[0].agent=f.reviewer.agent;assert.throws(invoke,/reporter/);f.original.findings[0].agent='original';
+  f.original.findings[0].username=f.reviewer.username;f.original.lanes[0].username=f.reviewer.username;assert.throws(invoke,/reporter/);f.original.findings[0].username='qa_designer_002';f.original.lanes[0].username='qa_designer_002';
   f.scenario.attempts[0].functional='failed';assert.throws(invoke,/passing reproduction/);f.scenario.attempts[0].functional='passed';
   f.run.deployment.identity.fingerprint='c'.repeat(64);assert.throws(invoke,/current-source/);f.run.deployment.identity.fingerprint=fingerprint;
   f.input.disposition='unsupported-action';assert.throws(invoke,/confirmed defect/);f.input.disposition='resolved-defect';
@@ -534,13 +539,13 @@ test('new contract requires unchanged final CI verification and keeps rejected i
   assert.equal(run.verificationHistory.length,1);assert.equal(run.verificationHistory[0].status,'rejected');
   const bytes=await readFile(receiptPath);
   f.run.verificationHistory=[{id:'synthetic-gate-control',phase:'final',status:'passed',source:{fingerprint},files:[{path:receiptPath,sha256:createHash('sha256').update(bytes).digest('hex')}]}];
-  assert.equal(acceptance(f.run).status,'reviewed-acceptance');
+  assert.equal(acceptance(f.run).status,'review-pending','A synthetic gate receipt without original runner provenance cannot supply acceptance.');
   await writeJSON(receiptPath,{status:'changed'});
   assert.match(acceptance(f.run).reasons.join(),/verification pending or changed/);
 });
 
 
-test('original CI import parser accepts complete synthetic records and rejects terminal/source/inventory changes',async t=>{
+test('synthetic complete-looking CI receipts cannot establish original execution provenance',async t=>{
   // Synthetic receipt parser control only: no application checks are executed
   // and these temporary records never establish actual source acceptance.
   const directory=await mkdtemp(join(tmpdir(),'schemii-ci-import-parser-'));t.after(()=>rm(directory,{recursive:true,force:true}));
@@ -564,9 +569,8 @@ f=directory/'receipt.json';f.write_text(json.dumps(r));f.chmod(0o600)
   execFileSync('python3',['-c',control,root,directory],{cwd:root,stdio:'pipe'});
   const receiptPath=join(directory,'receipt.json'), original=JSON.parse(await readFile(receiptPath));
   const run={deployment:{identity:sourceIdentity(root)}};
-  const imported=importVerification(run,receiptPath,{root,note:'Explicit synthetic parser control, no actual acceptance'});
-  assert.equal(imported.status,'passed');assert.equal(imported.commands.length,original.commands.length);
-  assert.equal(imported.commands[0].summary.collected,1);
+  assert.throws(()=>importVerification(run,receiptPath,{root,note:'Explicit fabricated original negative control'}),/rejected/);
+  assert.equal(run.verificationHistory[0].status,'rejected');
   for(const status of ['failed','cancelled','pending','feedback-passed']) {
     await writeJSON(receiptPath,{...original,status});
     assert.throws(()=>importVerification(run,receiptPath,{root,note:'Synthetic negative terminal control'}),/rejected/);
@@ -582,5 +586,60 @@ f=directory/'receipt.json';f.write_text(json.dumps(r));f.chmod(0o600)
   const timing=join(directory,original.commands.find(c=>c.timing_evidence).timing_evidence);
   await writeFile(timing,'changed original telemetry');
   assert.throws(()=>importVerification(run,receiptPath,{root,note:'Synthetic changed original evidence'}),/rejected/);
-  assert.equal(run.verificationHistory[0].status,'passed','Original successful parser control is retained with later rejected attempts.');
+  assert.equal(run.verificationHistory[0].status,'rejected','Synthetic parser control remains excluded from acceptance.');
+});
+
+
+test('replacement original bytes and missing authentic historical attempt provenance are never imported',async t=>{
+  const f=await remediationFixture(t), oldImage=join(new URL('.',`file://${f.originalPath}`).pathname,'lane-old/failure.png');
+  const originalBytes=await readFile(oldImage);
+  await writeFile(oldImage,'replacement unrelated bytes');
+  assert.throws(()=>importRemediation(f.original,f.run,'finding-original',f.input,f),/Original evidence bytes/);
+  await writeFile(oldImage,originalBytes);
+  const captures=f.original.lanes[0].captures;f.original.lanes[0].captures=[];
+  assert.throws(()=>importRemediation(f.original,f.run,'finding-original',f.input,f),/authentic retained capture/);
+  f.original.lanes[0].captures=captures;
+  const attempt=f.original.lanes[0].scenarios[0].attempts[0];attempt.scenarioAttempt='wrong-original-attempt';
+  assert.throws(()=>importRemediation(f.original,f.run,'finding-original',f.input,f),/binding is missing or changed/);
+  attempt.scenarioAttempt='old-begin';
+  importRemediation(f.original,f.run,'finding-original',f.input,f);
+  await writeJSON(f.originalPath,f.original);await writeJSON(f.currentPath,f.run);
+  assert.equal(acceptance(f.run).status,'reviewed-acceptance');
+  f.original.lanes[0].captures[0].source='c'.repeat(64);await writeJSON(f.originalPath,f.original);
+  assert.match(acceptance(f.run).reasons.join(),/remediation evidence changed/);
+});
+
+
+test('QA importer accepts a real original runner with actual discovered cases in a disposable miniature source',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'schemii-actual-ci-origin-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const ownerRoot=new URL('../../',import.meta.url).pathname;
+  const control=String.raw`
+import json,sys,shutil,subprocess
+from pathlib import Path
+owner,root=Path(sys.argv[1]),Path(sys.argv[2])
+shutil.copytree(owner/'scripts',root/'scripts',ignore=shutil.ignore_patterns('__pycache__','*.pyc','*.test.js','*.test.mjs'))
+(root/'.gitignore').write_text('.schemii/\n__pycache__/\n')
+(root/'package.json').write_text(json.dumps({'type':'module','scripts':{'test':'node scripts/ci/node-tests.mjs'}}))
+body="import test from 'node:test';import assert from 'node:assert/strict';test('real child discovery',()=>assert.equal(2+2,4));\n"
+for name in ['tests/frontend/api.test.js','testing/harness/origin.test.mjs','scripts/ci/origin.test.mjs','testing/load/origin.test.mjs']:
+ path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(body)
+def git(*args):return subprocess.check_output(['git','-C',str(root),*args],text=True).strip()
+git('init','-q');git('config','user.name','Origin selftest');git('config','user.email','selftest@example.invalid');git('add','.');git('commit','-qm','tiny original runner source');base=git('rev-parse','HEAD')
+(root/'tests/frontend/api.test.js').write_text(body+"test('second actually collected case',()=>assert.equal(3+3,6));\n")
+git('add','.');git('commit','-qm','owned frontend regression')
+p=subprocess.run([sys.executable,'scripts/ci/local_ci.py','--base',base],cwd=root,capture_output=True,text=True)
+if p.returncode: raise RuntimeError(p.stdout+p.stderr)
+receipt=next((root/'.schemii/local-ci').glob('run-*/receipt.json'))
+print(json.dumps({'path':str(receipt),'base':base}))
+`;
+  const childEnvironment={...process.env};delete childEnvironment.NODE_TEST_CONTEXT;
+  const created=JSON.parse(execFileSync('python3',['-c',control,ownerRoot,directory],{encoding:'utf8',stdio:'pipe',env:childEnvironment}));
+  const run={acceptanceContract:2,verificationBase:created.base,deployment:{identity:sourceIdentity(directory)}};
+  const imported=importVerification(run,created.path,{root:directory,note:'Actual canonical runner tiny five-case provenance control, no application acceptance'});
+  assert.equal(imported.status,'passed');assert.equal(imported.commands[0].summary.collected,5);
+  assert.match(imported.origin.path,/local-ci-origins/);
+  const original=JSON.parse(await readFile(created.path));
+  const timing=join(new URL('.',`file://${created.path}`).pathname,original.commands[0].timing_evidence);
+  await writeFile(timing,'invented truncated original');
+  assert.throws(()=>importVerification(run,created.path,{root:directory,note:'Changed actual-origin negative control'}),/rejected/);
 });

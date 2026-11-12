@@ -248,7 +248,11 @@ For originally unverified findings the explicit adjudications `not-reproduced`,
 defect cannot be reclassified to avoid remediation. This appends provenance-linked
 receipts to both runs; it does not change the original finding, review or attempts,
 and cannot make old-source execution accepted. The current run imports the original
-finding/image digests and exact reproduction/review proof. Changed files, source,
+finding/image digests and exact reproduction/review proof. Each original image
+must resolve to its authentic retained lane, source, scenario, generation, agent,
+checkpoint attempt and capture digest; replacement bytes are rejected. Historical
+records lacking that binding remain unverified. Ongoing applicability rechecks
+those original proof records, in addition to the later reproduction. Changed files, source,
 latest attempts, reviews, original finding content, or reporter self-review invalidate
 the import. A GitHub issue closure or free-text claim is insufficient.
 
@@ -266,11 +270,15 @@ suite and does not substitute a new runner:
   --receipt /private/original-local-ci/receipt.json --note 'Original complete selected acceptance'
 ```
 
-The import reuses the existing change planner and timing/inventory validators,
+The import first requires the independent authenticated original-runner record
+from the common Git directory, then reuses the existing change planner and timing/inventory validators,
 checks exact source, command inventory/status, original per-attempt timing records,
 counts, pending scopes and file digests. Feedback can establish only focused checks;
 final acceptance requires the complete applicable plan, no failed/cancelled/missing
-checks and no pending layers. Rejected imports append a rejection receipt. Changed
+checks and no pending layers. Synthetic or copied receipt bundles and unknown historical originals are rejected;
+the importer never creates missing provenance. Original command lifecycle and
+actual discovered/executed case/source inventories are bound before import.
+Rejected imports append a rejection receipt. Changed
 imported files revoke their applicability. New-run reviewed acceptance requires a
 current final receipt in addition to actual independently reviewed UI cases and
 observed cleanup. Reports show intended, dispatched, started, completed, reviewed,

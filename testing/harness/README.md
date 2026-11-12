@@ -434,3 +434,17 @@ for append-only latest/initial execution, `resolve-finding` and `verify-receipt`
 These import actual independent reproduction and original local-CI evidence; they
 never turn stopped processes, a closed issue, missing checks or old-source failure
 into a pass. Run source changes require a newly prepared run.
+
+### Original execution and historical capture provenance
+
+`verify-receipt` requires the original local runner's separate authenticated origin
+record and actual discovered/executed case/source inventory. Receipt-selfclaimed
+counts, synthetic parser fixtures and arbitrary/copied bundle paths cannot supply
+final verification. The import does not run tests or manufacture historical origin.
+See [testing feedback](../../docs/testing-feedback.md#original-local-execution-provenance).
+
+`resolve-finding` requires authentic original capture-to-checkpoint source/agent/
+generation/scenario binding for every evidence image and checks its retained hash
+against actual bytes before import. Missing legacy provenance stays unverified;
+replacing an image or changing its original proof invalidates later applicability.
+Original failures and historical findings remain intact.

@@ -448,7 +448,7 @@ async function execute(command,o) {
   if(command==='claim'&&!o.agent)throw invalid('--agent is required.');
   const dir=runPath(o.run),run=await readJSON(join(dir,'manifest.json'));
   if(command==='status'){console.log(JSON.stringify(run,null,2));return;}
-  if(command==='report') {const path=join(dir,'report.html');await writeFile(path,reportHTML(run),{mode:0o600});console.log(JSON.stringify({report:path,status:run.status}));return;}
+  if(command==='report') {const path=join(dir,'report.html');await writeFile(path,reportHTML({...run,acceptance:acceptance(run)}),{mode:0o600});console.log(JSON.stringify({report:path,status:run.status}));return;}
   if(['verify-receipt','resolve-finding'].includes(command)) {
     // Offline imports never weaken the live source fence or edit a leased run.
     let originalDir=null;
