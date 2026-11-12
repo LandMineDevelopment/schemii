@@ -371,3 +371,136 @@ def test_admin_inventory_excludes_private_profiles(client,app):
     assert [item['id'] for item in response.json()['connections']]==['pg_managed']
     assert response.json()['connections'][0]['ownership']=='schemii'
     assert 'private_login' not in response.text
+
+
+@pytest.fixture
+def connection_api(app, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from schemii.common.connections.routes import router as connections_router
+    from schemii.common.connections.service import ConnectionService
+    from schemii.common.connections.store import InMemoryConnectionRepository
+
+    repository = InMemoryConnectionRepository()
+    connections = ConnectionService(repository, ())
+    connections.set_authority(app.state.auth)
+    postgres = Mock()
+    app.state.services = SimpleNamespace(connections=connections, postgres=postgres)
+    app.include_router(connections_router)
+    reads = {}
+    for name in ("list", "get", "resolve"):
+        reads[name] = Mock(wraps=getattr(repository, name))
+        monkeypatch.setattr(repository, name, reads[name])
+    with TestClient(app, base_url="https://localhost:8001", raise_server_exceptions=False,
+                    headers={"Origin": "https://localhost:8001"}) as api:
+        bootstrap(api)
+        yield api, connections, reads, postgres
+
+
+def connection_actor(api, connections, capabilities):
+    from schemii.common.connections.models import PostgresConnectionCreate
+
+    response = api.post('/api/v1/admin/accounts', json={
+        'username': 'selected-product-actor', 'display_name': 'Selected product actor',
+        'password': 'selected-product-test-password',
+    })
+    assert response.status_code == 201
+    actor = response.json()
+    personal = connections.create(actor['id'], PostgresConnectionCreate(
+        name='Personal target', host='localhost', database='personal',
+        username='personal_role', password='synthetic-personal-secret'))
+    managed = connections.create_schemii_owned(PostgresConnectionCreate(
+        name='Managed target', host='localhost', database='managed',
+        username='managed_role', password='synthetic-managed-secret'))
+    with api.app.state.auth.store.transaction(write=True) as state:
+        state['roles']['selected-product-role'] = dict(
+            id='selected-product-role', name='Selected product role', capabilities=capabilities,
+            user_ids=[actor['id']], dashboards=[], connections=[dict(
+                owner_id=SCHEMII_CONNECTION_OWNER_ID, connection_id=managed.id,
+                allow_authoring=True)])
+    api.cookies.clear()
+    assert api.post('/api/v1/auth/login', json={
+        'username': actor['username'], 'password': 'selected-product-test-password',
+    }).status_code == 200
+    return actor, personal, managed
+
+
+@pytest.mark.parametrize(('capabilities', 'allowed'), [
+    (['schemii:access'], {'schemii'}),
+    (['schemoo:access'], {'schemoo'}),
+    (['schemer:access', 'schemer:author'], {'schemer'}),
+    (['schemer:access'], set()),
+    (['schemii:access', 'schemer:access'], {'schemii'}),
+], ids=['designer', 'modeler', 'report-author', 'viewer', 'designer-and-viewer'])
+def test_selected_product_connection_lists_check_capability_before_profiles_or_credentials(
+    connection_api, capabilities, allowed,
+):
+    api, connections, reads, postgres = connection_api
+    _, personal, managed = connection_actor(api, connections, capabilities)
+    for product in ('schemii', 'schemoo', 'schemer'):
+        for spy in reads.values():
+            spy.reset_mock()
+        response = api.get('/api/v1/connections', params={'product': product})
+        assert response.status_code == (200 if product in allowed else 403)
+        if product in allowed:
+            visible = {item['id']: item for item in response.json()['connections']}
+            assert set(visible) == {personal.id, managed.id}
+            assert visible[personal.id]['ownerId'] == personal.owner_id
+            assert visible[managed.id]['ownerId'] == SCHEMII_CONNECTION_OWNER_ID
+            assert {item['username'] for item in visible.values()} == {'personal_role', 'managed_role'}
+        else:
+            assert all(spy.call_count == 0 for spy in reads.values())
+            # A Schemer viewer with another author product still reaches the
+            # selected-product gate and must also have schemer:author.
+            if allowed:
+                assert response.json()['error']['code'] == 'product_access_denied'
+        assert reads['resolve'].call_count == 0
+        assert postgres.mock_calls == []
+        assert 'synthetic-personal-secret' not in response.text
+        assert 'synthetic-managed-secret' not in response.text
+
+
+def test_connection_ids_keep_not_found_hiding_and_live_managed_grant_revocation(connection_api):
+    from schemii.common.connections.models import PostgresConnectionCreate
+
+    api, connections, reads, postgres = connection_api
+    _, personal, managed = connection_actor(api, connections, ['schemii:access'])
+    foreign = connections.create('another-owner', PostgresConnectionCreate(
+        name='Private foreign target', host='localhost', database='foreign',
+        username='foreign_role', password='synthetic-foreign-secret'))
+    ungranted = connections.create_schemii_owned(PostgresConnectionCreate(
+        name='Ungranted managed target', host='localhost', database='ungranted',
+        username='ungranted_role', password='synthetic-ungranted-secret'))
+    assert api.get(f'/api/v1/connections/{personal.id}').status_code == 200
+    assert api.get(f'/api/v1/connections/{managed.id}').status_code == 200
+    for product, connection_id in [
+        ('schemii', foreign.id), ('schemii', ungranted.id),
+        ('schemoo', personal.id), ('schemer', managed.id),
+    ]:
+        for method, suffix in [('GET', ''), ('GET', '/namespaces'), ('POST', '/test')]:
+            response = api.request(method, f'/api/v1/connections/{connection_id}{suffix}',
+                                   params={'product': product})
+            assert response.status_code == 404
+            assert response.json()['error']['code'] == 'connection_not_found'
+            assert 'foreign_role' not in response.text
+            assert 'ungranted_role' not in response.text
+    with api.app.state.auth.store.transaction(write=True) as state:
+        state['roles']['selected-product-role']['connections'] = []
+    response = api.get('/api/v1/connections')
+    assert response.status_code == 200
+    assert [item['id'] for item in response.json()['connections']] == [personal.id]
+    assert api.get(f'/api/v1/connections/{managed.id}').status_code == 404
+    assert reads['resolve'].call_count == 0
+    assert postgres.mock_calls == []
+
+
+def test_connection_list_does_not_map_unrelated_lookup_failures_to_product_denial(connection_api):
+    from schemii.common.connections.store import ConnectionNotFoundError
+
+    api, connections, reads, _ = connection_api
+    connection_actor(api, connections, ['schemii:access'])
+    reads['list'].side_effect = ConnectionNotFoundError('synthetic internal lookup failure')
+    response = api.get('/api/v1/connections')
+    assert response.status_code == 500
+    assert response.json()['error']['code'] == 'internal_error'
+    assert 'synthetic internal lookup failure' not in response.text

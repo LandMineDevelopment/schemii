@@ -249,6 +249,10 @@ class ConnectionService:
             self._repository.delete(owner_id, connection_id, expected_revision)
 
 
+class ProductConnectionAccessDeniedError(ConnectionNotFoundError):
+    """Deny product inventory while retaining exact-resource not-found hiding."""
+
+
 class ProductConnectionAccess:
     """Resolve an actor's private or explicitly role-managed database identity.
 
@@ -270,7 +274,7 @@ class ProductConnectionAccess:
         if self.product == "schemer":
             required.add("schemer:author")
         if not required.issubset(capabilities):
-            raise ConnectionNotFoundError("PostgreSQL connection was not found")
+            raise ProductConnectionAccessDeniedError("PostgreSQL connection was not found")
         return auth
 
     def _owner(self, actor_id: str, connection_id: str) -> str:
