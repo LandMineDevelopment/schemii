@@ -8,6 +8,7 @@ import { fresh, sourceEvidence, observeOwnership } from './ownership.mjs';
 import { credentials } from '../harness/store.mjs';
 import { HTTPClient } from './http.mjs';
 import { isDeepStrictEqual as same } from 'node:util';
+import { createHash } from 'node:crypto';
 
 const finite = value => Number.isFinite(value) && value >= 0;
 const failure = error => ['ENOENT', 'ESRCH'].includes(error.code) || error.message === 'process_exited' ? 'process_exited' :
@@ -100,6 +101,7 @@ export function combineObservation(receipt, containers, internal, { previous = n
       capacityEligible: false, runOwnedBackends: 'unavailable', activeJobs: 'unavailable',
       ingressConnections: 'not_sampled', databaseActivity: 'not_sampled', eventLoopLagMs: 'not_sampled',
       executorWaitMs: 'not_sampled', ingressWaitMs: 'not_sampled', metadataWaitMs: 'not_sampled', sourceWaitMs: 'not_sampled' },
+    runtimeReceiptSha256: createHash('sha256').update(JSON.stringify(receipt)).digest('hex'),
     containers, internal: internal || { status: 'unavailable' } };
   if (app?.status !== 'available') return output;
   if (finite(app.memoryLimitBytes) && app.memoryLimitBytes > 0 && app.memoryCurrentBytes >= app.memoryLimitBytes * 0.85) {
@@ -123,9 +125,17 @@ export function combineObservation(receipt, containers, internal, { previous = n
       output.status = 'unavailable'; output.reason = 'owned_observation_unavailable'; return output;
     }
     const old = previous?.ownership;
+    const missingWork = old ? (old.work.executions || []).filter(value => !(ownership.work.executions || []).some(current => current.id === value.id)) : [];
+    const cohortRetirement = ownership.work.executionScope === 'bounded_fair_owner_reads_and_post_terminal_cohort_witness' &&
+      old?.work.executionScope === ownership.work.executionScope && ownership.source.releaseVerified &&
+      ownership.work.coverage.retired >= old.work.coverage.retired + missingWork.length &&
+      missingWork.every(value => {
+        const proof = value.terminalAt && ['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(value.status) ? value : ownership.work.retiredProofs?.find(current => current.id === value.id);
+        return proof?.terminalAt && ['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(proof.status) && Date.parse(ownership.source.at) >= Date.parse(proof.terminalAt);
+      });
     if (old && (old.runId !== ownership.runId || !same(old.source.authority, ownership.source.authority) ||
         old.source.captured.some(value => !ownership.source.captured.some(current => JSON.stringify(current) === JSON.stringify(value))) ||
-        ['executions', 'jobs'].some(key => (old.work[key] || []).some(value => !(ownership.work[key] || []).some(current => current.id === value.id))))) {
+        missingWork.length && !cohortRetirement || (old.work.jobs || []).some(value => !(ownership.work.jobs || []).some(current => current.id === value.id)))) {
       output.status = 'unavailable'; output.reason = 'owned_authority_or_journal_changed'; return output;
     }
     output.ownership = ownership;

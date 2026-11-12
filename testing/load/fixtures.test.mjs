@@ -6,11 +6,207 @@ import { join } from 'node:path';
 import os from 'node:os';
 import https from 'node:https';
 import tls from 'node:tls';
-import { prepareFixtures, cleanupFixtures, compiledColumns, rowOracles, streamRequest } from './fixtures.mjs';
+import { EventEmitter } from 'node:events';
+import { prepareFixtures, cleanupFixtures, compiledColumns, rowOracles, streamRequest, prepareOwnedFixtures, cleanupOwnedFixtures, createOwnedResource, heldFixture, disposedFixtureConsumer, fixtureCommand, LOAD_FIXTURE_PROFILE } from './fixtures.mjs';
+import { plan } from './plan.mjs';
+import { readSnapshot, writeSnapshot } from './journal.mjs';
 import { NDJSONOracle, CSVOracle } from './protocol.mjs';
 import { privateJSON, writeJSON } from '../harness/store.mjs';
 import { ProtocolFailure } from './protocol.mjs';
 import { HTTPClient, LOCAL, PREVIEW } from './http.mjs';
+
+test('held consumer binds the fixed representative profile, source mapping and fresh owner; restored cleanup requires joined exact consumer', async t => {
+  const dir = await mkdtemp(join(os.tmpdir(), 'schemii-held-fixture-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const run = 'pressure_' + 'a'.repeat(32), nonce = 'b'.repeat(64), owner = { pid: 123, start: '456' };
+  const principal = { run, username: run, userId: 'fixture-admin', passwordFile: join(dir, 'admin.json') };
+  // JSON strings are suitable private test secret bytes; no live credentials.
+  await writeSnapshot(principal.passwordFile, 'fixture-admin-password');
+  await writeSnapshot(join(dir, 'source.json'), 'fixture-source-password');
+  const value = { version: 1, kind: 'launcher_owned_disposable_pressure', status: 'held', run, nonce, owner, directory: dir,
+    profile: structuredClone(LOAD_FIXTURE_PROFILE), canonicalOrigin: LOCAL, stockCapacityEligible: false,
+    principal, launcherPath: '/owned/start.sh', credentialsFile: join(dir, 'credentials.json'), sourceWitnessConfig: join(dir, 'source-config.json'),
+    heartbeatAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString() };
+  value.runtimeReceipt = { version: 1, run, scope: 'startup-effective-configuration', profile: value.profile, apiProcesses: 1,
+    capacityAcceptance: false, instrumentation: value.profile.instrumentation, instrumentationOverheadMeasured: false, stockCapacityEligible: false,
+    metadata: { normalMaximum: 16, readinessMaximum: 2 }, sourceOrdinaryMaximum: 20, sourcePerIdentityMaximum: 4,
+    databaseSettings: { metadata: value.profile.database, source: value.profile.database },
+    effectiveAllocations: Object.fromEntries(Object.entries(value.profile.allocations).map(([name, allocation]) => [name, { ...allocation, containerId: name, created: 'unit-created', image: 'unit-image' }])) };
+  value.application = { id: 'schemii', created: 'unit-created', image: 'unit-image' }; value.source = { id: 'source', created: 'unit-created', image: 'unit-image' };
+  value.osRuntimeReceiptFile = join(dir, 'os-runtime.json');
+  await writeSnapshot(value.osRuntimeReceiptFile, { version: 1, origin: LOCAL, containers: ['schemii', 'source'].map(service => ({ service, id: service, image: 'unit-image' })) });
+  const credentials = { version: 1, run, admin: principal, sourceAdminRole: 'pressure_admin',
+    sourceAdminConnection: { host: '127.0.0.19', port: 6543, dbname: 'pressure_source', user: 'pressure_admin', sslmode: 'require', passwordFile: join(dir, 'source.json') },
+    appSourceConnection: { host: 'source', port: 5432, database: 'pressure_source', username: 'pressure_source', passwordFile: join(dir, 'source.json') } };
+  const witness = { version: 2, runId: 'load_' + run.slice(-16), authority: { database: 'pressure_source', role: 'pressure_source', endpoint: { host: '127.0.0.19', port: 6543, sslmode: 'require' } } };
+  const path = join(dir, 'authority.json'), options = { readIdentity: async () => ({ birthTick: '456' }) };
+  await writeSnapshot(credentials.sourceAdminConnection.passwordFile, 'fixture-source-password');
+  await writeSnapshot(value.credentialsFile, credentials); await writeSnapshot(value.sourceWitnessConfig, witness); await writeSnapshot(path, value);
+  assert.equal((await heldFixture(path, options)).profile.name, 'representative-load-v1');
+  for (const changed of [{ ...value, profile: { ...value.profile, name: 'pressure-v1' } },
+    { ...value, profile: { ...value.profile, metadata: { ...value.profile.metadata, normalMaximum: 2 } } },
+    { ...value, heartbeatAt: new Date(Date.now() + 60000).toISOString() }]) {
+    await writeSnapshot(path, changed); await assert.rejects(heldFixture(path, options), /held_fixture_unqualified/);
+  }
+  await writeSnapshot(path, value); await assert.rejects(heldFixture(path, { readIdentity: async () => ({ birthTick: '999' }) }), /owner_changed/);
+  for (const changed of [{ ...value, application: { ...value.application, id: 'replacement' } },
+    { ...value, runtimeReceipt: { ...value.runtimeReceipt, sourceOrdinaryMaximum: 200 } }]) {
+    await writeSnapshot(path, changed); await assert.rejects(heldFixture(path, options), /fixture_runtime_/);
+  }
+  await writeSnapshot(path, value);
+  await writeSnapshot(value.credentialsFile, { ...credentials, sourceAdminConnection: { ...credentials.sourceAdminConnection, host: '192.0.2.99' } });
+  await assert.rejects(heldFixture(path, options), /source_mapping_changed/);
+  const consumer = { pid: 321, start: '654', uid: process.getuid(), argvSha256: 'c'.repeat(64), sourceFingerprint: 'd'.repeat(64) };
+  const attachment = { version: 1, status: 'joined', run, nonce, consumer }, journal = { run, profile: value.profile, hold: { nonce, attachment: null }, cleanup: true, restored: true, stage: 'restored' };
+  const binding = { authorityFile: path, attachmentFile: join(dir, 'attachment.json'), run, nonce, consumer };
+  await writeSnapshot(join(dir, 'journal.json'), journal); await writeSnapshot(binding.attachmentFile, attachment);
+  assert.equal((await disposedFixtureConsumer(binding, { pid: 321, birthTick: '654' })).fixtureDisposed, true);
+  for (const changed of [{ ...attachment, status: 'detaching' }, { ...attachment, consumer: { ...consumer, start: 'different' } }]) {
+    await writeSnapshot(binding.attachmentFile, changed); await assert.rejects(disposedFixtureConsumer(binding, { pid: 321, birthTick: '654' }), /disposal_not_proven/);
+  }
+});
+test('fixture callbacks use only the owning launcher and exact attachment path', async () => {
+  const authority = { directory: '/private/fixture', launcherPath: '/owned/start.sh' }, calls = [];
+  const launch = (command, args, options) => {
+    calls.push({ command, args, options }); const child = new EventEmitter(); child.stdout = new EventEmitter(); child.kill = () => {};
+    queueMicrotask(() => { child.stdout.emit('data', JSON.stringify({ status: args[0].endsWith('detach') ? 'detaching' : 'attached', attachmentFile: '/private/fixture/attachment.json' })); child.emit('close', 0); }); return child;
+  };
+  const attached = await fixtureCommand(authority, 'attach', null, { launch });
+  await fixtureCommand(authority, 'heartbeat', attached.attachmentFile, { launch }); await fixtureCommand(authority, 'detach', attached.attachmentFile, { launch });
+  assert(calls.every(value => value.command === '/owned/start.sh' && !value.options.detached));
+  assert.deepEqual(calls[0].args, ['--metadata-pressure-attach', '/private/fixture', String(process.pid)]);
+  await assert.rejects(fixtureCommand(authority, 'detach', '/peer/attachment.json', { launch }), /fixture_control_invalid/);
+  await assert.rejects(fixtureCommand(authority, 'rebuild', null, { launch }), /fixture_control_invalid/); assert.equal(calls.length, 3);
+});
+
+async function disposable(t, options = {}) {
+  const dir = await mkdtemp(join(os.tmpdir(), 'schemii-owned-population-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const tag = 'load_0123456789abcdef', pool = 'user_schemii_connection_pool', adminName = 'pressure_' + 'f'.repeat(32), adminId = 'user_fixture_admin';
+  const users = new Map([[adminName, { id: adminId, username: adminName, password: 'fixture-admin-password', display_name: 'fixture', is_admin: true, direct_access: { capabilities: [] } }],
+    ['retained-peer', { id: 'untouched-peer', username: 'retained-peer', is_admin: false, display_name: 'Retained peer' }]]);
+  const stores = new Map(), state = { serial: 0, source: false, failOnce: null, writes: [], revoked: [], drift: false };
+  const store = name => { if (!stores.has(name)) stores.set(name, []); return stores.get(name); };
+  const authority = { version: 1, kind: 'schemii-pressure-load-hold', status: 'held', profile: LOAD_FIXTURE_PROFILE, tag, path: join(dir, 'authority.json'), origin: LOCAL,
+    admin: { username: adminName, userId: adminId, password: 'fixture-admin-password' }, sourceWitnessConfig: join(dir, 'source-monitor-config.json'),
+    sourceAdminRole: 'fixture_source_admin', sourceAdminConnection: { password: 'source-admin-private' },
+    appSourceConnection: { host: 'source', port: 5432, database: 'pressure_source', username: 'pressure_source', password: 'source-private', sslMode: 'require', connectTimeout: 3 } };
+  const userPublic = user => { const value = { ...user }; delete value.password; return value; };
+  class FakeClient {
+    constructor({ cookie } = {}) { this.cookie = cookie || ''; this.username = cookie?.replace('cookie:', ''); }
+    async login(credential, expected) {
+      const user = users.get(credential.username); assert(user); assert.equal(user.password, credential.password); if (expected) assert.equal(user.id, expected);
+      this.username = user.username; this.cookie = 'cookie:' + user.username;
+      return { user: userPublic(user), is_admin: user.is_admin === true, capabilities: user.direct_access?.capabilities || [] };
+    }
+    async logout() { if (this.cookie) state.revoked.push(this.username); this.cookie = ''; }
+    close() {}
+    async request(request) {
+      if (request.path === '/api/v1/auth/me') return users.has(this.username) ? { status: 200, data: await this.json('GET', request.path) } : { status: 401, data: {} };
+      try { return { status: request.method === 'DELETE' ? 204 : 200, data: await this.json(request.method || 'GET', request.path, request.body) }; }
+      catch (error) { if (error.message === 'fake_not_found') return { status: 404, data: {} }; throw error; }
+    }
+    async json(method, path, body) {
+      if (body !== undefined) body = structuredClone(body); // Real HTTP serializes request values.
+      const user = users.get(this.username), roleStore = store('/api/v1/admin/roles');
+      const capabilities = [...new Set([...(user?.direct_access?.capabilities || []), ...roleStore.filter(role => role.user_ids.includes(user?.id)).flatMap(role => role.capabilities)])];
+      if (path === '/api/v1/auth/me') return { user: userPublic(user), capabilities };
+      if (path === '/api/v1/schemii/console/settings') return { revision: 1, rowPageSize: 100 };
+      if (path.endsWith('/plan')) return { sql: 'fixture-plan' };
+      if (path === '/api/v1/admin/accounts' && method === 'GET') return [...users.values()].map(userPublic);
+      if (path === '/api/v1/schemii/workspaces/postgres') {
+        const journal = await readSnapshot(join(dir, 'fixtures-private.json'));
+        assert(journal.resources.some(item => item.kind === 'workspace' && item.phase === 'sent' && item.ownerId === user.id));
+        const workspace = { id: `ws_${(++state.serial).toString(16).padStart(32, '0')}`, ownerId: user.id, name: body.namespace, revision: 1, ...body };
+        store('/api/v1/schemii/workspaces').push(workspace); return { created: true, workspace };
+      }
+      const collections = ['/api/v1/admin/accounts', '/api/v1/admin/roles', '/api/v1/admin/schemii-connections', '/api/v1/connections', '/api/v1/schemii/workspaces', '/api/v1/schemoo/models', '/api/v1/schemer/dashboards'];
+      const collection = collections.find(value => path === value || path.startsWith(value + '/'));
+      assert(collection, `unexpected API path ${path}`);
+      const isAdmin = collection.startsWith('/api/v1/admin/'), entries = collection === '/api/v1/admin/accounts' ? [...users.values()] : store(collection);
+      const key = collection.endsWith('connections') ? 'connections' : collection.endsWith('workspaces') ? 'workspaces' : collection.endsWith('models') ? 'models' : 'dashboards';
+      const visible = item => isAdmin || item.ownerId === user?.id || collection.endsWith('dashboards') && roleStore.some(role => role.user_ids.includes(user?.id) && role.dashboards.some(grant => grant.dashboard_id === item.id));
+      if (method === 'GET' && path === collection) return isAdmin && !collection.endsWith('schemii-connections') ? entries.map(value => collection.endsWith('accounts') ? userPublic(value) : value) : { [key]: entries.filter(visible) };
+      if (method === 'POST') {
+        const journal = await readSnapshot(join(dir, 'fixtures-private.json'));
+        assert(journal.resources.some(item => item.collection === collection && item.phase === 'sent' && item.label === (body.name || body.username)));
+        state.writes.push({ method, collection });
+        const prefix = collection.endsWith('accounts') ? 'user' : collection.endsWith('roles') ? 'role' : collection.endsWith('connections') ? 'pg' : collection.endsWith('models') ? 'model' : 'dashboard';
+        const item = { ...body, id: `${prefix}_${(++state.serial).toString(16).padStart(32, '0')}`, revision: 1,
+          ...(!['user', 'role'].includes(prefix) ? { ownerId: collection.endsWith('schemii-connections') ? pool : user.id } : {}) };
+        if (collection.endsWith('accounts')) users.set(item.username, item); else entries.push(item);
+        if (state.failOnce === collection) { state.failOnce = null; throw new ProtocolFailure('http_transport_failure'); }
+        return collection.endsWith('accounts') ? userPublic(item) : (() => { const value = { ...item }; delete value.password; return value; })();
+      }
+      const id = path.slice(collection.length + 1).split('?')[0], item = entries.find(value => value.id === id && visible(value));
+      if (!item) throw new Error('fake_not_found');
+      if (method === 'GET') return state.drift ? { ...item, ownerId: 'foreign' } : item;
+      if (method === 'DELETE') {
+        assert(item.id !== adminId && item.id !== 'untouched-peer');
+        if (collection.endsWith('accounts')) users.delete(item.username); else entries.splice(entries.indexOf(item), 1);
+        return null;
+      }
+      throw new Error('unsupported fake operation');
+    }
+  }
+  const provisionSource = async (action, configPath, receiptPath) => {
+    const config = await readSnapshot(configPath);
+    const result = { schemas: Array.from({ length: config.active }, (_, index) => ({ index: index + 1, name: `${tag}_u${String(index + 1).padStart(4, '0')}`,
+      nonce: String(index + 1).padStart(32, '0'), phase: action === 'prepare' ? 'ready' : 'deleted' })) };
+    state.source = action === 'prepare'; await writeSnapshot(receiptPath, result); return result;
+  };
+  const spec = plan({ fixtureMode: 'disposable', workload: options.workload || 'sql-page', active: options.active || 2, registered: options.registered || 10,
+    profileMode: options.profileMode || 'private-single' });
+  return { dir, spec, users, state, stores, authority, FakeClient,
+    prepare: () => prepareOwnedFixtures({ dir, spec, authority, Client: FakeClient, provisionSource, readColumns: async () => ['Orders.id'] }),
+    cleanup: receipt => cleanupOwnedFixtures({ dir, receipt, authority, Client: FakeClient, provisionSource }) };
+}
+test('disposable population separates registered and active identities, rotates private profiles and cleans exact resources', async t => {
+  const f = await disposable(t, { profileMode: 'private-multiple' }), receipt = await f.prepare();
+  assert.equal(receipt.population.registered, 10); assert.equal(receipt.accounts.length, 2);
+  assert(receipt.accounts.every(account => account.variants.length === 2 && account.profiles.length === 2));
+  assert(receipt.accounts.every(account => account.oracles.sql.rows === 513));
+  const result = await f.cleanup(receipt);
+  assert.equal(result.registeredAccountsDeleted, 10); assert.equal(result.objectsRemaining, 0);
+  assert(f.users.has('retained-peer')); assert(f.users.has(f.authority.admin.username));
+  assert.equal(f.state.source, false);
+  const second = await f.cleanup(await readSnapshot(join(f.dir, 'fixtures-private.json')));
+  assert.equal(second.objectsRemaining, 0); assert(f.users.has('retained-peer'));
+});
+test('pure viewers keep only Schemer access and receive an explicit shared grant; recovery is separate', async t => {
+  const f = await disposable(t, { workload: 'shared-report', profileMode: 'managed-shared' }), receipt = await f.prepare();
+  assert(receipt.accounts.every(account => !account.workspace && account.sharedDashboard));
+  for (const account of receipt.accounts) assert.deepEqual(f.users.get(account.username).direct_access.capabilities, ['schemer:access']);
+  assert.equal(receipt.recoveryAccount.instrumentationOnly, true);
+  assert.notEqual(receipt.recoveryAccount.userId, receipt.accounts[0].userId);
+  const roles = f.stores.get('/api/v1/admin/roles');
+  assert(roles.some(role => role.name.endsWith('_viewers') && role.dashboards.length === 1 && role.connections[0].allow_authoring === false));
+  await f.cleanup(receipt); assert(f.users.has(f.authority.admin.username));
+});
+test('cleanup preserves a role whose membership was extended to a peer after preparation', async t => {
+  const f = await disposable(t, { workload: 'shared-report', profileMode: 'managed-shared' }), receipt = await f.prepare();
+  const role = f.stores.get('/api/v1/admin/roles').find(value => value.name.endsWith('_viewers'));
+  role.user_ids.push('untouched-peer');
+  await assert.rejects(f.cleanup(receipt), /cleanup_role_changed/);
+  assert(f.stores.get('/api/v1/admin/roles').some(value => value.id === role.id)); assert(f.users.has('retained-peer'));
+});
+test('1000 registered identities do not create1000 active profiles or alter retained users', async t => {
+  const f = await disposable(t, { registered: 1000, active: 1 }), receipt = await f.prepare();
+  assert.equal(receipt.population.registered, 1000); assert.equal(receipt.accounts.length, 1);
+  assert.equal((await readSnapshot(join(f.dir, 'population-private.json'))).accounts.length, 1000);
+  assert.equal(receipt.resources.filter(item => item.kind === 'private-profile').length, 1);
+  assert.equal(f.users.get('retained-peer').id, 'untouched-peer');
+});
+test('unknown send is never replayed from absence, name collisions/ambiguous adoption preserve peers', async t => {
+  const dir = await mkdtemp(join(os.tmpdir(), 'schemii-resource-intent-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const receipt = { tag: 'load_0123456789abcdef', resources: [] }, file = join(dir, 'private.json'), rows = [];
+  let sends = 0;
+  const client = { json: async method => { if (method === 'GET') return { models: rows }; sends++; throw new ProtocolFailure('http_transport_failure'); } };
+  const request = { receipt, save: () => writeSnapshot(file, receipt), client, key: 'model', kind: 'model', collection: '/api/v1/schemoo/models', listKey: 'models',
+    body: { name: receipt.tag + '_nonce_model' }, ownerId: 'owner' };
+  await assert.rejects(createOwnedResource(request));
+  await assert.rejects(createOwnedResource(request), /uncertain_create/); assert.equal(sends, 1);
+  rows.push({ name: request.body.name, id: 'candidate-one', ownerId: 'owner' }, { name: request.body.name, id: 'candidate-two', ownerId: 'owner' });
+  await assert.rejects(createOwnedResource(request), /ambiguous/); assert.equal(rows.length, 2);
+});
 
 async function fixture(t) {
   const dir = await mkdtemp(join(os.tmpdir(), 'schemii-load-fixture-test-'));

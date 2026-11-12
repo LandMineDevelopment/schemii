@@ -175,6 +175,10 @@ test('actual controller prepares before observation exists and admits no arrival
   await writeFile(join(checkout, 'testing/load/fixtures.mjs'), `
     export async function prepareFixtures(){return {accounts:[]};}
     export async function cleanupFixtures(){return {objectsRemaining:0};}
+    export async function prepareOwnedFixtures(){throw new Error('fixture_retained_only');}
+    export async function heldFixture(){throw new Error('fixture_retained_only');}
+    export async function disposedFixtureConsumer(){throw new Error('fixture_retained_only');}
+    export async function fixtureCommand(){throw new Error('fixture_retained_only');}
     export function ordinaryRequest(){throw new Error('fixture_no_http');}
     export function streamRequest(){throw new Error('fixture_no_http');}
   `);

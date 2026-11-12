@@ -24,8 +24,8 @@ documented in [testing/load](../testing/load/README.md).
    Do not add processes or tune pools as an unmeasured fix.
 4. Capture failed-baseline and fixed regressions for idle expiry, wide driver
    results, metadata admission and cancellation/revocation/disconnect. The current
-   adapter's 513 ID-only source is deliberately small; it cannot validate wide-row
-   memory or the real 1,800s idle contract by itself.
+   disposable adapter supplies full-width rows and an actual 1,800s idle recipe;
+   both remain live-unqualified. The retained 513 ID-only source cannot substitute.
 5. Establish an independent observer with exact ownership and live resource gauges.
    Missing metrics, lost control/observation, data/isolation failure, accumulating
    backends/cursors or >=85% app memory stop the campaign. Protect user resources,
@@ -43,6 +43,7 @@ journeys disclose their arrival rate and count every actual call separately.
 | confirm | Selected near-knee stage ×3 | 2m warmup + >=5m hold each | Repeatability, confidence and resource stability |
 | spike | Baseline, 2× selected rate capped at 12,000, 0.1× recovery | 2m, 30s, 1m | Bounded overload and healthy recovery |
 | soak | Selected sustainable rate | 2m warmup + 60m hold | Stable RSS, connections, sessions and jobs |
+| lifecycle | One owned SQL journey per selected active identity | Actual >=1,800s idle plus recovery | Real retained-session expiry; separate from steady load |
 
 Extend low-volume holds when p99 has too few samples. Report counts rather than
 claim precision from a tiny smoke; require at least 10,000 successful samples when
@@ -50,7 +51,8 @@ confirming p99 near the knee. Report three repetitions separately and compare
 hardware, configuration, source, mix, account cardinality and generator delivery.
 Stop at the first failed ramp stage; measure controlled overload separately.
 
-Generate a plan and use the guarded workflow. For example, after the gates pass:
+Generate a plan and use the guarded workflow. For example, after the gates pass,
+the retained-account report path remains:
 
 ```bash
 ./test.sh load plan --recipe ramp --workload report-5 --active 2 \
@@ -78,24 +80,35 @@ than turn an aggregate cheap-read success into query/dashboard user sizing.
 | Private 1/5/20-tile report | All 513 known order IDs per tile, exact completion/end | Incremental Node |
 | CSV | Exact headers/row multiset, valid complete CSV | Incremental Node |
 | Slow reader/disconnect/cancel | Incremental body, counted control calls, independent backend release | Foundation; real control acceptance pending |
-| SQL SELECT/page/close | Ordered >page-size values, cursor progression, final close | Dedicated console fixture/client pending |
-| Wide results and real idle expiry | Driver-sized byte/row oracle and observed 1,800s lifecycle | Pending; no ID-only substitute |
-| Shared report/viewer grants | Private/raw result denial, authorized shared stream and revocation | Owned grant adapter pending |
-| Login/cardinality churn | Separate login cost and session cleanup at 10/100/1,000 registered users | Owned account provisioner pending |
-| Revisioned metadata writes | Optimistic revisions, conflicts, persistence and exact cleanup | Owned fixture lane pending |
+| SQL SELECT/page/close | Ordered >page-size values, cursor progression, final close | Authored owned Console adapter; deterministic controls pass, live pending |
+| Wide results and real idle expiry | Four 8,192-character cells/row and real 1,800s wait | Authored exact-value and lifecycle recipes; no live result |
+| Shared report/viewer grants | Private model denial, explicit shared stream authority and release | Authored managed viewer grant/stream adapter; revocation/live acceptance pending |
+| Login/cardinality churn | Separate login/read/logout and exact disposable account cleanup | Authored 10/100/1,000 registered independent of active count; live pending |
+| Revisioned metadata writes | Optimistic workspace label revision and persistence | Authored exact owned write/cleanup adapter; live conflicts pending |
 | COPY/migration | Exact disposable writer schema and rollback/cleanup | Separate explicit writer campaign |
 
-The first adapter selects existing retained accounts and does not expand their
-permissions or profile limit. Test registered users (10/100/1,000) independently
+The retained adapter selects existing accounts. The disposable adapter requires
+an already held launcher `representative-load-v1` fixture and creates its own
+nonadministrator accounts, read-only source schemas, profiles and explicit roles.
+It preserves retained accounts and never raises profile limits. Test registered users (10/100/1,000) independently
 from active authenticated identities (1/10/50/100+). Reuse sessions for steady
 traffic; login churn has its own lane. Compare many readers on one saved-profile
 revision with distinct profiles; distinguish owner-private and Schemii-managed
 profiles and respect the per-owner 100-profile cap.
 
-After named lanes pass, ratify a realistic mix with explicit weights and actual
-calls per active user/minute. Exclude paid AI; a local stub cannot measure provider
+After named lanes pass, ratify the authored default weighted mix (40% cheap read,
+10% catalog, 10% compile, 20% SQL paging, 10% five-tile report, 5% shared report,
+5% metadata writes), or select explicit validated weights. Report actual HTTP calls
+per active user/minute separately from journey arrivals. Exclude paid AI; a local stub cannot measure provider
 capacity. Preserve snapshot and tile-fairness semantics; do not hide failures with
 retries, skips or explicit cleanup inside a lane that is meant to prove auto expiry.
+The disposable holder's maximum 3,600-second life must include preparation and
+recovery. It cannot contain the full soak recipe, so that dispatch is refused
+until a longer campaign lifecycle is reviewed. The fixture's startup-effective
+configuration receipt also cannot replace the host PID/cgroup observer receipt.
+Collector export/attach certification, tiny qualified smoke and all campaigns
+remain pending. Fixture-only instrumentation overhead is unknown and every report
+keeps `capacityEligible: false`.
 
 ## Proposed budgets and decision rules
 
@@ -173,9 +186,11 @@ network counters, Node CPU/scheduling measurements and external CPU ticks with
 host `CLK_TCK` when available. Network capacity, competing traffic and CPU/memory
 headroom remain unknown. Active
 recovery now requires a fresh authenticated read, exact SELECT terminal, captured
-backend and independently observed release. Live qualification, missing workload
-and cardinality provisioners, a weighted mix and independent cleanup/review remain
-pending. The hard report guard remains `capacityEligible: false`. Preserve normal
+backend and independently observed release. Workload/cardinality provisioners and
+weighted mix are authored with deterministic controls. Live qualification,
+compatible held-fixture host observation export, independent cleanup/review and
+the actual campaign remain pending. The hard report guard remains
+`capacityEligible: false`. Preserve normal
 end-user grants, exclude SQL/row/credential/owner labels from public metrics, and
 disclose observer budgets. Docker/socket access, inferred zero counters and
 missing-source fallback cannot qualify capacity evidence.
