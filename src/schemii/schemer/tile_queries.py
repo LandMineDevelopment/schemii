@@ -17,7 +17,8 @@ from schemii.schemoo.service import document, load_model, model_catalog, plan_qu
 from schemii.schemoo.prototype import _literal
 from .models import ReportQuery
 from .time_analysis import bucket_expression, compile_time_analysis, validate_time_analysis, source_type
-from .dashboard_models import ReportOutput, tile_dimensions
+from .dashboard_models import ReportOutput, tile_dimensions, base_measures
+from .measures import MeasureGraph, output_definitions, compile_measures, population_queries, source_population_eligibility
 
 
 def _problem(message):
@@ -33,16 +34,7 @@ def _output_key(field):
 
 
 def report_outputs(tile):
-    fields = tile.detail_fields if tile.kind == "detail" else [*tile_dimensions(tile), *tile.measures]
-    outputs = [ReportOutput(**document(field)) for field in fields]
-    time = getattr(tile, "time_analysis", None)
-    if time:
-        for field in tile.measures:
-            kinds = (["comparison", "change", "percent_change"] if time.comparison != "none" else [])
-            if time.running_total:
-                kinds.append("running_total")
-            outputs.extend(ReportOutput(**document(field), kind=kind) for kind in kinds)
-    return outputs
+    return output_definitions(tile)
 
 
 def validate_report_controls(tile, catalog, definition):
@@ -52,16 +44,16 @@ def validate_report_controls(tile, catalog, definition):
 
     outputs = report_outputs(tile)
     positions = {_output_key(output): index for index, output in enumerate(outputs)}
-    measure_keys = {_key(field) + (field.aggregate,) for field in tile.measures}
+    measure_keys = {_key(field) + (field.aggregate,) for field in base_measures(tile)}
     filters, ordering = [], []
     for sort in getattr(tile, "sort", []):
         if _output_key(sort) not in positions:
             raise ApiProblem(422, "invalid_report_output", "A sort output is no longer selected. Repair it in the tile editor.")
         ordering.append((positions[_output_key(sort)], sort.direction, sort.nulls))
     for predicate in getattr(tile, "aggregate_filters", []):
-        if _output_key(predicate) not in positions or (*_key(predicate), predicate.aggregate) not in measure_keys:
+        if _output_key(predicate) not in positions or (predicate.kind != "calculated" and (*_key(predicate), predicate.aggregate) not in measure_keys):
             raise ApiProblem(422, "invalid_report_output", "Aggregate filters must reference selected measures or their enabled time-analysis outputs.")
-        if predicate.kind in {"change", "percent_change", "running_total"} or predicate.aggregate in {"count", "count_distinct", "sum", "avg"}:
+        if predicate.kind in {"change", "percent_change", "running_total", "calculated"} or predicate.aggregate in {"count", "count_distinct", "sum", "avg"}:
             kind = "numeric"
         else:
             kind = source_type(catalog, definition, predicate.table, predicate.column)
@@ -161,7 +153,7 @@ class DashboardPlanning:
 
 
 def tile_report_query(dashboard, tile, selections=None):
-    fields = tile.detail_fields if tile.kind == "detail" else [*tile_dimensions(tile), *tile.measures]
+    fields = tile.detail_fields if tile.kind == "detail" else [*tile_dimensions(tile), *base_measures(tile)]
     return ReportQuery(model_id=dashboard.model_id, expected_revision=dashboard.model_revision,
                        explore=ExploreState(fields=fields, selections=dashboard.selections if selections is None else selections,
                                             reportFilters=tile.report_filters, limit=tile.limit))
@@ -188,7 +180,7 @@ def _text_order_fields(catalog, definition, fields):
     return {index for index, field in enumerate(fields) if needs_text(field.table, field.column, field.aggregate)}
 
 
-def _ordered(plan, sql, page_size, text_order_fields=(), *, ordering=(), filters=(), top_n=None):
+def _ordered(plan, sql, page_size, text_order_fields=(), *, ordering=(), filters=(), top_n=None, visible_indices=None):
     # One retained execution supplies forward-only batches. Sorting happens
     # once; subsequent result requests advance its cursor without rerunning SQL.
     # Keep numeric/date dimensions in their native order (not 1, 10, 2).
@@ -230,7 +222,15 @@ def _ordered(plan, sql, page_size, text_order_fields=(), *, ordering=(), filters
     sql = sql.order_by(*ordered)
     if top_n is not None:
         sql = sql.limit(top_n)
-    return {**plan, "sql": sql.sql(dialect="postgres") + ";", "rowLimit": page_size,
+    projected_metadata={}
+    if visible_indices is not None:
+        if "computedOutputs" in plan:
+            projected_metadata["computedOutputs"]=[{**item,"outputIndex":visible_indices.index(item["outputIndex"])} for item in plan["computedOutputs"] if item["outputIndex"] in visible_indices]
+        if "reportOutputIdentities" in plan:
+            projected_metadata["reportOutputIdentities"]=[plan["reportOutputIdentities"][index] for index in visible_indices if index<len(plan["reportOutputIdentities"])]
+        sql = exp.select(*(exp.column(aliases[index],table="visible_rows",quoted=True) for index in visible_indices)).from_(sql.subquery("visible_rows"))
+        output_labels = [output_labels[index] for index in visible_indices]
+    return {**plan, **projected_metadata, "sql": sql.sql(dialect="postgres") + ";", "rowLimit": page_size,
             "outputLabels": output_labels}
 
 
@@ -263,10 +263,15 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
         _problem("This optional model filter is not available on the dashboard.")
     query.explore.selections = {**query.explore.selections, **optional_selections}
     catalog = planning.model_catalog() if planning is not None else model_catalog(services, owner, model, fresh=fresh)
+    graph = MeasureGraph(tile,catalog,model.definition) if (getattr(tile,"calculations",[]) or getattr(tile,"hidden_measures",[]) or getattr(tile,"kpi_comparison",None)) else None
     original = plan_query(catalog, model.definition, query.explore, model.catalog_fingerprint, _bounded=False)
+    if graph:
+        graph.validate_grain(original)
+    if graph and any(field.table in {node.id for node in model.definition.nodes if node.derivation and node.derivation.kind=="aggregate"} for field in base_measures(tile)):
+        original["warnings"]=[*original.get("warnings",[]),"Population calculations over model summaries aggregate per-owner semantic values, not original raw child records."]
     time_analysis = getattr(tile, "time_analysis", None)
     dimensions = tile_dimensions(tile)
-    time_tile = tile.model_copy(update={"dimensions": dimensions}) if tile.kind == "pivot" else tile
+    time_tile = tile.model_copy(update={"dimensions": dimensions,"measures":base_measures(tile)}) if tile.kind == "pivot" or graph else tile
     time_kind = validate_time_analysis(time_tile, catalog, model.definition)
     _, ordering, filters = validate_report_controls(tile, catalog, model.definition)
     parent_statement = parse_one(original["sql"], read="postgres")
@@ -274,16 +279,48 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
         parent_statement, metadata = compile_time_analysis(time_tile, parent_statement, catalog, model.definition)
         metadata["warnings"] = [*original.get("warnings", []), *metadata["warnings"]]
         original.update(metadata)
+    visible_indices = None
+    if graph:
+        populations=population_queries(graph,catalog,model,tile,query,original)
+        parent_statement,metadata=compile_measures(graph,parent_statement,populations=populations,qualification_filters=filters)
+        original.update(metadata)
+        original["reportOutputIdentities"]=[document(output) for output in graph.outputs]
+        visible_indices=graph.visible_indices()
+        if tile.kpi_comparison:
+            visible_indices += list(range(len(graph.outputs),len(graph.outputs)+4))
     parent_plan = _ordered(original, parent_statement, tile.limit,
                           _text_order_fields(catalog, model.definition, query.explore.fields),
-                          ordering=ordering, filters=filters, top_n=getattr(tile, "top_n", None))
+                          ordering=ordering, filters=filters, top_n=getattr(tile, "top_n", None),
+                          visible_indices=None if tile.kind=="pivot" else visible_indices)
+    if hasattr(selection,"model_dump"):
+        selection=selection.model_dump(mode="json",by_alias=True,exclude_none=True)
+    constituent = selection.get("constituent") if isinstance(selection,dict) else None
+    if constituent is not None:
+        selection={key:value for key,value in selection.items() if key!="constituent"}
     if tile.kind == "pivot":
         from .pivot import compile_pivot, pivot_selection
         qualifying = _ordered(original, parent_statement.copy(), tile.limit,
             _text_order_fields(catalog, model.definition, query.explore.fields),
             ordering=ordering, filters=filters)
         if selection is None:
-            return model, compile_pivot(catalog, model, tile, query, original, qualifying, parent_plan, exporting=exporting)
+            if not graph:
+                return model, compile_pivot(catalog, model, tile, query, original, qualifying, parent_plan, exporting=exporting)
+            from .pivot import META_LABELS
+            internal_tile=tile.model_copy(update={"measures":base_measures(tile)})
+            count=len(dimensions)+len(base_measures(tile))
+            pivot_plan=compile_pivot(catalog,model,internal_tile,query,original,
+                {**qualifying,"outputLabels":qualifying["outputLabels"][:count]},
+                {**parent_plan,"outputLabels":parent_plan["outputLabels"][:count]},exporting=exporting)
+            source=parse_one(pivot_plan["sql"],read="postgres").subquery("pivot_values")
+            names=[*(f"output_{index+1}" for index in range(count)),"pivot_row_depth","pivot_column_depth","pivot_status","pivot_column_count","pivot_rows_omitted","pivot_qualifying_groups","pivot_scope"]
+            labels=[*pivot_plan["outputLabels"][:count],*META_LABELS]
+            statement=exp.select(*(exp.column(name,table="pivot_values",quoted=True).as_(label,quoted=True) for name,label in zip(names,labels))).from_(source)
+            populations=population_queries(graph,catalog,model,tile,query,original,qualifying=qualifying)
+            statement,metadata=compile_measures(graph,statement,populations=populations)
+            pivot_plan.update(metadata)
+            pivot_plan["pivot"].update(measureCount=len(graph.visible_indices())-len(dimensions),metadataOffset=len(graph.visible_indices()))
+            projection=[*graph.visible_indices(),*range(len(graph.outputs),len(graph.outputs)+len(META_LABELS))]
+            return model,_ordered(pivot_plan,statement,tile.limit,visible_indices=projection)
         selection, scope = pivot_selection(tile, selection)
         if scope != "cell":
             parent_plan = qualifying
@@ -297,8 +334,32 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     if not isinstance(selection, dict) or set(selection) != {"dimensions", "measureIndex"}:
         _problem("Select the dimensions and measure of a tile result.")
     measure_index = selection["measureIndex"]
-    if type(measure_index) is not int or not 0 <= measure_index < len(tile.measures):
+    visible_calculations=[item for item in getattr(tile,"calculations",[]) if item.visible]
+    if type(measure_index) is not int or not 0 <= measure_index < len(tile.measures)+len(visible_calculations):
         _problem("The selected measure does not belong to this tile.")
+    calculation_scope=None
+    if measure_index >= len(tile.measures):
+        from .dashboard_models import MeasureOperand
+        from .measures import key as measure_key
+        item=visible_calculations[measure_index-len(tile.measures)]
+        if constituent is None:
+            _problem("Choose which calculation constituent and population to inspect; a composite measure has no single detail set.")
+        chosen=MeasureOperand.model_validate(constituent)
+        allowed=graph.constituents[item.id]
+        if chosen.output is None or not any(measure_key(MeasureOperand.model_validate(value).output)==measure_key(chosen.output) and value["scope"]==chosen.scope for value in allowed):
+            _problem("That constituent does not belong to the saved calculation. Reopen its records chooser.")
+        if chosen.output.kind != "value":
+            _problem("A calendar window constituent combines periods. Inspect its base period measure instead.")
+        measure=chosen.output
+        population_scope=chosen.scope
+        calculation_scope={"id":item.id,"label":item.label,"constituent":chosen.model_dump(exclude_none=True),"population":{
+            "group":"selected qualifying group","source_population":"source-filtered report population before result filters and Top N",
+            "qualifying_groups":"complete qualifying groups before Top N"}[population_scope]}
+    else:
+        if constituent is not None:
+            _problem("Constituent selections belong only to calculated measures.")
+        measure=tile.measures[measure_index]
+        population_scope="group"
     values = selection["dimensions"]
     expected_dimensions = dimensions if tile.kind != "pivot" else [
         *tile.row_dimensions[:pivot_depths["rowDepth"]],
@@ -318,6 +379,11 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
         if value is not None and not isinstance(value, (str, int, float, bool)):
             _problem("Select one scalar value for each dimension.")
         selected[key] = value
+    if calculation_scope:
+        calculation_scope["selectedDimensions"]=values
+        calculation_scope["measureIndex"]=measure_index
+        if tile.kind=="pivot":
+            calculation_scope["pivot"]={"kind":scope,**pivot_depths}
     raw_fields = []
     for field in [*query.explore.fields, *tile.detail_fields]:
         if _key(field) not in {_key(existing) for existing in raw_fields}:
@@ -342,7 +408,8 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     conditions, parent_conditions = [], []
     for key, value in selected.items():
         if value is None:
-            conditions.append(exp.Is(this=column(key), expression=exp.Null()))
+            if population_scope=="group":
+                conditions.append(exp.Is(this=column(key), expression=exp.Null()))
             literal = exp.Null()
         else:
             try:
@@ -360,10 +427,11 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
                 except ValueError:
                     _problem("Select a valid calendar bucket date.")
                 literal = exp.Cast(this=literal, to=exp.DataType.build("date"))
-            conditions.append(exp.EQ(this=expression, expression=literal))
+            if population_scope=="group":
+                conditions.append(exp.EQ(this=expression, expression=literal))
         index = next(index for index, field in enumerate(dimensions) if _key(field) == key)
         parent_conditions.append(exp.NullSafeEQ(this=exp.column(f"output_{index + 1}", table="qualifying_parent", quoted=True), expression=literal.copy()))
-    if tile.kind == "pivot":
+    if tile.kind == "pivot" and population_scope=="group":
         # Every contributing leaf group must qualify, even within a subtotal.
         # Correlating only the clicked prefix would admit filtered-out cells.
         parent_conditions = []
@@ -380,9 +448,24 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     if parent_conditions:
         parent = parent.where(*parent_conditions)
     conditions.append(exp.Exists(this=parent))
+    if population_scope=="source_population" and time_analysis:
+        eligibility=source_population_eligibility(tile,bucket_expression(
+            column((time_analysis.table,time_analysis.column)),time_analysis,time_kind))
+        conditions.append(eligibility)
+    if population_scope=="qualifying_groups":
+        qualifying_plan=_ordered(original,parent_statement.copy(),tile.limit,filters=filters)
+        qualifying_parent=exp.select(exp.Literal.number(1)).from_(parse_one(qualifying_plan["sql"],read="postgres").subquery("population_groups"))
+        correlations=[]
+        for index,field in enumerate(dimensions):
+            expression=column(_key(field))
+            if time_analysis and _key(field)==(time_analysis.table,time_analysis.column):
+                expression=bucket_expression(expression,time_analysis,time_kind)
+            correlations.append(exp.NullSafeEQ(this=exp.column(f"output_{index+1}",table="population_groups",quoted=True),expression=expression))
+        if correlations:
+            qualifying_parent=qualifying_parent.where(*correlations)
+        conditions.append(exp.Exists(this=qualifying_parent))
     # SQL aggregates ignore NULL inputs, including count(column) and DISTINCT.
     # MIN/MAX drill shows all inputs used to compute the extremum, not just ties.
-    measure = tile.measures[measure_index]
     conditions.append(exp.Not(this=exp.Is(this=column(_key(measure)), expression=exp.Null())))
     statement = exp.select(*(column(_key(field)).as_(labels[_key(field)], quoted=True)
                              for field in tile.detail_fields)).from_(statement.subquery("contributors")).where(*conditions)
@@ -392,6 +475,14 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     if measure.aggregate == "count_distinct":
         warnings.append("These are raw contributing rows; repeated values count once in COUNT DISTINCT.")
     plan.update(warnings=warnings, grain="Raw rows contributing to the selected measure", drill=True)
+    if calculation_scope:
+        plan["calculationScope"]=calculation_scope
+        warnings.append("These rows describe only the explicitly selected calculation constituent and population; they are not one detail set for the composite value.")
+        if exporting:
+            import json
+            statement=statement.select(exp.Literal.string(calculation_scope["label"]).as_("Calculated measure",quoted=True),
+                exp.Literal.string(calculation_scope["population"]).as_("Constituent population",quoted=True),
+                exp.Literal.string(json.dumps(calculation_scope,ensure_ascii=False,allow_nan=False)).as_("Calculation selection",quoted=True))
     if tile.kind == "pivot":
         plan["pivotScope"] = {"kind": scope, **pivot_depths, "dimensions": values,
                               "measureIndex": measure_index, "population": "qualifying groups before Top N" if scope != "cell" else "selected qualifying cell"}

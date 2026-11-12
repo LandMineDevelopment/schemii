@@ -138,3 +138,63 @@ def test_output_predicates_and_topn_wrap_complete_time_windows(context):
     windows = list(statement.find_all(exp.Window))
     assert windows and all(window.find_ancestor(exp.Select).args.get('limit') is None for window in windows)
     assert '"output_7" DESC NULLS LAST' in plan['sql']
+
+
+def test_calculated_source_types_share_validated_order_independent_model_metadata():
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemer.time_analysis import source_type
+    catalog = {"tables":[{"namespace":"reporting","name":"values","primaryKey":["id"],"columns":[
+        {"name":"id","dataType":"integer"},{"name":"value","dataType":"integer"},{"name":"big","dataType":"bigint"},{"name":"at","dataType":"date"}]}],"relationships":[]}
+    definition = ModelDefinition.model_validate({"root":"source","nodes":[
+        {"id":"row","namespace":"reporting","table":"values","label":"Row","derivation":{"kind":"row","source":"source","outputs":[
+            {"id":"total","label":"Total","operation":"add","nodeId":"summary","column":"n","operand":"value"}]}},
+        {"id":"source","namespace":"reporting","table":"values","label":"Source"},
+        {"id":"summary","namespace":"reporting","table":"values","label":"Summary","derivation":{"kind":"aggregate","source":"source","groupBy":["id"],"outputs":[
+            {"id":"n","label":"Count","operation":"count","column":"id"},{"id":"sum","label":"Sum","operation":"sum","column":"value"},
+            {"id":"big","label":"Big sum","operation":"sum","column":"big"},{"id":"date","label":"Date","operation":"min","column":"at"}]}}]})
+    assert [source_type(catalog,definition,"summary",name) for name in ["n","sum","big","date"]] == ["bigint","bigint","numeric","date"]
+    assert source_type(catalog,definition,"row","total") == "bigint"
+    definition.nodes[0].derivation.outputs[0].column = "missing"
+    with pytest.raises(ValueError,match=r"row.total.*summary.missing"):
+        source_type(catalog,definition,"row","total")
+
+
+@pytest.mark.parametrize("data_type,kind,zoned",[
+    ("timestamp(6) with time zone","timestamp with time zone",True),
+    ("timestamp with time zone","timestamp with time zone",True),
+    ("timestamp(6) without time zone","timestamp without time zone",False),
+    ("timestamp(6)","timestamp",False),
+])
+def test_calculated_timestamp_precision_preserves_calendar_zone_conversion(data_type,kind,zoned):
+    from sqlglot import exp
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemer.time_analysis import source_type, bucket_expression
+    catalog = {"tables":[{"name":"events","primaryKey":["id"],"columns":[
+        {"name":"id","dataType":"integer"},{"name":"at","dataType":data_type}]}],"relationships":[]}
+    definition = ModelDefinition.model_validate({"root":"events","nodes":[{"id":"events","table":"events","label":"Events"},
+        {"id":"summary","table":"events","label":"Summary","derivation":{"kind":"aggregate","source":"events","groupBy":["id"],"outputs":[
+            {"id":"earliest","label":"Earliest","operation":"min","column":"at"}]}}]})
+    calculated = source_type(catalog,definition,"summary","earliest")
+    assert calculated == kind
+    analysis = TimeAnalysis(table="summary",column="earliest",granularity="day",timezone="America/New_York")
+    # The 02:30 UTC instant belongs to the preceding New York calendar day;
+    # conversion must precede DATE_TRUNC instead of truncating a naive value.
+    sql = bucket_expression(exp.column("earliest"),analysis,calculated).sql(dialect="postgres")
+    assert ("AT TIME ZONE 'America/New_York'" in sql) is zoned
+    assert parse_one(sql,read="postgres").find(exp.TimestampTrunc) is not None
+
+
+def test_calculated_zoned_timestamp_calendar_plan_keeps_local_day_boundary(context):
+    from schemii.schemoo.models import ModelNode
+    dashboard, tile, model = timed(context,granularity="day",timezone="America/New_York")
+    catalog = queries.model_catalog(None,None,model)
+    catalog["tables"][0]["primaryKey"] = ["id"]
+    next(column for column in catalog["tables"][0]["columns"] if column["name"]=="created_at")["dataType"] = "timestamp(6) with time zone"
+    model.definition.nodes.append(ModelNode.model_validate({"id":"summary","table":"people","label":"Summary","derivation":{
+        "kind":"aggregate","source":"people","groupBy":["id"],"outputs":[{"id":"earliest","label":"Earliest","operation":"min","column":"created_at"}]}}))
+    tile.dimensions = [field("summary","earliest")]
+    tile.time_analysis = TimeAnalysis(table="summary",column="earliest",granularity="day",timezone="America/New_York")
+    dashboard.tiles = [tile]
+    _, plan = queries.tile_plan(None,None,dashboard,tile.id)
+    assert '"earliest" AT TIME ZONE \'America/New_York\'' in plan["sql"]
+    assert "DATE_TRUNC('DAY'" in plan["sql"]

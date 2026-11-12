@@ -1,6 +1,9 @@
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
-import { nodeColumns, fieldLabel } from "../../src/schemii/schemoo/web/model-columns.js";
+import { nodeColumns, fieldLabel, calculationAnchor } from "../../src/schemii/schemoo/web/model-columns.js";
 import { exposedFields, setFieldExposure, splitDraft, joinModel, changedParts } from "../../src/schemii/schemoo/web/model-state.js";
 import { ensureAliasConnections, isAlias, removeModelNode } from "../../src/schemii/schemoo/web/alias-model.js";
 import { conditionSources, conditionSummary } from "../../src/schemii/schemoo/web/derived-conditions.js";
@@ -80,4 +83,103 @@ test("summary mapping suggestions follow one explicit FK without choosing betwee
   draft.edges.push({source:"certs",target:"people",relationshipId:"approver_fk"});
   catalog.relationships.push({id:"approver_fk",sourceTable:"cert",targetTable:"people",sourceColumn:"approver_id",targetColumn:"id"});
   assert.deepEqual(suggestSummaryConnection(draft,catalog,"certs","people"),[]);
+});
+
+test("calculated metadata resolves later-authored inputs with PostgreSQL promotions",()=>{
+  const {draft,catalog}=fixture();
+  catalog.tables[0].columns.find(column=>column.name==="salary").dataType="integer";
+  catalog.tables[0].columns.find(column=>column.name==="bonus").dataType="smallint";
+  draft.nodes.unshift({id:"downstream",table:"people",label:"Downstream",derivation:{kind:"row",source:"people",groupBy:[],outputs:[
+    {id:"scaled",label:"Scaled",operation:"multiply",nodeId:"calc",column:"total",operandNodeId:"people",operand:"bonus"}]}});
+  assert.equal(nodeColumns(draft,catalog,draft.nodes[0])[0].dataType,"integer");
+  draft.nodes.push({id:"summary",table:"people",label:"Summary",derivation:{kind:"aggregate",source:"people",groupBy:["id"],outputs:[
+    {id:"sum",operation:"sum",column:"salary"},{id:"avg",operation:"avg",column:"salary"},{id:"min",operation:"min",column:"id"},{id:"count",operation:"count",column:"id"}]}});
+  assert.deepEqual(nodeColumns(draft,catalog,draft.nodes.at(-1)).map(column=>column.dataType),["uuid","bigint","numeric","uuid","bigint"]);
+  const reopened=joinModel(splitDraft(draft));
+  assert.equal(reopened.nodes[0].derivation.outputs[0].operandNodeId,"people");
+});
+test("invalid dependencies retain their output identity and an actionable repair path",()=>{
+  const {draft,catalog}=fixture();
+  draft.nodes[1].derivation.outputs.unshift({id:"later",operation:"multiply",nodeId:"calc",column:"total",operand:"bonus"});
+  assert.equal(nodeColumns(draft,catalog,draft.nodes[1])[0].dataType,"numeric");
+  draft.nodes[1].derivation.outputs[1].nodeId="calc";draft.nodes[1].derivation.outputs[1].column="later";
+  const columns=nodeColumns(draft,catalog,draft.nodes[1]);
+  assert.equal(columns[0].name,"later");assert.match(columns[0].issue,/cycle.*calc.later.*calc.total/);
+  draft.nodes[1].derivation.outputs[1].column="missing";
+  assert.match(nodeColumns(draft,catalog,draft.nodes[1])[0].issue,/calc.later.*calc.total.*calc.missing/);
+});
+test("row conditions may use another calculation at the same mapped owner grain",()=>{
+  const {draft}=fixture();
+  draft.nodes.push({id:"other",table:"people",derivation:{kind:"row",source:"people",outputs:[]}});
+  draft.nodes.push({id:"history",table:"people"});
+  assert.deepEqual([...conditionSources(draft,draft.nodes[1].derivation,{})].sort(),["calc","other","people"]);
+});
+
+test("removing a calculation used only as a second operand preserves its dependent draft",()=>{
+  const {draft,catalog}=fixture();
+  draft.nodes.push({id:"downstream",table:"people",derivation:{kind:"row",source:"people",outputs:[
+    {id:"value",operation:"multiply",column:"salary",operandNodeId:"calc",operand:"total"}]}});
+  const before=structuredClone(draft);
+  assert.throws(()=>removeModelNode(draft,"calc"),/rebind.*depend/);
+  assert.deepEqual(draft,before);
+  assert.equal(nodeColumns(draft,catalog,draft.nodes.at(-1))[0].dataType,"numeric");
+});
+
+function openEditor(draft,catalog,existing) {
+  const nodes=[],applied=[],validation=[];
+  const element=(tag,options={},children=[])=>{
+    const node={tag,...options,textContent:options.text || "",children:[...children],classList:{add(){}},
+      append(...items){this.children.push(...items);},replaceChildren(...items){this.children=items;},
+      setAttribute(){},addEventListener(){},remove(){},showModal(){},close(){}};
+    nodes.push(node);return node;
+  };
+  const context=vm.createContext({nodeColumns,calculationAnchor,element,crypto:{randomUUID},document:{body:element("body")},structuredClone,
+    columnComparisonIssue:()=>"",createIconButton:({label})=>element("button",{text:label}),
+    modelSelect:(label,choices,selected,change)=>element("select",{text:label,choices,selected,change}),disposeSelects(){},
+    conditionsEditor:()=>element("conditions"),conditionSources,helpHeading:title=>element("heading",{text:title}),suggestSummaryConnection,
+    summaryLookup:()=>({status:"source",title:"Same source",path:[],message:"At source"}),validationKey:node=>node,clearEditorValidation(){},
+    showEditorValidation:(_body,_error,issues)=>{validation.push(structuredClone(issues));return !!issues.length;}});
+  const source=readFileSync(new URL("../../src/schemii/schemoo/web/derived-dialog.js",import.meta.url),"utf8");
+  vm.runInContext(source.replace(/^import .*;\n/gm,"").replace("export function openDerivedSource","function openDerivedSource"),context);
+  context.openDerivedSource({draft,catalog,existing,onApply:node=>applied.push(structuredClone(node))});
+  return {applied,validation,find:label=>nodes.findLast(node=>node.textContent===label || node.attrs?.["aria-label"]===label)};
+}
+for(const rename of [false,true]) test(`reopening an implicit nested summary preserves its stage${rename?" during rename":" unchanged"}`,()=>{
+  const catalog={namespace:"public",tables:[{name:"people",primaryKey:["id"],columns:[{name:"id",dataType:"integer",nullable:false}]},
+    {name:"cert",columns:[{name:"person_id",dataType:"integer"},{name:"name",dataType:"text"}]}],relationships:[]};
+  const summary={id:"summary",table:"cert",label:"Count",derivation:{kind:"aggregate",source:"cert",groupBy:["person_id"],
+    connection:{target:"people",columns:[{source:"person_id",target:"id"}]},outputs:[{id:"n",label:"N",operation:"count",column:"name",conditions:[]}]}};
+  const nested={id:"nested",table:"cert",label:"Nested",derivation:{kind:"aggregate",source:"summary",groupBy:["person_id"],outputs:[{id:"again",label:"Again",operation:"sum",column:"n",conditions:[]}]}};
+  const draft={root:"people",nodes:[{id:"people",table:"people",label:"People"},{id:"cert",table:"cert",label:"Cert"},summary,nested],edges:[],scopes:[],fields:[]};
+  const before=structuredClone(draft),editor=openEditor(draft,catalog,nested);
+  assert.equal(editor.find("Connect summary to").selected,"summary");
+  assert.ok(editor.find("Connect summary to").choices.some(([id])=>id==="summary"));
+  assert.equal(editor.find("Connect person_id to column").selected,"person_id");
+  if(rename) editor.find("Calculated source name").value="Renamed nested summary";
+  editor.find("Apply to model").onclick();
+  assert.deepEqual(editor.validation.at(-1),[]);
+  assert.equal(editor.applied.length,1);
+  assert.deepEqual(editor.applied[0].derivation,nested.derivation);
+  assert.equal(editor.applied[0].label,rename?"Renamed nested summary":"Nested");
+  assert.deepEqual(draft,before,"opening and applying uses an isolated editor draft");
+});
+test("an existing implicit physical-owner summary still reopens without a connection",()=>{
+  const {draft,catalog}=fixture();catalog.tables[0].primaryKey=["id"];
+  const summary=draft.nodes[1];summary.derivation={kind:"aggregate",source:"people",groupBy:["id"],outputs:[{id:"n",label:"Count",operation:"count",column:"id",conditions:[]}]};
+  const editor=openEditor(draft,catalog,summary);editor.find("Apply to model").onclick();
+  assert.deepEqual(editor.validation.at(-1),[]);
+  assert.deepEqual(editor.applied[0].derivation,summary.derivation);
+});
+
+test("new summaries keep the physical owner default and its identity key mapping",()=>{
+  const {draft,catalog}=fixture();catalog.tables[0].primaryKey=["id"];
+  const editor=openEditor(draft,catalog);
+  editor.find("Calculation kind").change("aggregate");
+  assert.equal(editor.find("Connect summary to").selected,"people");
+  assert.equal(editor.find("Connect id to column").selected,"id");
+  const name=editor.find("Field 1 name");name.value="Identifiers";name.oninput();
+  editor.find("Field 1 column").change("id");
+  editor.find("Apply to model").onclick();
+  assert.deepEqual(editor.validation.at(-1),[]);
+  assert.deepEqual(editor.applied[0].derivation.connection,{target:"people",columns:[{source:"id",target:"id"}]});
 });

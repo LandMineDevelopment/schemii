@@ -278,7 +278,7 @@ function renderSelection() {
     const node = draft.nodes.find(n => n.id === selected.node); if (!node) return;
     if(node.derivation) {
       $("table-inspector-kind").textContent=node.derivation.kind==="row" ? "ROW CALCULATION" : "RELATED SUMMARY";
-      host.append(element("h3",{text:node.label}),element("p",{className:"hint",text:`Source: ${name(node.derivation.source)}. ${node.derivation.kind==="row" ? "Calculated directly in SELECT; no extra join." : `One row per ${node.derivation.groupBy.join(" + ")}. Connects to ${name(node.derivation.connection?.target || node.derivation.source)}${node.derivation.connection ? ` (${node.derivation.connection.columns.map(p=>`${p.source} → ${p.target}`).join(", ")})` : ""}.`}`}),icon("edit","Edit calculated source",()=>editDerived(null,node)),icon("delete","Delete calculated source",()=>{
+      host.append(element("h3",{text:node.label}),element("p",{className:"hint",text:`Source: ${name(node.derivation.source)}. ${node.derivation.kind==="row" ? "Calculated directly in SELECT; no extra join." : `One row per ${node.derivation.groupBy.join(" + ")}. Connects to ${name(node.derivation.connection?.target || node.derivation.source)}${node.derivation.connection ? ` (${node.derivation.connection.columns.map(p=>`${p.source} → ${p.target}`).join(", ")})` : ""}.`}`}),icon("edit","Edit calculated source",()=>editDerived(null,node)),icon("add","Add calculation using this source",()=>editDerived(node)),icon("delete","Delete calculated source",()=>{
         if(!confirm(`Remove “${node.label}” and its output selections from this model? No database data is deleted.`))return;
         try { removeModelNode(draft,node.id);selected=null;refreshForms();changed(); } catch(error) {showError(error.message);}
       }));
@@ -391,11 +391,11 @@ function renderTableColumns() {
       renderTableColumns();
       columnEditor.element.scrollIntoView({block:"nearest"});
     });
-    add.disabled = !!node.derivation;
-    if (node.derivation) add.dataset.uiTooltip = "Bind model filters to the calculation's source columns, not its calculated outputs.";
+
+    if(column.issue) {add.disabled=true;add.dataset.uiTooltip=column.issue;}
     const label = element("label", {className:"table-column-toggle"}, [toggle,element("span", {text:column.label || column.name}),element("small", {text:column.dataType})]);
     const row = element("section", {className:`table-filter-column${bindings.length ? " has-filters" : ""}`}, [element("div", {className:"table-filter-column__header"}, [expand,label,add]),details]);
-    if (!bindings.length) details.append(element("p", {className:"hint", text:node.derivation ? "Model rules apply to this calculation through its source columns." : "No model filter conditions are bound to this column."}));
+    if (!bindings.length) details.append(element("p", {className:"hint", text:"No model filter conditions are bound to this column."}));
     for (const scope of new Set(bindings.map(binding=>binding.scope))) {
       for (const binding of bindings.filter(candidate=>candidate.scope===scope)) {
         const alternative=binding.alternative;

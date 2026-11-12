@@ -451,3 +451,20 @@ def test_persisted_pivot_round_trip_keeps_ordered_axes_and_all_total_options():
     assert wire['dimensions'] == []
     wire['rowDimensions'].reverse()
     assert repo.get('alice', saved.id).tiles[0].row_dimensions[0].column == 'region'
+
+
+def test_calculated_measure_and_exact_kpi_configuration_roundtrip_without_rows():
+    tile={'id':'kpi','title':'Share','kind':'kpi','hiddenMeasures':[{**FIELD,'aggregate':'count'}],
+        'calculations':[{'id':'share','label':'Share','operation':'percent_of',
+            'left':{'output':{**FIELD,'aggregate':'count'},'scope':'group'},
+            'right':{'output':{**FIELD,'aggregate':'count'},'scope':'source_population'}}],
+        'kpiComparison':{'label':'Target','baseline':{'constant':'9007199254740993.000001'},'favorable':'higher'}}
+    repo=InMemoryDashboardRepository();saved=repo.create('alice',create(tiles=[tile]))
+    reopened=repo.get('alice',saved.id).model_dump(mode='json',by_alias=True)
+    assert reopened['tiles'][0]['calculations'][0]['id']=='share'
+    assert reopened['tiles'][0]['kpiComparison']['baseline']['constant']=='9007199254740993.000001'
+    saved.tiles[0].calculations[0].label='Local draft'
+    assert repo.get('alice',saved.id).tiles[0].calculations[0].label=='Share'
+    with pytest.raises(ValidationError):
+        create(tiles=[{**tile,'calculations':[{**tile['calculations'][0],'sql':'SELECT 1'}]}])
+    assert 'rows' not in reopened['tiles'][0]

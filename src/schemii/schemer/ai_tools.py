@@ -15,7 +15,7 @@ from schemii.schemoo.models import Contract, ScopeSelection
 from schemii.schemoo.service import load_model, model_catalog, domain_query
 from schemii.schemoo.routes import ParameterValuesRequest
 from .access import available_dashboards, prepare_dashboard
-from .dashboard_models import DashboardUpdate
+from .dashboard_models import DashboardUpdate, MeasureOperand
 from .dashboard_store import DashboardNotFoundError, DashboardConflictError
 from .tile_queries import tile_plan
 
@@ -56,6 +56,7 @@ values are not totals. Use the returned pivot axes and scope metadata for a cell
 row, column, subtotal or grand-total drill. Totals cover the complete qualifying
 population before Top N, and may exceed displayed cells. Column-capacity status
 rows are diagnostics, not data. Never sum displayed averages or distinct counts.
+Named report calculations use aggregate output references and explicit group, source_population or qualifying_groups scopes. Ratios divide complete aggregate inputs; percent_of has scale 100. A calculated mark has separate constituent populations. For drill_tile choose one returned constituent explicitly; do not invent a single detail population for a ratio. Numeric constants and KPI baselines preserve exact authored values, with an explicit favorable direction.
 Model summary inputs describe per-owner values, not original raw-child averages.
 get_dashboard returns only exposed filter scope, alternative and input IDs needed
 for parameter_values; never guess internal IDs or browse filters outside that list.
@@ -117,6 +118,7 @@ class DrillSelection(Contract):
     dimensions: list[DrillDimension] = Field(max_length=64)
     measure_index: int = Field(strict=True, ge=0)
     pivot: PivotDrillScope | None = None
+    constituent: MeasureOperand | None = None
 
 class DrillTile(Tile):
     selection: DrillSelection
@@ -151,7 +153,7 @@ def _drill_selection_document(selection):
     # NULL is required dimension data, not an absent optional field. The legacy
     # compiler rejects an extra pivot key, so omit only that optional metadata.
     return selection.model_dump(mode="json", by_alias=True,
-        exclude={"pivot"} if selection.pivot is None else set())
+        exclude={field for field in ("pivot","constituent") if getattr(selection,field) is None})
 
 
 def validate_action(action):
@@ -274,6 +276,7 @@ def _run_tile(bundle, tile_id, selections=None, selection=None):
     dashboard, services, owner = _selected_dashboard(bundle, selections), bundle.services, bundle.owner
     model, plan = tile_plan(services, owner, dashboard, tile_id, selection=selection, fresh=True)
     return {"dashboardId": dashboard.id, "tileId": tile_id,
+            **{key:plan[key] for key in ("calculatedMeasures","kpiComparison","calculationScope","calculationPopulation") if plan.get(key) is not None},
             **({"pivot": plan["pivot"], "warnings": plan.get("warnings", [])} if plan.get("pivot") else {}),
             **({"pivotScope": plan["pivotScope"]} if plan.get("pivotScope") else {}),
             **_sample_plan(bundle, model, plan)}
@@ -300,6 +303,10 @@ def _sample_plan(bundle, model, plan):
             services.report_access.check()
         from schemii.common.ai.results import bounded_page
         page_data = _json(page)
+        labels=plan.get("outputLabels",[])
+        for index,column in enumerate(page_data["columns"]):
+            if index<len(labels):
+                column["name"]=labels[index]
         sample = bounded_page(services, {"rows": page_data["rows"],
             "columns": page_data["columns"],
             "nextCursor": page_data.get("nextCursor"), "truncated": page_data["truncated"]})

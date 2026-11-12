@@ -248,15 +248,14 @@ class _Model:
             if item.get("valueSource") == "today":
                 raise ValueError("Choose either Today or a comparison column, not both.")
             compare = item["compareColumn"]
-            if self.nodes[node].get("derivation") or compare not in self.tables[self.keys[node]]:
-                raise ValueError(f"Unknown physical comparison column on this source: {node}.{compare}.")
-            details = self.column_details[self.keys[node]]
-            left_type, right_type = (details[name].get("dataType", "") for name in (column, compare))
+            if compare not in self.columns[node]:
+                raise ValueError(f"Unknown comparison column on this source: {node}.{compare}.")
+            left_type, right_type = (derived.field_details(self, node, name).get("dataType", "") for name in (column, compare))
             if not comparable_types(left_type, right_type):
                 raise ValueError(f"Comparison columns must have comparable types without casts ({left_type or 'unknown'} and {right_type or 'unknown'}).")
         if item.get("operator") == "range_contains_date":
-            details = self.column_details[self.keys[node]].get(column, {})
-            if node in self.derived or details.get("dataType", "").lower() != "daterange":
+            details = derived.field_details(self, node, column)
+            if details.get("dataType", "").lower() != "daterange":
                 raise ValueError("Contains date requires a PostgreSQL daterange source column.")
         return node
 
@@ -369,8 +368,6 @@ def validate_definition(catalog: dict, definition: dict) -> dict:
             for index, condition in enumerate(alternative.get("conditions", [])):
                 try:
                     model.validate(condition)
-                    if condition["table"] in model.derived:
-                        raise ValueError("Filter calculated source fields, not calculated outputs.")
                     if condition.get("parameterId") is not None and condition["parameterId"] not in input_ids:
                         raise ValueError("The condition references an unknown parameter input.")
                 except ValueError as error:
@@ -447,8 +444,6 @@ def _validated_conditions(model: _Model, value) -> list[dict]:
     result = _list(value, "Conditions", 32)
     for condition in result:
         model.validate(condition)
-        if condition["table"] in model.derived:
-            raise ValueError("Filtering calculated outputs is not supported yet. Filter their source fields instead.")
     return result
 
 
@@ -523,14 +518,18 @@ def _validate_preview_request(
     today: str | None,
     participation_fields: list[dict] | None,
     scope_outer_nodes: Collection[str] | None,
+    materializing: bool = False,
+    model: _Model | None = None,
 ) -> _ValidatedPreview:
     """Validate request shape and resolve authored scope alternatives."""
-    model = _Model(catalog, request)
+    model = _Model(catalog, request) if model is None else model
     root = request.get("root")
     if not isinstance(root, str) or root not in model.nodes:
         raise ValueError("Choose a known root table.")
     if root in model.derived:
-        raise ValueError("Choose a physical model object as the starting object; derived sources are fields attached to their owner.")
+        if not materializing:
+            raise ValueError("Choose a physical model object as the starting object; derived sources are fields attached to their owner.")
+        root = model.relation_owners[root]
     fields = _list(request.get("fields", []), "Fields", 64)
     if not fields:
         raise ValueError("Select between 1 and 64 fields.")
@@ -710,17 +709,43 @@ def _resolve_scope_participation(
     )
 
 
+def _path_field_dependencies(model, parents, root, references, *, nodes=()):
+    """Include fields read by participating joins without crossing summary stages.
+
+    A downstream grouping/mapping may use an upstream calculated output even
+    when that output is hidden. Its owning relation must project it. Expanding
+    row dependencies can introduce another path, so close over paths and fields
+    together; unrelated summary outputs remain outside this relation stage.
+    """
+    fields = derived.field_closure(model, references)
+    participating = _path_nodes(model, parents, root, {root, *nodes, *(key for key, _ in fields)})
+    while True:
+        join_fields = []
+        for node in parents:
+            if node == root or node not in participating:
+                continue
+            _, edge_id = parents[node]
+            edge = model.edges[edge_id]
+            pairs = edge["columns"] if edge.get("derived") else relationship_columns(edge)
+            join_fields.extend((edge[side], pair[side]) for pair in pairs for side in ("source", "target"))
+        expanded = derived.field_closure(model, [*fields, *join_fields])
+        paths = _path_nodes(model, parents, root, {*participating, *(key for key, _ in expanded)})
+        if expanded == fields and paths == participating:
+            return participating, fields
+        participating, fields = paths, expanded
+
+
 def _plan_preview(validated: _ValidatedPreview) -> _PreviewPlan:
     """Plan relation participation, active scopes, and stable aliases."""
     model, root = validated.model, validated.root
     parents = _traverse_model(model, root)
-    participating = {root, *(model.validate(field) for field in validated.participation_fields)}
-    participating.update(validated.report_condition_nodes)
-    participating.update(item["table"] for item in validated.row_filters)
+    references = [(field["table"], field["column"]) for field in validated.participation_fields]
+    references += derived.condition_references(validated.row_filters)
+    references += derived.condition_references([item for _, conditions in validated.existence for item in conditions])
     for selected in validated.selected_scopes:
         if selected.enabled and selected.scope["kind"] == "required":
-            participating.update(item["table"] for item in selected.conditions)
-    participating = _path_nodes(model, parents, root, participating)
+            references += derived.condition_references(selected.conditions)
+    participating, _ = _path_field_dependencies(model, parents, root, references)
     active_scope_ids = [
         selected.scope["id"]
         for selected in validated.selected_scopes
@@ -732,21 +757,17 @@ def _plan_preview(validated: _ValidatedPreview) -> _PreviewPlan:
     scope_participation = _resolve_scope_participation(
         validated, participating, active_scope_ids
     )
-    outer = _path_nodes(
-        model,
-        parents,
-        root,
-        {
-            root,
-            *scope_participation.preserved_required_nodes,
-            *(field["table"] for field in validated.fields),
-            *(item["table"] for item in validated.row_filters),
-        },
+    outer, _ = _path_field_dependencies(
+        model, parents, root,
+        [*((field["table"], field["column"]) for field in [*validated.fields, *validated.participation_fields]),
+         *derived.condition_references(validated.row_filters),
+         *derived.condition_references([item for node in scope_participation.preserved_required_nodes for item in scope_participation.source_filters.get(node, [])])],
+        nodes=scope_participation.preserved_required_nodes,
     )
     aliases = {node: f"t{index}" for index, node in enumerate(node for node in parents if node in outer)}
     for node in outer:
         if node in model.derived and model.derived[node]["kind"] == "row":
-            aliases[node] = aliases[model.derived[node]["source"]]
+            aliases[node] = aliases[model.relation_owners[node]]
     return _PreviewPlan(
         validated=validated,
         parents=parents,
@@ -771,8 +792,15 @@ class _PreviewCompiler:
         self.outputs = outputs
         self.output_labels = output_labels
         self.bounded = bounded
+        self.expression_path = []
         self.aggregate_relations = {}
         self.aggregate_plans = []
+        references = [(field["table"], field["column"]) for field in [*self.validated.fields, *self.validated.participation_fields]]
+        references += derived.condition_references(self.validated.row_filters)
+        references += derived.condition_references([item for _, conditions in self.plan.existence for item in conditions])
+        references += derived.condition_references([item for conditions in self.plan.source_filters.values() for item in conditions])
+        _, self.required_fields = _path_field_dependencies(self.model, plan.parents, self.validated.root, references,
+                                                           nodes=plan.participating | plan.outer)
         self.outer_graph = {node: [] for node in plan.outer}
         for node in plan.parents:
             if node == self.validated.root or node not in plan.outer:
@@ -781,8 +809,42 @@ class _PreviewCompiler:
             self.outer_graph[node].append((previous, key))
             self.outer_graph[previous].append((node, key))
 
-    def compile_predicate(self, item: dict, aliases: dict | None) -> str:
-        expression = (aliases[item["table"]] + "." if aliases else "") + _identifier(item["column"])
+    def field_expression(self, node, column, aliases, *, skip_scope=None):
+        reference = (node, column, skip_scope)
+        if reference in self.expression_path:
+            path = " -> ".join(f"{key}.{field}" for key, field, _ in [*self.expression_path, reference])
+            raise ValueError(f"Calculated filter dependency cycle: {path}.")
+        self.expression_path.append(reference)
+        try:
+            return self._field_expression(node, column, aliases, skip_scope=skip_scope)
+        finally:
+            self.expression_path.pop()
+
+    def _field_expression(self, node, column, aliases, *, skip_scope=None):
+        definition = self.model.derived.get(node)
+        expression = ((aliases[node] + ".") if aliases else "") + _identifier(column)
+        if definition is None:
+            return expression
+        output = next((value for value in definition["outputs"] if value["id"] == column), None)
+        if output is not None and definition["kind"] == "aggregate":
+            return f"COALESCE({expression}, 0)" if definition.get("connection") and output["operation"] in {"count", "count_distinct"} else expression
+        if output is not None:
+            value = self.field_expression(output.get("nodeId", definition["source"]), output["column"], aliases, skip_scope=skip_scope)
+            operand = self.field_expression(output.get("operandNodeId", definition["source"]), output["operand"], aliases, skip_scope=skip_scope)
+            expression = derived.expression(output, value, operand, _identifier, _literal)
+            conditions = self.compile_output_predicates(output, aliases, skip_scope=skip_scope)
+            if conditions:
+                expression = f"CASE WHEN {conditions} THEN {expression} ELSE NULL END"
+        if definition["kind"] == "row" and skip_scope != node:
+            conditions = " AND ".join(self.compile_predicate(item, aliases, skip_scope=node) for item in self.plan.source_filters.get(node, []))
+            if conditions:
+                expression = f"CASE WHEN {conditions} THEN {expression} ELSE NULL END"
+        if len(expression) > 65536:
+            raise ValueError(f"Calculated expression {node}.{column} expands beyond the bounded SQL expression size; split the calculation into materialized summaries.")
+        return expression
+
+    def compile_predicate(self, item: dict, aliases: dict | None, *, skip_scope=None) -> str:
+        expression = self.field_expression(item["table"], item["column"], aliases, skip_scope=skip_scope)
         operator = item.get("operator")
         operators = {"eq": "=", "ne": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
         if operator in ("is_null", "not_null"):
@@ -806,7 +868,7 @@ class _PreviewCompiler:
             result = f"STRPOS(CAST({expression} AS TEXT), {_literal(item['value'])}) > 0"
         elif isinstance(operator, str) and operator in operators:
             operand = (
-                (aliases[item["table"]] + "." if aliases else "") + _identifier(item["compareColumn"])
+                self.field_expression(item["table"], item["compareColumn"], aliases, skip_scope=skip_scope)
                 if item.get("compareColumn") is not None
                 else _literal(item.get("value"))
             )
@@ -817,13 +879,13 @@ class _PreviewCompiler:
             raise ValueError("Allow null must be a boolean.")
         return f"({result} OR {expression} IS NULL)" if item.get("allowNull") and operator not in ("is_null", "not_null") else result
 
-    def compile_output_predicates(self, output: dict, names: dict) -> str:
+    def compile_output_predicates(self, output: dict, names: dict | None, *, skip_scope=None) -> str:
         return " AND ".join(
             self.compile_predicate(
                 {**condition, "value": self.validated.today}
                 if condition.get("valueSource") == "today"
                 else condition,
-                names,
+                names, skip_scope=skip_scope,
             )
             for condition in output.get("conditions", [])
         )
@@ -834,76 +896,83 @@ class _PreviewCompiler:
         model, request = self.model, self.validated.request
         definition = model.derived[node]
         owner = definition["source"]
-        needed = {field["column"] for field in self.validated.fields if field["table"] == node}
+        needed = {column for key, column in self.required_fields if key == node}
         outputs = [output for output in definition["outputs"] if output["id"] in needed]
-        base_nodes = [value for key, value in model.nodes.items() if key not in model.derived]
-        base_edges = [value for value in request.get("edges", []) if value.get("source") not in model.derived and value.get("target") not in model.derived]
+        references = [(owner, column) for column in definition["groupBy"]]
+        references += [reference for output in outputs for reference in derived.output_references(definition, output)]
+        dependencies = derived.field_closure(model, references)
+        allowed_nodes = {key for key in model.nodes if key not in model.derived} | {key for key, _ in dependencies}
         inner_fields = [{"table": owner, "column": name} for name in definition["groupBy"]]
         labels = {index: name for index, name in enumerate(definition["groupBy"])}
         operations = {}
         for output in outputs:
             index = len(inner_fields)
             inner_fields.append({"table": output.get("nodeId", owner), "column": output["column"]})
-            operations[index] = output
-            labels[index] = output["id"]
-        inner_request = {
-            **request,
-            "nodes": base_nodes,
-            "root": owner,
-            "fields": inner_fields,
-            "filters": [],
-            "reportFilters": [],
-        }
-        if "edges" in request:
-            inner_request["edges"] = base_edges
-        # A single summary may follow a chain (owner -> facts -> lookup), but
-        # two independent contributing branches would multiply its inputs.
-        base_model = _Model(self.validated.catalog, inner_request)
-        routes, queue = {owner: None}, deque([owner])
-        while queue:
-            previous = queue.popleft()
-            for other, edge in base_model.graph[previous]:
-                if other not in routes:
-                    routes[other] = (previous, edge)
-                    queue.append(other)
-        _path_nodes(base_model, routes, owner, {output.get("nodeId", owner) for output in outputs})
+            operations[index], labels[index] = output, output["id"]
+        scopes = []
+        for scope in request.get("scopes", []):
+            alternatives = []
+            for option in scope.get("alternatives", []):
+                conditions = [item for item in option.get("conditions", []) if item["table"] in allowed_nodes and item["table"] != node]
+                inputs = [parameter for parameter in option.get("inputs", []) if any(item.get("parameterId") == parameter["id"] for item in conditions)]
+                alternatives.append({**option, "conditions": conditions, "inputs": inputs})
+            if any(option["conditions"] for option in alternatives):
+                scopes.append({**scope, "alternatives": alternatives})
+        inner_request = {**request, "root": owner, "fields": inner_fields,
+                         "filters": [], "reportFilters": [], "scopes": scopes}
+        root = model.relation_owners[owner]
+        routes = _traverse_model(model, root)
+        _path_nodes(model, routes, root, {root, *(key for key, _ in dependencies)})
         contributor_paths = []
         for output in outputs:
             contributor = output.get("nodeId", owner)
-            if contributor not in routes:
-                raise ValueError("A calculated output is disconnected from its owning source.")
+            references = derived.field_closure(model, derived.output_references(definition, output))
             route = set()
-            while contributor != owner:
-                route.add(contributor)
-                previous, edge_id = routes[contributor]
-                if definition.get("connection") and contributor != base_model.edges[edge_id]["target"]:
-                    raise ValueError("Summary lookups must not multiply source records. Summarize the many-side source separately before connecting its result.")
-                contributor = previous
+            for value, _ in references:
+                if value not in routes:
+                    raise ValueError("A calculated output is disconnected from its owning source.")
+                current = value
+                while current != root:
+                    previous, edge_id = routes[current]
+                    edge = model.edges[edge_id]
+                    if current not in model.derived or model.derived[current]["kind"] == "aggregate":
+                        if not edge.get("derived"):
+                            route.add(current)
+                            if definition.get("connection") and current != edge["target"]:
+                                raise ValueError("Summary lookups must not multiply source records. Summarize the many-side source separately before connecting its result.")
+                    current = previous
+            upstream = derived.field_closure(model, [(contributor, output["column"])])
+            if (output["operation"] in {"sum", "avg", "count"}
+                    and any(key in model.derived and model.derived[key]["kind"] == "aggregate" for key, _ in upstream)
+                    and model.anchors[contributor] != model.anchors[owner]):
+                raise ValueError("Reaggregate a materialized summary at its own grain; raw source records would repeat this calculated measure.")
             contributor_paths.append(route)
         if any(not (a <= b or b <= a) for a in contributor_paths for b in contributor_paths):
             raise ValueError("Outputs from independent relationship branches need separate aggregate sources to avoid multiplying their values.")
         longest = max(contributor_paths, key=len, default=set())
-        for output, contributor_path in zip(outputs, contributor_paths):
-            for extra in longest - contributor_path:
-                previous, edge_id = routes[extra]
-                edge = base_model.edges[edge_id]
+        for output, path in zip(outputs, contributor_paths):
+            for extra in longest - path:
+                _, edge_id = routes[extra]
+                edge = model.edges[edge_id]
                 if extra == edge["source"] and output["operation"] not in {"min", "max", "count_distinct"} and not output.get("distinct"):
                     raise ValueError("These outputs summarize different record grains. Use separate aggregate sources so related rows cannot multiply a count, total, or list.")
-        inner = compile_preview(
-            self.validated.catalog,
-            inner_request,
-            _outputs=operations,
-            _output_labels=labels,
-            _bounded=False,
-            _today=self.validated.today,
-        )
+        inner = compile_preview(self.validated.catalog, inner_request, _outputs=operations,
+                                _output_labels=labels, _bounded=False, _today=self.validated.today,
+                                _materializing=True, _model=model)
         self.aggregate_plans.append(inner)
         self.aggregate_relations[node] = "(\n" + inner["sql"].removesuffix(";") + "\n)"
         return self.aggregate_relations[node]
 
     def relation(self, node: str) -> str:
         if node in self.model.derived:
-            return self.compile_aggregate_relation(node)
+            if self.model.derived[node]["kind"] == "row":
+                return self.relation(self.model.relation_owners[node])
+            relation = self.compile_aggregate_relation(node)
+            clauses = self.plan.source_filters.get(node, [])
+            if clauses:
+                predicate = " AND ".join(self.compile_predicate(item, {node:"summary_filter"}) for item in clauses)
+                return f"(SELECT * FROM {relation} AS summary_filter WHERE {predicate})"
+            return relation
         namespace, table = self.model.keys[node]
         physical = f"{_identifier(namespace)}.{_identifier(table)}"
         clauses = self.plan.source_filters.get(node, [])
@@ -944,7 +1013,7 @@ class _PreviewCompiler:
         warnings, repetition_diagnostics = [], []
         for field_index, field in enumerate(self.validated.fields):
             node, name = field["table"], field["column"]
-            expression = f"{self.plan.aliases[node]}.{_identifier(name)}"
+            expression = self.field_expression(node, name, self.plan.aliases)
             aggregate = field.get("aggregate", "none")
             # Node IDs are stable internal references and may contain generated
             # alias identifiers. Result columns use the author-facing model label.
@@ -954,20 +1023,6 @@ class _PreviewCompiler:
                 output = next((item for item in definition["outputs"] if item["id"] == name), None)
                 if output:
                     label = f"{self.model.nodes[node]['label']}.{output['label']}"
-                    if definition.get("connection") and output["operation"] in {"count", "count_distinct"}:
-                        # A grouped child relation has no row for missing children.
-                        expression = f"COALESCE({expression}, 0)"
-                    if definition["kind"] == "row":
-                        expression = derived.expression(
-                            output,
-                            f"{self.plan.aliases[node]}.{_identifier(output['column'])}",
-                            f"{self.plan.aliases[node]}.{_identifier(output['operand'])}",
-                            _identifier,
-                            _literal,
-                        )
-                        clause = self.compile_output_predicates(output, self.plan.aliases)
-                        if clause:
-                            expression = f"CASE WHEN {clause} THEN {expression} ELSE NULL END"
             if self.outputs and field_index in self.outputs:
                 expression = derived.expression(self.outputs[field_index], expression, None, _identifier, _literal)
                 clause = self.compile_output_predicates(self.outputs[field_index], self.plan.aliases)
@@ -982,6 +1037,8 @@ class _PreviewCompiler:
                     grouping.append(expression)
             elif isinstance(aggregate, str) and aggregate in {"count", "count_distinct", "sum", "avg", "min", "max"}:
                 relationships = self.multiplying_relationships(node) if aggregate in {"count", "sum", "avg"} else []
+                if relationships and any(key in self.model.derived and self.model.derived[key]["kind"] == "aggregate" for key, _ in derived.field_closure(self.model, [(node, name)])):
+                    raise ValueError("A calculated summary measure would be repeated by these report joins. Aggregate its materialized grain before adding many-side detail.")
                 if relationships:
                     message = (
                         f"{aggregate.upper()} of {label} may be affected by repeated rows from joins. "
@@ -1007,6 +1064,20 @@ class _PreviewCompiler:
             expressions.append(f"{expression} AS {_identifier(label)}")
         return _OutputCompilation(expressions, grouping, labels, aggregated, warnings, repetition_diagnostics)
 
+    def join_predicate(self, edge, names):
+        if edge.get("derived"):
+            source = edge["source"]
+            definition = self.model.derived[source]
+            pairs = edge["columns"]
+            result = []
+            for pair in pairs:
+                details = derived.field_details(self.model, edge["target"], pair["target"])
+                operator = "=" if definition.get("connection") or details.get("nullable") is False else "IS NOT DISTINCT FROM"
+                result.append(f"{names[source]}.{_identifier(pair['source'])} {operator} " + self.field_expression(edge["target"], pair["target"], names))
+            return " AND ".join(result)
+        return " AND ".join(f"{names[edge['source']]}.{_identifier(pair['source'])} = "
+                            f"{names[edge['target']]}.{_identifier(pair['target'])}" for pair in relationship_columns(edge))
+
     def compile_joins(self, nodes: set[str], names: dict[str, str], join_kind: str) -> tuple[list[str], list[str]]:
         result, warnings = [], []
         for node in self.plan.parents:
@@ -1014,44 +1085,19 @@ class _PreviewCompiler:
                 continue
             previous, key = self.plan.parents[node]
             edge = self.model.edges[key]
-            if edge.get("derived"):
-                definition = self.model.derived[node]
-                if definition["kind"] == "row":
-                    continue
-                equalities = []
-                connection = definition.get("connection")
-                mappings = connection["columns"] if connection else [
-                    {"source": column, "target": column} for column in definition["groupBy"]
-                ]
-                for mapping in mappings:
-                    column, target_column = mapping["source"], mapping["target"]
-                    details = self.model.column_details[self.model.keys[previous]][target_column]
-                    # Ordinary equality permits PostgreSQL hash/merge joins for
-                    # nonnullable owner keys. Nullable groups need NULL matching.
-                    operator = "=" if connection or details.get("nullable") is False else "IS NOT DISTINCT FROM"
-                    equalities.append(
-                        f"{names[node]}.{_identifier(column)} {operator} "
-                        f"{names[previous]}.{_identifier(target_column)}"
-                    )
-                result.append(f"{join_kind} JOIN {self.relation(node)} AS {names[node]} ON " + " AND ".join(equalities))
+            if edge.get("derived") and self.model.derived[edge["source"]]["kind"] == "row":
                 continue
-            result.append(
-                f"{join_kind} JOIN {self.relation(node)} AS {names[node]} ON "
-                + " AND ".join(f"{names[edge['source']]}.{_identifier(pair['source'])} = "
-                               f"{names[edge['target']]}.{_identifier(pair['target'])}" for pair in relationship_columns(edge))
-            )
-            if join_kind == "LEFT" and (previous == edge["target"] or edge.get("kind") == "logical"):
+            result.append(f"{join_kind} JOIN {self.relation(node)} AS {names[node]} ON " + self.join_predicate(edge, names))
+            if join_kind == "LEFT" and not edge.get("derived") and (previous == edge["target"] or edge.get("kind") == "logical"):
                 warnings.append(f"Joining {previous} to {node} can repeat {previous} rows and multiply totals.")
         return result, warnings
 
     def compile_existence_predicates(self) -> list[str]:
         where = [self.compile_predicate(item, self.plan.aliases) for item in self.validated.row_filters]
         for index, (mode, items) in enumerate(self.plan.existence):
-            nodes = _path_nodes(
-                self.model,
-                self.plan.parents,
-                self.validated.root,
-                {item["table"] for item in items},
+            nodes, _ = _path_field_dependencies(
+                self.model, self.plan.parents, self.validated.root,
+                derived.condition_references(items),
             )
             names = {
                 node: f"e{index}_{position}"
@@ -1072,6 +1118,9 @@ class _PreviewCompiler:
                 if not nodes:
                     where.extend(self.compile_predicate(item, names) for item in items)
                     continue
+            for key in self.plan.parents:
+                if key in names and key in self.model.derived and self.model.derived[key]["kind"] == "row":
+                    names[key] = names[self.model.relation_owners[key]]
             # Keep outer references in WHERE so PostgreSQL can pull up EXISTS into
             # a semi/anti join. An outer reference in JOIN ON prevents that rewrite
             # and can force a separate subtree traversal for every outer row.
@@ -1080,13 +1129,17 @@ class _PreviewCompiler:
             for node in self.plan.parents:
                 if node not in local_nodes:
                     continue
+                if node in self.model.derived and self.model.derived[node]["kind"] == "row":
+                    continue
                 previous, edge_id = self.plan.parents[node]
                 edge = self.model.edges[edge_id]
-                equality = " AND ".join(
-                    f"{names[edge['source']]}.{_identifier(pair['source'])} = "
-                    f"{names[edge['target']]}.{_identifier(pair['target'])}" for pair in relationship_columns(edge))
+                equality = self.join_predicate(edge, names)
                 source = f"{self.relation(node)} AS {names[node]}"
-                if previous in local_nodes:
+                if node in self.model.derived and self.model.derived[node]["kind"] == "aggregate":
+                    if len(body) == 1:
+                        body.append(f"FROM (SELECT 1) AS existence_seed_{index}")
+                    body.append(f"LEFT JOIN {source} ON {equality}")
+                elif previous in local_nodes:
                     body.append(f"INNER JOIN {source} ON {equality}")
                 else:
                     body.append(("FROM " if len(body) == 1 else "CROSS JOIN ") + source)
@@ -1176,14 +1229,22 @@ def compile_preview(
     _today=None,
     _participation_fields=None,
     _scope_outer_nodes: Collection[str] | None = None,
+    _materializing=False,
+    _model=None,
 ) -> dict:
     """Validate, plan participation, then compile a bounded semantic preview."""
+    if _outputs:
+        additional = [{"table": key, "column": column} for output in _outputs.values()
+                      for key, column in derived.condition_references(output.get("conditions", []))]
+        _participation_fields = [*(request.get("fields", []) if _participation_fields is None else _participation_fields), *additional]
     validated = _validate_preview_request(
         catalog,
         request,
         today=_today,
         participation_fields=_participation_fields,
         scope_outer_nodes=_scope_outer_nodes,
+        materializing=_materializing,
+        model=_model,
     )
     plan = _plan_preview(validated)
     return _PreviewCompiler(
@@ -1192,3 +1253,10 @@ def compile_preview(
         output_labels=_output_labels,
         bounded=_bounded,
     ).compile()
+
+
+def model_field_details(catalog, definition, node, column):
+    """Typed field metadata from the same validated DAG used by SQL compilation."""
+    model = _Model(catalog, definition)
+    model.validate({"table": node, "column": column})
+    return derived.field_details(model, node, column)

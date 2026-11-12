@@ -1,10 +1,15 @@
+import { calculationAnchor } from "./model-columns.js";
 /** A field may test its owner or an existing contributor-path source, never a new branch. */
 export function conditionSources(draft, definition, output) {
   const owner = definition.source, contributor = output.nodeId || owner;
-  if (definition.kind === "row") return new Set([owner]);
-  const graph = new Map(draft.nodes.filter(n => !n.derivation).map(n => [n.id, []]));
+  if (definition.kind === "row") return new Set(draft.nodes.filter(node=>calculationAnchor(draft,node.id)===calculationAnchor(draft,owner)).map(node=>node.id));
+  const graph = new Map(draft.nodes.map(n => [n.id, []]));
   for (const edge of draft.edges.filter(e => e.enabled)) {
     graph.get(edge.source)?.push(edge.target); graph.get(edge.target)?.push(edge.source);
+  }
+  for(const node of draft.nodes.filter(node=>node.derivation)) {
+    const target=node.derivation.connection?.target || node.derivation.source;
+    graph.get(node.id)?.push(target);graph.get(target)?.push(node.id);
   }
   const parents = new Map([[owner, null]]), queue = [owner];
   for (let index = 0; index < queue.length; index++) for (const next of graph.get(queue[index]) || []) {
@@ -13,6 +18,8 @@ export function conditionSources(draft, definition, output) {
   const path = new Set([owner]);
   if (!parents.has(contributor)) return path; // Server reports the disconnected contributor.
   for (let node = contributor; node !== null; node = parents.get(node)) path.add(node);
+  const anchors=new Set([...path].map(id=>calculationAnchor(draft,id)));
+  for(const node of draft.nodes.filter(node=>node.derivation)) if(anchors.has(calculationAnchor(draft,node.id))) path.add(node.id);
   return path;
 }
 

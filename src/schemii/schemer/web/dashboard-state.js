@@ -1,3 +1,4 @@
+import { calculationErrors, visibleMeasures } from "./measures.js";
 import { timeAnalysisErrors } from './time-analysis.js';
 import { availableFields, aggregateChoices } from './report-state.js';
 import { nodeColumns, fieldLabel } from '#model/model-columns.js';
@@ -21,15 +22,17 @@ export function tileAggregateChoices(tile, draft, catalog, field) {
 }
 export const fieldKey = field => JSON.stringify([field.table, field.column]);
 export function newTile() {
-  return { id: crypto.randomUUID(), title: '', kind: 'bar', dimensions: [], rowDimensions: [], columnDimensions: [], pivotTotals: pivotDefaults(), measures: [], detailFields: [], reportFilters: [], sort: [], aggregateFilters: [], topN: null, limit: 100 };
+  return { id: crypto.randomUUID(), title: '', kind: 'bar', dimensions: [], rowDimensions: [], columnDimensions: [], pivotTotals: pivotDefaults(), measures: [], hiddenMeasures: [], calculations: [], kpiComparison: null, detailFields: [], reportFilters: [], sort: [], aggregateFilters: [], topN: null, limit: 100 };
 }
 export function tileErrors(tile, model, catalog) {
   const errors = [];
+  const count=visibleMeasures(tile).length;
   if (!tile.title.trim()) errors.push('Name this tile.');
   if (tile.kind === 'detail' && !tile.detailFields.length) errors.push('Choose at least one detail column.');
-  if (tile.kind !== 'detail' && !tile.measures.length) errors.push('Choose at least one measure.');
+  if (tile.kind !== 'detail' && !count) errors.push('Choose at least one measure.');
   if (['bar', 'line', 'donut'].includes(tile.kind) && !tile.dimensions.length) errors.push('Choose at least one dimension for this chart.');
-  if (['kpi', 'donut'].includes(tile.kind) && tile.measures.length !== 1) errors.push('Choose one measure for this view.');
+  if (['kpi', 'donut'].includes(tile.kind) && count !== 1) errors.push('Choose one measure for this view.');
+  if(tile.kind==='kpi' && ((tile.calculations || []).length || tile.kpiComparison) && [...tile.measures,...(tile.hiddenMeasures || [])].some(field=>(field.aggregate || "none")==="none")) errors.push("KPI calculations need explicit aggregations to produce a single complete value.");
   if (tile.kind === 'kpi' && tile.dimensions.length) errors.push('A KPI has no grouping dimensions.');
   if (tile.kind !== 'detail' && !tile.detailFields.length) errors.push('Choose the columns to show when drilling into this tile.');
   if (tileDimensions(tile).length + tile.measures.length > 64 || tile.detailFields.length > 64) errors.push('Choose no more than 64 output columns.');
@@ -46,7 +49,7 @@ export function tileErrors(tile, model, catalog) {
     if (!Number.isInteger(totals.maximumColumns) || totals.maximumColumns < 1 || totals.maximumColumns > 24 || !Number.isInteger(totals.maximumRows) || totals.maximumRows < 1 || totals.maximumRows > 200) errors.push('Choose 1–24 column groups and 1–200 preview rows.');
     if (tile.timeAnalysis && ((tile.timeAnalysis.comparison || 'none') !== 'none' || tile.timeAnalysis.runningTotal)) errors.push('Pivot calendar grouping supports period values. Use a report or chart for comparisons and running totals.');
   }
-  return [...errors, ...timeAnalysisErrors({ ...tile, dimensions: tileDimensions(tile) }), ...reportControlErrors(tile, model, catalog)];
+  return [...errors, ...timeAnalysisErrors({ ...tile, dimensions: tileDimensions(tile) }), ...reportControlErrors(tile, model, catalog), ...calculationErrors(tile,reportOutputs(tile,model,catalog))];
 }
 export const reportOutputKey = output => JSON.stringify([output.table, output.column, output.aggregate || 'none', output.kind || 'value']);
 // Compare decimal values without first rounding either token through Number.
@@ -86,7 +89,7 @@ export function validTimeFilterValue(value, type) {
   return true;
 }
 export function reportOutputs(tile, model, catalog) {
-  const fields = tile.kind === 'detail' ? tile.detailFields : [...tileDimensions(tile), ...tile.measures];
+  const fields = tile.kind === 'detail' ? tile.detailFields : [...tileDimensions(tile), ...tile.measures, ...(tile.hiddenMeasures || [])];
   const make = (field, kind = 'value') => {
     const node = model?.definition.nodes.find(node => node.id === field.table);
     let dataType = model ? nodeColumns(model.definition, catalog, node).find(column => column.name === field.column)?.dataType || '' : '';
@@ -96,10 +99,11 @@ export function reportOutputs(tile, model, catalog) {
     return { table: field.table, column: field.column, aggregate: field.aggregate || 'none', kind, label, dataType };
   };
   const outputs = fields.map(field => make(field));
-  if (tile.timeAnalysis) for (const field of tile.measures) {
+  if (tile.timeAnalysis) for (const field of [...tile.measures,...(tile.hiddenMeasures || [])]) {
     if ((tile.timeAnalysis.comparison || 'none') !== 'none') for (const kind of ['comparison', 'change', 'percent_change']) outputs.push(make(field, kind));
     if (tile.timeAnalysis.runningTotal) outputs.push(make(field, 'running_total'));
   }
+  outputs.push(...(tile.calculations || []).map(item=>({table:"@report",column:item.id,aggregate:"none",kind:"calculated",label:item.label || "Unnamed calculation",dataType:"numeric"})));
   return outputs;
 }
 export function reportControlErrors(tile, model, catalog) {
@@ -115,10 +119,10 @@ export function reportControlErrors(tile, model, catalog) {
     if (!['asc', 'desc'].includes(item.direction) || !['first', 'last'].includes(item.nulls || 'last')) errors.push(`Sort ${index + 1}: choose a direction and NULL placement.`);
     used.add(key);
   });
-  const measures = new Set(tile.measures.map(field => JSON.stringify([field.table, field.column, field.aggregate || 'none'])));
+  const measures = new Set([...tile.measures,...(tile.hiddenMeasures || [])].map(field => JSON.stringify([field.table, field.column, field.aggregate || 'none'])));
   filters.forEach((item, index) => {
     const output = keys.get(reportOutputKey(item)), prefix = `Result filter ${index + 1}: `;
-    if (!output || !measures.has(JSON.stringify([item.table, item.column, item.aggregate || 'none']))) { errors.push(`${prefix}choose a selected measure or enabled time-analysis output.`); return; }
+    if (!output || output.kind!=="calculated" && !measures.has(JSON.stringify([item.table, item.column, item.aggregate || 'none']))) { errors.push(`${prefix}choose a selected measure or enabled time-analysis output.`); return; }
     if (['is_null', 'not_null'].includes(item.operator)) { if (item.value != null) errors.push(`${prefix}NULL checks have no comparison value.`); return; }
     if (!['eq', 'ne', 'gt', 'gte', 'lt', 'lte'].includes(item.operator)) errors.push(`${prefix}choose a comparison operator.`);
     const value = item.value, type = output.dataType.replace(/\(\d+(?:,\s*\d+)?\)/g, '').trim().toLowerCase();

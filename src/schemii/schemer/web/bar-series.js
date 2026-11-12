@@ -24,6 +24,7 @@ export function barDimensionValue(tile, index, value) {
   return String(value);
 }
 export function barMeasureName(tile, column) {
+  if(tile.outputMeasureNames?.[column]) return tile.outputMeasureNames[column];
   const offset = tile.dimensions.length, count = tile.measures.length;
   const comparison = tile.timeAnalysis && tile.timeAnalysis.comparison !== 'none';
   const width = (comparison ? 3 : 0) + (tile.timeAnalysis?.runningTotal ? 1 : 0);
