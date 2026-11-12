@@ -149,7 +149,7 @@ async def export_tile(dashboard_id: str, tile_id: str, request: Request,
             raise ApiProblem(422, "invalid_export_request", "Supply the dashboard revision and optional selection.") from error
         dashboard, services = await asyncio.to_thread(_dashboard, request, principal.user_id, dashboard_id, body, export=True)
         model, plan = await asyncio.to_thread(tile_plan, services, principal.user_id, dashboard,
-                                              tile_id, selection=body.selection, fresh=True)
+                                              tile_id, selection=body.selection, fresh=True, exporting=True)
         return response(services, principal.user_id, model, [{"tileId": tile_id, "plan": plan}], export=True)
 
 

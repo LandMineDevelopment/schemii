@@ -1,4 +1,6 @@
 """Save private dashboard definitions independently of current slicer values."""
+
+from .dashboard_models import tile_dimensions
 from contextlib import contextmanager
 from fastapi import APIRouter, Depends, Query, Request, Response
 from schemii.common.api.errors import ApiProblem
@@ -107,11 +109,11 @@ def validate_dashboard(services, owner, body):
         return type_family(details) == "numeric"
 
     for tile in body.tiles:
-        for fields in (tile.dimensions + tile.measures, tile.detail_fields):
+        for fields in (tile_dimensions(tile) + tile.measures, tile.detail_fields):
             if fields:
                 plan_query(catalog, definition, ExploreState(root=definition.root, fields=fields,
                     reportFilters=tile.report_filters, limit=tile.limit), model.catalog_fingerprint)
-        validate_time_analysis(tile, catalog, definition)
+        validate_time_analysis(tile.model_copy(update={"dimensions": tile_dimensions(tile)}) if tile.kind == "pivot" else tile, catalog, definition)
         validate_report_controls(tile, catalog, definition)
         for field in tile.measures:
             if tile.kind in {"bar", "line", "donut"} and field.aggregate not in {"count", "count_distinct"} and not numeric(field.table, field.column):
