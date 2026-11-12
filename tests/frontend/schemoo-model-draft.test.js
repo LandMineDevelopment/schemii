@@ -71,3 +71,17 @@ test("adding fields preserves alias exposure and prefers the existing physical o
   addSourceSelection(draft, catalog, [{ table: "table_0", columns: ["id"] }]);
   assert.deepEqual(draft.exposedFields.map(field => [field.table, field.column]), [["table_0", "name"], ["table_0", "id"]]);
 });
+
+test("adding selected fields does not import relationships between unrelated modeled sources", () => {
+  const catalog = largeCatalog();
+  const draft = importedDraft(catalog, [0, 1, 2].map(index => ({ table: `table_${index}`, columns: ["name"] })));
+  catalog.relationships = [
+    { id: "selected_fk", sourceTable: "table_0", sourceColumn: "id", targetTable: "table_1", targetColumn: "id" },
+    { id: "unrelated_fk", sourceTable: "table_1", sourceColumn: "id", targetTable: "table_2", targetColumn: "id" },
+  ];
+  const contract = structuredClone(draft.sourceContract);
+  addSourceSelection(draft, catalog, [{ table: "table_0", columns: ["id"] }]);
+  assert.deepEqual(draft.edges.map(edge => [edge.relationshipId, edge.enabled]), [["selected_fk", false]]);
+  assert.deepEqual(draft.sourceContract, contract);
+  assert.equal(draft.exposedFields.length, 4);
+});

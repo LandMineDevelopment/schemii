@@ -34,6 +34,7 @@ export function reconcileSourceCatalog(draft,catalog) {
 /** Add only explicitly chosen sources/fields; preserve existing roles and rules. */
 export function addSourceSelection(draft,catalog,selection) {
   const imported=importedDraft(catalog,selection),next=structuredClone(draft);
+  const selectedTables=new Set(imported.nodes.map(node=>node.table));
   const canonical=new Map();
   for(const node of next.nodes.filter(node=>!node.derivation)) if(!canonical.has(node.table)||node.id===node.table)canonical.set(node.table,node.id);
   const ids=new Set(next.nodes.map(node=>node.id));
@@ -53,6 +54,9 @@ export function addSourceSelection(draft,catalog,selection) {
   }
   const tuples=new Set(next.edges.map(edge=>edgeKey(edge.relationshipId,edge.source,edge.target))),edgeIds=new Set(next.edges.map(edge=>edge.id));
   for(const relationship of catalog.relationships || []) {
+    // An explicit field/source addition can offer connections to its selected
+    // sources; it must not import unrelated newly discovered relationships.
+    if(!selectedTables.has(relationship.sourceTable)&&!selectedTables.has(relationship.targetTable))continue;
     const source=canonical.get(relationship.sourceTable),target=canonical.get(relationship.targetTable);
     if(!source||!target||tuples.has(edgeKey(relationship.id,source,target)))continue;
     let id=`source_fk_${relationship.id}`,suffix=2;while(edgeIds.has(id))id=`source_fk_${relationship.id}_${suffix++}`;
