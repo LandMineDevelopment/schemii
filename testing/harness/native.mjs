@@ -2,10 +2,14 @@ import { execFileSync } from 'node:child_process';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
+import { readFileSync, lstatSync } from 'node:fs';
 import { open, readFile, readdir, lstat, realpath, readlink, mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:path';
 import { readWorkspaceNavigation } from '../../src/schemii/schemii/web/assets/workspace-navigation.js';
 import { workerCleanupReasons } from './leases.mjs';
+import { sourceIdentity } from './deployment.mjs';
+import { coverageIDs, declareCoverage, assertCoverageActivity, captureSupports, inspectionCoverage, inspectionSupports } from './evidence.mjs';
+export { captureSupports } from './evidence.mjs';
 
 export const nativeMode = run => run.browser === 'native';
 export function nativeBrowserRoots(root) {
@@ -58,7 +62,8 @@ export async function readNativeSession(directory, browserRoot) {
   for (const [pid, tick] of [[metadata.pid, metadata.birth_tick], [metadata.child_pid, metadata.child_birth_tick]]) {
     if (!Number.isSafeInteger(pid) || pid < 1 || String(tick) !== (await processIdentity(pid))?.birthTick) throw new Error('Native connection process ownership is stale.');
   }
-  return { directory: target, sessionId: metadata.session_id, pid: metadata.pid, birthTick: String(metadata.birth_tick), childPid: metadata.child_pid, childBirthTick: String(metadata.child_birth_tick), guardianPid: metadata.guardian_pid, guardianBirthTick: String(metadata.guardian_birth_tick), dev: info.dev, ino: info.ino };
+  if (metadata.activity !== undefined && (!metadata.activity || typeof metadata.activity !== 'object' || Object.keys(metadata.activity).sort().join() !== 'epoch,pending,schema' || metadata.activity.schema !== 1 || !Number.isSafeInteger(metadata.activity.epoch) || metadata.activity.epoch < 0 || !Number.isSafeInteger(metadata.activity.pending) || metadata.activity.pending < 0 || metadata.activity.pending > 256)) throw new Error('Native activity metadata is invalid.');
+  return { activity: metadata.activity, directory: target, sessionId: metadata.session_id, pid: metadata.pid, birthTick: String(metadata.birth_tick), childPid: metadata.child_pid, childBirthTick: String(metadata.child_birth_tick), guardianPid: metadata.guardian_pid, guardianBirthTick: String(metadata.guardian_birth_tick), dev: info.dev, ino: info.ino };
 }
 export async function bindNative(run, lane, directory, browserRoot) {
   if (!nativeMode(run) || run.controller !== 't3' || lane.status !== 'claimed' || !lane.agent) throw new Error('Native binding requires a claimed native T3 lane.');
@@ -77,6 +82,8 @@ export async function assertNativeConnection(lane, browserRoot) {
   if (!binding || binding.closedAt || binding.agent !== lane.agent || binding.generation !== lane.generation) throw new Error('Bind this claimed generation to its own native connection before login or evidence.');
   const actual = await readNativeSession(binding.directory, browserRoot);
   if (actual.dev !== binding.dev || actual.ino !== binding.ino || actual.pid !== binding.pid || actual.birthTick !== binding.birthTick || actual.childPid !== binding.childPid || actual.childBirthTick !== binding.childBirthTick) throw new Error('Native connection ownership changed.');
+  if (binding.activity && (!actual.activity || actual.activity.epoch < binding.activity.epoch)) throw new Error('Native browser activity watermark cannot reset.');
+  binding.activity = actual.activity;
   return binding;
 }
 export async function nativeBrowserProcesses(binding) {
@@ -184,16 +191,65 @@ function scenarioURL(run, lane, scenario, expectedState, requestedURL) {
   if (url.origin !== new URL(run.baseURL).origin || url.username || url.password) throw new Error('Scenario route must stay on its assigned application origin.');
   return url.href;
 }
+export function browserState(run, lane) {
+  return nativeMode(run) ? { session: lane.native?.sessionId, activity: lane.native?.activity }
+    : { session: `isolated-${lane.id}-${lane.generation}`, activity: lane.browserActivity || {schema:1,epoch:0,pending:0} };
+}
+export function activeScenario(lane, scenarioId = lane.currentScenario?.scenario) {
+  const active = lane.currentScenario;
+  if (!active?.coverage) return active?.scenario === scenarioId ? active : null;
+  const member = active.coverage.declaration.members.find(item => item.scenario === scenarioId);
+  return member ? { ...active, scenario: member.scenario, id: member.attempt } : null;
+}
+export function endCoverage(lane, note, at = new Date().toISOString()) {
+  const group = lane.coverageGroups?.find(item => item.coverage.sha256 === lane.currentScenario?.coverage?.sha256);
+  if (!group || group.endedAt) throw new Error('No active shared coverage group.');
+  const reason = requiredText(note, 'Coverage end reason');
+  group.endedAt = at; group.reason = reason;
+  group.status = group.completed.length === group.coverage.declaration.members.length ? 'completed' : 'abandoned';
+  lane.currentScenario = null;
+  return group;
+}
 export function beginScenario(run, lane, scenarioId, request = {}, now = new Date().toISOString()) {
-  const scenario = lane.scenarios.find(item => item.id === scenarioId);
-  if (!scenario) throw new Error('Begin requires an assigned scenario.');
-  if (!run.deployment?.identity?.fingerprint) throw new Error('Scenario requires a verified source identity.');
-  const url = scenarioURL(run, lane, scenario, request.expectedState || 'product', request.url);
-  const session = { id: randomUUID(), scenario: scenario.id, generation: lane.generation, agent: lane.agent, startedAt: now,
-    expectedState: request.expectedState || 'product', url, viewport: scenario.viewport, source: run.deployment.identity.fingerprint,
-    resources: scenario.resources || lane.resources, phase: 'scenario' };
+  if (lane.currentScenario?.coverage) throw new Error('Finish every declared case or explicitly coverage-end the partial group before another begin; nested groups are not allowed.');
+  const ids = request.coverage === undefined ? [scenarioId] : coverageIDs(request.coverage, scenarioId);
+  const contexts = ids.map(id => {
+    const scenario = lane.scenarios.find(item => item.id === id);
+    if (!scenario) throw new Error('Begin requires an assigned scenario.');
+    if (!run.deployment?.identity?.fingerprint) throw new Error('Scenario requires a verified source identity.');
+    const url = scenarioURL(run, lane, scenario, request.expectedState || 'product', request.url);
+    const session = { id: randomUUID(), scenario: scenario.id, generation: lane.generation, agent: lane.agent, startedAt: now,
+      product: scenario.product, assignmentURL:url, requestedURL:request.url || null, expectedState: request.expectedState || 'product', url, viewport: structuredClone(scenario.viewport), source: run.deployment.identity.fingerprint,
+      resources: structuredClone(scenario.resources || lane.resources), phase: 'scenario' };
+    if (request.stateURL !== undefined) {
+      if (ids.length === 1) throw new Error('stateURL belongs to an explicit shared coverage declaration.');
+      const actual = new URL(request.stateURL, run.baseURL);
+      if (!captureRouteMatches(lane, session, actual, new URL(url))) throw new Error('Shared state route/resource is not assigned.');
+      session.url = actual.href;
+    }
+    return session;
+  });
+  const session = contexts[0];
+  if (ids.length > 1) {
+    const state = browserState(run, lane);
+    session.coverage = declareCoverage(contexts, {lane:lane.id,...state,at:now});
+    lane.coverageGroups ||= [];
+    lane.coverageGroups.push({coverage:structuredClone(session.coverage),completed:[],status:'active'});
+  }
   lane.currentScenario = session;
   return session;
+}
+function assertSharedState(run, lane) {
+  const coverage = lane.currentScenario?.coverage;
+  if (!coverage) return;
+  const d = coverage.declaration, state = browserState(run, lane);
+  assertCoverageActivity(coverage, state.session, state.activity);
+  if (d.lane !== lane.id || d.agent !== lane.agent || d.generation !== lane.generation || d.source !== run.deployment?.identity?.fingerprint) throw new Error('Shared coverage lane, generation or source changed.');
+  for (const member of d.members) {
+    const scenario = lane.scenarios.find(item => item.id === member.scenario);
+    if (!scenario || scenario.product !== d.product || !isDeepStrictEqual(scenario.viewport,d.viewport) || !isDeepStrictEqual(scenario.resources || lane.resources,d.resources)
+        || !captureRouteMatches(lane,{...lane.currentScenario,scenario:member.scenario},new URL(d.url),new URL(scenarioURL(run,lane,scenario,d.expectedState,d.requestedURL || undefined)))) throw new Error('Shared coverage assigned context changed.');
+  }
 }
 const selectionParameters = new Set(['layer', 'tableId', 'table', 'viewId', 'view', 'viewKind']);
 function captureRouteMatches(lane, active, actual, expected) {
@@ -218,10 +274,12 @@ function captureRouteMatches(lane, active, actual, expected) {
 export function assertCaptureState(run, lane, input, now = new Date().toISOString()) {
   const active = lane.currentScenario;
   if (!active || active.phase !== 'scenario' || active.generation !== lane.generation || active.agent !== lane.agent || active.source !== run.deployment?.identity?.fingerprint) throw new Error('Evidence requires a current scenario-begin in this claimed generation/source.');
+  assertSharedState(run,lane);
   const actual = new URL(input.url, run.baseURL), expected = new URL(active.url);
+  if (active.coverage && actual.href !== expected.href) throw new Error('Shared capture route/state changed; declare a new group.');
   if (!captureRouteMatches(lane, active, actual, expected)) throw new Error('Capture route/resource does not match the current assigned scenario.');
   if (input.viewport?.width !== active.viewport.width || input.viewport?.height !== active.viewport.height) throw new Error('Capture viewport does not match the current assigned scenario.');
-  return { scenario: active.scenario, scenarioAttempt: active.id, generation: active.generation, agent: lane.agent, source: active.source,
+  return { ...(active.coverage ? {coverage:structuredClone(active.coverage),browserSession:browserState(run,lane).session,product:active.product,expectedState:active.expectedState} : {}), scenario: active.scenario, scenarioAttempt: active.id, generation: active.generation, agent: lane.agent, source: active.source,
     resources: active.resources, phase: 'scenario', url: actual.href, viewport: { ...active.viewport }, at: now };
 }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -247,6 +305,7 @@ export async function importNativeFile(run, lane, file, { runDir, browserRoot, k
     extension = source.split('.').at(-1).toLowerCase();
     if (!['csv', 'json', 'txt', 'sql'].includes(extension)) throw new Error('Download inspection supports bounded CSV, JSON, SQL or text.');
   } else throw new Error('Unsupported native evidence kind.');
+  await assertNativeConnection(lane,browserRoot); assertSharedState(run,lane);
   const target = join(runDir, lane.id, `${kind}-${randomUUID()}.${extension}`);
   await mkdir(dirname(target), { recursive: true, mode: 0o700 });
   await writeFile(target, bytes, { mode: 0o600, flag: 'wx' });
@@ -285,16 +344,19 @@ export async function recordNativeResource(run,lane,input,options) {
     lane.resources.cleanupReceipts ||= [];lane.resources.cleanupReceipts.push(receipt);return receipt;
   } finally { lane.currentScenario=prior; }
 }
-export function currentCapture(run, lane, path, { inspection = false } = {}) {
-  const active = lane.currentScenario;
+export function currentCapture(run, lane, path, { inspection = false, scenario = lane.currentScenario?.scenario } = {}) {
+  const active = activeScenario(lane,scenario);
   const capture = (lane.captures || []).find(item => item.path === path);
-  if (!active || !capture || capture.kind !== 'image' || capture.phase !== 'scenario' || capture.scenario !== active.scenario || capture.scenarioAttempt !== active.id || capture.generation !== lane.generation || capture.agent !== lane.agent || capture.source !== run.deployment?.identity?.fingerprint) throw new Error('Visual evidence must belong to this current scenario, generation, resource and source.');
-  if (inspection && !(capture.inspections || []).some(item => item.agent === lane.agent && item.sha256 === capture.sha256)) throw new Error('Visual evidence needs an explicit image delivery/view receipt and expected/actual inspection.');
+  assertSharedState(run,lane);
+  if (!active || !capture || capture.kind !== 'image' || capture.phase !== 'scenario' || !captureSupports(capture,scenario,active.id,lane.id) || capture.generation !== lane.generation || capture.agent !== lane.agent || capture.source !== run.deployment?.identity?.fingerprint
+      || capture.coverage && capture.coverage.sha256 !== active.coverage?.sha256) throw new Error('Visual evidence must belong to this current scenario, generation, resource and source.');
+  if (inspection && !(capture.inspections || []).some(item => item.agent === lane.agent && inspectionSupports(capture,item,scenario,active.id))) throw new Error('Visual evidence needs an explicit image delivery/view receipt and expected/actual inspection for this case.');
   return capture;
 }
 export function inspectionReceipt(capture, agent, input) {
   if (!['native-inline-image', 'view_image'].includes(input.tool)) throw new Error('Image inspection must record native inline delivery or view_image invocation.');
-  const receipt = { id: randomUUID(), agent, tool: input.tool, invocation: requiredText(input.invocation, 'Image invocation', 1000), note: requiredText(input.note, 'Expected/actual image inspection'), sha256: capture.sha256, at: new Date().toISOString(), assurance: 'worker-attestation-requires-independent-review' };
+  const receipt = { id: randomUUID(), agent, tool: input.tool, invocation: requiredText(input.invocation, 'Image invocation', 1000), note: requiredText(input.note, 'Expected/actual image inspection'), sha256: capture.sha256,
+    ...inspectionCoverage(capture,input.coverage), at: new Date().toISOString(), assurance: 'worker-attestation-requires-independent-review' };
   capture.inspections ||= []; capture.inspections.push(receipt);
   return receipt;
 }
@@ -328,12 +390,15 @@ export function recordReview(run, reviewer, target, scenarioId, input) {
   const scenario = target.scenarios.find(item => item.id === scenarioId), attempt = scenario?.attempts?.at(-1);
   if (!attempt || !attempt.id || attempt.source !== run.deployment?.identity?.fingerprint) throw new Error('Review requires a recorded current-source attempt.');
   if (!['accepted', 'confirmed-defect', 'prerequisite-mistake', 'unsupported-action', 'not-reproduced'].includes(input.verdict)) throw new Error('Review needs an explicit adjudication verdict.');
-  const captures = (target.captures || []).filter(capture => attempt.evidence.includes(capture.path) && capture.phase === 'scenario' && capture.scenario === scenarioId && capture.generation === attempt.generation && capture.scenarioAttempt === attempt.scenarioAttempt && capture.source === attempt.source && capture.agent === attempt.reviewer);
+  const captures = (target.captures || []).filter(capture => attempt.evidence.includes(capture.path) && capture.phase === 'scenario' && captureSupports(capture,scenarioId,attempt.scenarioAttempt,target.id) && capture.generation === attempt.generation && capture.source === attempt.source && capture.agent === attempt.reviewer);
   if (input.verdict === 'accepted' && (attempt.functional !== 'passed' || attempt.visual !== 'passed')) throw new Error('A failed or blocked attempt cannot become accepted.');
-  if (!captures.some(capture => capture.kind === 'image' && (capture.inspections || []).some(item => item.agent === reviewer.agent && item.sha256 === capture.sha256))) throw new Error('Reviewer must inspect the target attempt image and record its hash-bound receipt first.');
+  const priorFailures = (scenario.attempts || []).slice(0, -1).filter(item => item.functional !== 'passed' || item.visual !== 'passed');
+  if (input.verdict === 'accepted' && priorFailures.length && input.historyAcknowledged !== true) throw new Error('Review must explicitly acknowledge the preserved failed/blocked attempt history.');
+  if (!captures.some(capture => capture.kind === 'image' && (capture.inspections || []).some(item => item.agent === reviewer.agent && inspectionSupports(capture,item,scenarioId,attempt.scenarioAttempt)))) throw new Error('Reviewer must inspect the target attempt image and record its hash-bound receipt first.');
   const receipt = { id: randomUUID(), reviewerLane: reviewer.id, agent: reviewer.agent, username: reviewer.username, nativeSession: reviewer.native?.sessionId,
     targetLane: target.id, scenario: scenarioId, attempt: attempt.id, source: run.deployment.identity.fingerprint,
-    verdict: input.verdict, note: requiredText(input.note, 'Review expected/actual reason'), evidence: input.evidence || [], provenance: input.provenance || 'assigned-reviewer-session', at: new Date().toISOString() };
+    verdict: input.verdict, note: requiredText(input.note, 'Review expected/actual reason'), evidence: input.evidence || [], provenance: input.provenance || 'assigned-reviewer-session',
+    priorAttempts: priorFailures.map(item => ({ id: item.id, digest: hash(Buffer.from(JSON.stringify(item))) })), at: new Date().toISOString() };
   if (input.finding) {
     if (input.verdict === 'accepted') throw new Error('Finding adjudication needs a defect/prerequisite/unsupported/not-reproduced verdict.');
     const finding = (run.findings || []).find(item => item.id === input.finding && item.lane === target.id && item.scenario === scenarioId);
@@ -344,12 +409,194 @@ export function recordReview(run, reviewer, target, scenarioId, input) {
   run.reviews ||= []; run.reviews.push(receipt);
   return receipt;
 }
+
+export function recordCheckpoint(run, lane, scenario, input, evidence, at = new Date().toISOString()) {
+  const active = activeScenario(lane,scenario.id);
+  if (lane.currentScenario?.coverage) {
+    assertSharedState(run,lane);
+    const group = lane.coverageGroups.find(item => item.coverage.sha256 === lane.currentScenario.coverage.sha256);
+    if (!active || !group || group.endedAt || group.completed.includes(scenario.id)) throw new Error('Shared checkpoint requires an uncompleted declared case attempt.');
+    group.completed.push(scenario.id);
+  }
+  const attempt = { id: randomUUID(), generation: lane.generation, scenarioAttempt: active?.id,
+    source: run.deployment.identity.fingerprint, functional: input.functional, visual: input.visual,
+    note: input.note, evidence, reviewer: lane.agent, at };
+  scenario.attempts ||= [];
+  scenario.attempts.push(attempt);
+  scenario.initialResult ||= { functional: scenario.attempts[0].functional, visual: scenario.attempts[0].visual };
+  Object.assign(scenario, { functional: attempt.functional, visual: attempt.visual, latestAttemptId: attempt.id,
+    note: scenario.attempts.map((item, index) => `Attempt ${index + 1}: ${item.note}`).join('\n'),
+    evidence: [...new Set([...(scenario.evidence || []), ...evidence])], reviewer: lane.agent, at });
+  const group = lane.coverageGroups?.find(item => item.coverage.sha256 === lane.currentScenario?.coverage?.sha256);
+  if (group && group.completed.length === group.coverage.declaration.members.length) endCoverage(lane,'Every declared case has its own checkpoint.',at);
+  return attempt;
+}
+
+function boundFile(path) {
+  for (let parent = resolve(path); parent !== dirname(parent); parent = dirname(parent)) {
+    if (lstatSync(parent).isSymbolicLink()) throw new Error('Imported evidence paths cannot contain symlinks.');
+  }
+  const info = lstatSync(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 64 * 1024 * 1024 || (info.mode & 0o077)) throw new Error('Imported evidence must be bounded private regular files.');
+  return { path, sha256: hash(readFileSync(path)) };
+}
+function ownedImportFile(directory, path) {
+  const target = resolve(directory, path), rel = relative(resolve(directory), target);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error('Imported evidence must stay inside its original run.');
+  return boundFile(target);
+}
+function filesUnchanged(files) {
+  try { return files.every(file => boundFile(file.path).sha256 === file.sha256); } catch { return false; }
+}
+
+// Validate original local-CI records through the existing planner and timing
+// validators. This executes no tests and is deliberately not another runner.
+const verificationImport = `
+import json,sys
+from pathlib import Path
+from scripts.ci.local_ci import source_identity, lane_for, evidence, verify_original_run
+root,path,phase,base=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3],sys.argv[4]
+r=json.loads(path.read_text()); identity=source_identity(root)
+if r.get('schema')!=1 or r.get('source')!=identity: raise ValueError('wrong or stale source')
+origin=verify_original_run(root,path,r)
+if phase not in ('focused','final'): raise ValueError('invalid verification phase')
+if r.get('base_commit')!=base: raise ValueError('receipt immutable selected base differs from frozen acceptance scope')
+plan=origin['plan']
+if not plan['classification']['valid'] or r.get('profile')!=plan['classification']['profile']: raise ValueError('wrong plan/profile')
+required=plan['feedback']['commands'] if phase=='focused' else plan['commands']
+entries=r.get('commands',[])
+chosen=entries[:len(required)]
+if not required or [x['command'] for x in chosen]!=required: raise ValueError('wrong required command inventory')
+if phase=='final' and (len(entries)!=len(required) or r.get('status')!='passed' or r.get('acceptance') is not True or r.get('pending_layers') or r.get('pending_commands')): raise ValueError('failed pending cancelled or incomplete acceptance')
+if phase=='focused' and r.get('status') not in ('passed','feedback-passed'): raise ValueError('failed or incomplete focused checks')
+out=[]; files=[str(path.resolve()),origin['path']]
+for entry in chosen:
+ if entry.get('status')!='passed' or entry.get('exit_code')!=0: raise ValueError('required check did not pass')
+ item={'command':entry['command'],'status':entry['status'],'duration_ms':entry['duration_ms']}
+ key=lane_for(entry['command'])
+ if key:
+  relative=Path(entry.get('timing_evidence',''))
+  if relative.is_absolute() or '..' in relative.parts or not relative.parts: raise ValueError('missing or unsafe original timing records')
+  timing=path.parent/relative
+  summary=evidence(timing,key,r['profile'],identity,r['run_id'])
+  item['summary']=summary;files.append(str(timing.resolve()))
+ out.append(item)
+if source_identity(root)!=identity: raise ValueError('source changed during receipt import')
+print(json.dumps({'source':identity,'commands':out,'files':files,'profile':r['profile'],'mode':r['mode'],'origin':{'path':origin['path'],'sha256':origin['sha256']}}))
+`;
+export function importVerification(run, receiptPath, { root, phase = 'final', note, python = 'python3' }) {
+  const attempt = { id: randomUUID(), phase, at: new Date().toISOString(), status: 'rejected', note: requiredText(note, 'Verification provenance') };
+  run.verificationHistory ||= [];
+  run.verificationHistory.push(attempt);
+  try {
+    const before = sourceIdentity(root);
+    if (before.commit !== run.deployment?.identity?.commit || before.fingerprint !== run.deployment?.identity?.fingerprint) throw new Error('Changed source requires a new prepared run; old failures cannot be relabeled.');
+    const file = boundFile(resolve(receiptPath));
+    attempt.receipt = file;
+    const base = run.verificationBase || execFileSync('git', ['-C',root,'rev-parse','--verify','origin/main^{commit}'], {encoding:'utf8'}).trim();
+    if (!/^[0-9a-f]{40}$/.test(base)) throw new Error('Verification requires the prepared frozen base commit.');
+    let validated;
+    try { validated = JSON.parse(execFileSync(python, ['-c', verificationImport, root, file.path, phase, base], { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore','pipe','pipe'] })); }
+    catch { throw new Error('Original CI receipt rejected: source, inventory, outcome or timing evidence is stale, incomplete or invalid.'); }
+    const files = validated.files.map(boundFile);
+    if (files[0].sha256 !== file.sha256 || !isDeepStrictEqual(before, sourceIdentity(root))) throw new Error('Source or receipt changed during import.');
+    Object.assign(attempt, { status: 'passed', source: validated.source, profile: validated.profile,
+      commands: validated.commands, files, origin: validated.origin, assurance: 'validated-original-local-ci-receipt' });
+    return attempt;
+  } catch (error) { attempt.reason = error.message; throw error; }
+}
+
+function reproductionProof(run, targetLane, scenarioId) {
+  const target = run.lanes.find(lane => lane.id === targetLane), scenario = target?.scenarios.find(item => item.id === scenarioId);
+  const attempt = scenario?.attempts?.at(-1);
+  const review = (run.reviews || []).filter(item => item.targetLane === targetLane && item.scenario === scenarioId && item.attempt === attempt?.id).at(-1);
+  const reviewer = run.lanes.find(lane => lane.id === review?.reviewerLane);
+  if (!attempt || attempt.source !== run.deployment?.identity?.fingerprint || attempt.functional !== 'passed' || attempt.visual !== 'passed'
+      || review?.verdict !== 'accepted' || review.source !== attempt.source || !reviewer || reviewer.role !== 'reviewer'
+      || review.agent !== reviewer.agent || review.agent === target.agent || review.username !== reviewer.username
+      || review.username.toLowerCase() === target.username.toLowerCase()
+      || (nativeMode(run) && (!review.nativeSession || review.nativeSession === target.native?.sessionId))) throw new Error('Remediation requires a current-source passing reproduction and exact independent accepted review.');
+  const captures = (target.captures || []).filter(capture => attempt.evidence.includes(capture.path));
+  if (!captures.some(capture => capture.kind === 'image' && capture.sha256 && capture.source === attempt.source
+      && captureSupports(capture,scenarioId,attempt.scenarioAttempt,target.id) && capture.inspections?.some(item => item.agent === review.agent && inspectionSupports(capture,item,scenarioId,attempt.scenarioAttempt)))) throw new Error('Remediation review lacks hash-bound original image inspection.');
+  return { targetLane, scenarioId, attempt, review, captures: captures.map(capture => ({ path: capture.path, sha256: capture.sha256 })) };
+}
+function originalFindingProof(run, finding, manifestPath) {
+  const source = run.deployment?.identity?.fingerprint;
+  const lane = run.lanes?.find(item => item.id === finding.lane);
+  const scenario = lane?.scenarios?.find(item => item.id === finding.scenario);
+  if (!/^[0-9a-f]{64}$/.test(source || '') || !lane || !scenario || !finding.agent
+      || !finding.username || lane.username !== finding.username) throw new Error('Original finding lacks authentic lane/scenario/source provenance; preserve it as unverified.');
+  const captures = [];
+  for (const path of finding.evidence) {
+    const matched = (lane.captures || []).filter(capture => capture.path === path);
+    if (matched.length !== 1) throw new Error('Original evidence needs one authentic retained capture.');
+    const capture = matched[0];
+    const attempts = (scenario.attempts || []).filter(attempt => attempt.evidence?.includes(path)
+      && captureSupports(capture,finding.scenario,attempt.scenarioAttempt,lane.id) && attempt.generation === capture.generation
+      && attempt.source === source && attempt.reviewer === finding.agent);
+    if (capture.kind !== 'image' || capture.phase !== 'scenario' || !captureSupports(capture,finding.scenario,attempts[0]?.scenarioAttempt,lane.id)
+        || capture.source !== source || capture.agent !== finding.agent || !capture.scenarioAttempt
+        || !Number.isSafeInteger(capture.generation) || capture.generation < 1
+        || !/^[0-9a-f]{64}$/.test(capture.sha256 || '') || attempts.length !== 1 || !attempts[0].id
+        || finding.source && finding.source !== source
+        || finding.scenarioAttempt && finding.scenarioAttempt !== attempts[0]?.scenarioAttempt
+        || finding.generation !== undefined && finding.generation !== capture.generation) throw new Error('Original capture and checkpoint attempt/source/scenario binding is missing or changed.');
+    const file = ownedImportFile(dirname(manifestPath), path);
+    if (file.sha256 !== capture.sha256) throw new Error('Original evidence bytes differ from the authentic retained capture digest.');
+    captures.push({ capture: { path: capture.path, kind: capture.kind, phase: capture.phase, scenario: capture.scenario,
+      scenarioAttempt: capture.scenarioAttempt, generation: capture.generation, source: capture.source,
+      agent: capture.agent, sha256: capture.sha256, ...(capture.coverage ? {coverage:capture.coverage,browserSession:capture.browserSession,product:capture.product,expectedState:capture.expectedState} : {}), viewport: capture.viewport, url: capture.url, resources: capture.resources }, attempt: attempts[0] });
+  }
+  if (new Set(finding.evidence).size !== finding.evidence.length) throw new Error('Original finding evidence cannot repeat capture paths.');
+  return { finding, source, lane: lane.id, username: lane.username, scenario: scenario.id, captures };
+}
+export function importRemediation(original, current, findingId, input, { originalPath, currentPath }) {
+  const finding = (original.findings || []).find(item => item.id === findingId);
+  if (!finding || !Array.isArray(finding.evidence) || !finding.evidence.length || original.id === current.id) throw new Error('Import requires an original finding with retained evidence and a separately prepared reproduction run.');
+  if (!['resolved-defect','not-reproduced','prerequisite-mistake','unsupported-action'].includes(input.disposition)) throw new Error('Import requires an explicit remediation/adjudication disposition.');
+  if ((finding.verificationStatus === 'confirmed-defect' || finding.reviews?.some(review => review.verdict === 'confirmed-defect')) && input.disposition !== 'resolved-defect') throw new Error('A confirmed defect requires independently verified remediation, not reclassification.');
+  if (!original.deployment?.identity?.fingerprint || original.deployment.identity.fingerprint === current.deployment?.identity?.fingerprint && input.disposition === 'resolved-defect') throw new Error('Confirmed defect remediation requires a later changed source in a new prepared run.');
+  const originalProof = originalFindingProof(original, finding, originalPath);
+  const proof = reproductionProof(current, input.targetLane, input.scenario);
+  if (proof.review.agent === finding.agent || proof.review.username?.toLowerCase() === finding.username?.toLowerCase()) throw new Error('The original reporter cannot independently resolve their own finding.');
+  const files = [
+    ...finding.evidence.map(path => ownedImportFile(dirname(originalPath), path)),
+    ...proof.captures.map(capture => { const file = ownedImportFile(dirname(currentPath), capture.path); if (file.sha256 !== capture.sha256) throw new Error('Reproduction image changed after review.'); return file; }),
+  ];
+  const receipt = { id: randomUUID(), at: new Date().toISOString(), originalRun: original.id, findingId,
+    originalPath, currentPath, source: current.deployment.identity.fingerprint, disposition: input.disposition,
+    provenance: requiredText(input.provenance, 'External review provenance'), note: requiredText(input.note, 'Resolution expected/actual reason'),
+    originalDigest: hash(Buffer.from(JSON.stringify(originalProof))), proofDigest: hash(Buffer.from(JSON.stringify(proof))),
+    reproduction: { targetLane: input.targetLane, scenario: input.scenario, attempt: proof.attempt.id, review: proof.review.id, reviewer: proof.review.agent }, files };
+  original.remediations ||= []; original.remediations.push(receipt);
+  current.importedFindings ||= []; current.importedFindings.push(receipt);
+  return receipt;
+}
+function remediationCurrent(receipt, run) {
+  try {
+    if (receipt.source !== run.deployment?.identity?.fingerprint || !filesUnchanged(receipt.files)) return false;
+    const original = JSON.parse(readFileSync(receipt.originalPath, 'utf8'));
+    const current = JSON.parse(readFileSync(receipt.currentPath, 'utf8'));
+    const finding = original.findings.find(item => item.id === receipt.findingId);
+    return receipt.originalDigest === hash(Buffer.from(JSON.stringify(originalFindingProof(original, finding, receipt.originalPath))))
+      && receipt.proofDigest === hash(Buffer.from(JSON.stringify(reproductionProof(current, receipt.reproduction.targetLane, receipt.reproduction.scenario))));
+  } catch { return false; }
+}
 export function acceptance(run) {
   const testers = run.lanes.filter(lane => lane.role !== 'reviewer');
   const reasons = [];
   let reviewed = 0;
   if(run.recordingStatus === 'unavailable')reasons.push('evidence recording unavailable');
+  if (run.acceptanceContract >= 2) {
+    const final = run.verificationHistory?.filter(item => item.phase === 'final').at(-1);
+    if (!final || final.status !== 'passed' || !final.origin
+        || !final.files?.some(file => file.path === final.origin.path && file.sha256 === final.origin.sha256)
+        || final.source?.fingerprint !== run.deployment?.identity?.fingerprint || !filesUnchanged(final.files)) reasons.push('current-source final application verification pending or changed; original runner provenance required');
+  }
+  for (const receipt of run.importedFindings || []) if (!remediationCurrent(receipt, run)) reasons.push(`${receipt.findingId}: imported remediation evidence changed or no longer matches current source/review`);
   for (const lane of run.lanes) for (const reason of workerCleanupReasons(lane)) reasons.push(`${lane.id}: ${reason}`);
+  for (const lane of testers) if (lane.coverageGroups?.some(group=>!group.endedAt)) reasons.push(`${lane.id}: partial shared capture coverage remains active`);
   for (const lane of testers) for (const scenario of lane.scenarios) {
     const attempt = scenario.attempts?.at(-1);
     if (scenario.functional !== 'passed' || scenario.visual !== 'passed') reasons.push(`${lane.id}/${scenario.id}: execution gap`);
@@ -363,7 +610,11 @@ export function acceptance(run) {
   }
   if (nativeMode(run)) for (const lane of testers) if(!lane.native?.authentication || lane.native.authentication.source !== run.deployment?.identity?.fingerprint)reasons.push(`${lane.id}: native authenticated UI observation pending`);
   if (nativeMode(run)) for (const lane of run.lanes) if (lane.native && (lane.native.cleanup?.transport !== 'stopped' || lane.native.cleanup?.guardian !== 'stopped' || lane.native.cleanup?.temporaryOutput !== 'removed-observed' || lane.native.releaseAttempts?.at(-1)?.status === 'pending')) reasons.push(`${lane.id}: native transport cleanup pending`);
-  return { status: reasons.length ? 'review-pending' : 'reviewed-acceptance', reasons, intended: testers.reduce((sum, lane) => sum + lane.scenarios.length, 0), completed: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.functional !== 'not-run' && s.visual !== 'not-run').length, 0), reviewed };
+  return { status: reasons.length ? 'review-pending' : 'reviewed-acceptance', reasons, intended: testers.reduce((sum, lane) => sum + lane.scenarios.length, 0),
+    dispatched: testers.reduce((sum, lane) => sum + (lane.dispatchedAt ? lane.scenarios.length : 0), 0),
+    started: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.attempts?.length || !!activeScenario(lane,s.id)).length, 0),
+    completed: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.functional !== 'not-run' && s.visual !== 'not-run').length, 0),
+    firstAttemptFailures: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.attempts?.[0] && (s.attempts[0].functional !== 'passed' || s.attempts[0].visual !== 'passed')).length, 0), reviewed };
 }
 
 /** Fence before any closure prerequisite, so interrupted owners can be released. */

@@ -400,3 +400,68 @@ unresolved, including the reviewer lane. Worker receipts must match their record
 PID/birth/generation; delayed old receipts remain history and cannot clear a fresh
 owner's pending cleanup. Verified cleanup retains a failed worker exit as a failure,
 and native transport teardown does not establish native thread termination.
+
+### Supported pilot upload and writer cleanup
+
+The native adoption pilot uses Console `COPY FROM STDIN` with the exact three-row
+CSV in `resources.copyCSV`, followed by ordered row verification and content-inspected
+`COPY TO STDOUT`. There is no design JSON-upload UI. Provision a separately marked
+writer profile and fresh writer workspace for every pilot account before generating
+its manifest, including the reviewer. Missing or mismatched writer IDs/schema,
+reader-profile substitution and unowned starting state fail before dispatch.
+Desktop performs the upload; mobile is explicitly saved-state readback.
+
+`cleanup-sweep` owns app workspace receipts only. SQL objects remain pending cleanup
+until all lanes stop and the coordinator reconciles the marked writer ownership,
+runs the declared `reset-writer --account ACCOUNT`, then `verify-writer --account ACCOUNT`.
+These existing launcher operations validate the exact private QA marker/credentials;
+never issue generic SQL drops or reset another account. A generated mission is
+not cleanup evidence. Retain the actual reset/verification outcomes with the run.
+
+### Owned SQL cleanup and final receipts
+
+Use `cleanup-sweep --run RUN --workspace-fixtures MAP --reset-writers` for opt-in
+SQL cleanup after the run is stopped. It verifies exact map/profile/schema ownership,
+refuses active or unresolved account reservations, holds lifecycle/startup/deployment/
+reservation guards, and calls only launcher `--reset-testing-writable` followed by
+`--verify-testing-writable` for each owned marked writer. Failed attempts remain in
+`writer-cleanup.json`; unledgered app objects block reset. No generic SQL cleanup,
+reader reset or peer target is authorized. Explicit pilot writer selection uses
+`python -m testing.harness.schemii_workspaces --accounts ... --writer-accounts ...`.
+
+See [native QA acceptance](../../docs/native-qa-acceptance.md#later-attempts-external-review-and-final-verification)
+for append-only latest/initial execution, `resolve-finding` and `verify-receipt`.
+These import actual independent reproduction and original local-CI evidence; they
+never turn stopped processes, a closed issue, missing checks or old-source failure
+into a pass. Run source changes require a newly prepared run.
+
+### Original execution and historical capture provenance
+
+`verify-receipt` requires the original local runner's separate authenticated origin
+record and actual discovered/executed case/source inventory. Receipt-selfclaimed
+counts, synthetic parser fixtures and arbitrary/copied bundle paths cannot supply
+final verification. The import does not run tests or manufacture historical origin.
+See [testing feedback](../../docs/testing-feedback.md#original-local-execution-provenance).
+
+`resolve-finding` requires authentic original capture-to-checkpoint source/agent/
+generation/scenario binding for every evidence image and checks its retained hash
+against actual bytes before import. Missing legacy provenance stays unverified;
+replacing an image or changing its original proof invalidates later applicability.
+Original failures and historical findings remain intact.
+
+### Declared same-state images
+
+`begin --scenario CASE_A --args-json '{"coverage":["CASE_A","CASE_B"]}'`
+explicitly declares two to four assigned checks before one fresh screenshot.
+They must have the same exact product/resource/route/viewport/expected state and
+current lane/source/session generation. Optional `stateURL` fixes the actual
+supported workspace selection. Native sharing requires fresh activity-aware
+browser metadata; older sessions retain single-case behavior.
+
+`inspect` must name the viewed members in `args-json.coverage`. Checkpoint each
+case separately; the reviewer also inspects explicit members and reviews each
+case separately. Any intervening potentially mutating browser call invalidates
+remaining reuse, including failed/in-flight actions. `coverage-end --note REASON`
+explicitly abandons a partial group without filling its gaps. Historical images
+cannot be upgraded to shared scope. See the [complete declaration and activity
+contract](../../docs/native-qa-acceptance.md#explicit-same-state-capture-coverage).

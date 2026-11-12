@@ -35,8 +35,8 @@ MISSIONS = {
         ("catalog-baseline", "Exact live catalog", "On reader workspace inspect customers 32, orders 513, customer_totals 32, fixture_version 1 and orders_id_seq in the live PostgreSQL catalog where available. The desired-design object browser does not list live sequences. Filter exact and absent objects, inspect columns, identity, FK, CHECK and nullability; clear filter and verify catalog recovery."),
         ("catalog-paging", "Rows, lineage and target", "Preview all 513 orders with real page progression, first/last IDs, status totals 171 each; inspect customer 1's 16 orders and 5962.24 total in customer_totals. Follow relationship/lineage and return to the same reader target."),
         ("seeded-export", "Seeded JSON and SQL downloads", "On local preseeded design, confirm both qa_projects and qa_tasks plus exact types/defaults/identity from oracle. Open export menu, use harness download for desired design JSON and PostgreSQL SQL, inspect actual files for names, FK, UNIQUE, CHECK, numeric precision and identity. Reload and repeat after one owned saved edit."),
-        ("import-upload", "Owned import and round trip", "Export the seeded design JSON with harness download, inspect it, then use harness upload on the exact file input in a newly created prefixed local workspace. Confirm import summary, target, saved content and independent source design after reload; delete only the disposable import workspace."),
-        ("export-recovery", "Empty, invalid and responsive export", "Exercise empty owned design export and a malformed owned JSON upload (<=1 MiB), verify clear error without partial save. Inspect menu, download controls, long SQL/JSON and catalog at desktop/mobile; report unsupported UI operations as blocked."),
+        ("import-readback", "Saved design and export agreement", "Export seeded design JSON and desired SQL through the Download menu; inspect exact names, types and constraints. Reload the same owned saved design and compare inspector/JSON/SQL values. There is no JSON design-upload control; upload coverage belongs to the exact marked writer Console COPY mission."),
+        ("export-recovery", "Empty, invalid and responsive export", "Exercise empty owned design export and safe validation/cancel recovery in the design editor; verify no partial save. Inspect menu, download controls, long SQL/JSON and catalog at desktop/mobile; report unsupported UI operations as blocked."),
     ]),
     "qa_designer_006": ("Empty local design and table creation", [
         ("empty-create", "Create table from empty canvas", "Confirm owned local design is empty. Open toolbar with #create-table-button, snapshot dialog, create a prefixed disposable probe table using row-specific selectors, submit with #save-design-table-button once, reload and confirm persistence. Delete only the probe table and verify empty state before continuing."),
@@ -245,7 +245,7 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
                  f"all additional app object names prefixed {prefix}"]
         actions = ["create/edit/delete only own workspace/design objects", "download owned exports"]
         if username == "qa_designer_005":
-            actions.append("upload <=1 MiB design JSON into a new owned local workspace")
+            actions.append("download and inspect own saved design JSON/SQL; no JSON import")
         if username == "qa_designer_001":
             actions += ["send one AI prompt at a time in precreated reader/design chats",
                         "approve only exact proposals on owned local design",

@@ -38,3 +38,27 @@ test('historical execution and unadjudicated findings render review pending', ()
   assert.match(html,/Independent acceptance: <strong>review-pending<\/strong>/);
   assert.match(html,/finding-one: finding adjudication pending/);
 });
+
+
+test('report distinguishes initial failure latest execution coverage remediation and actual verification counts',()=>{
+  const html=reportHTML({id:'qa-receipt-report',status:'stopped',lanes:[{username:'qa_tester',status:'complete',scenarios:[{
+    title:'Current saved state',functional:'passed',visual:'passed',initialResult:{functional:'failed',visual:'blocked'},note:'Original failure retained',evidence:[]}]}],
+    acceptance:{status:'review-pending',intended:2,dispatched:2,started:1,completed:1,reviewed:0,firstAttemptFailures:1,reasons:['Second case not run']},
+    verificationHistory:[{phase:'focused',status:'passed',note:'Original private receipt',source:{commit:'source'},profile:'harness',commands:[{command:['npm','test'],status:'passed',summary:{collected:3,unique_observed:3,attempt_outcomes:{skipped:1},first_attempt_failures:0,retry_recovered:0}}]}],
+    importedFindings:[{findingId:'finding-original',disposition:'resolved-defect',originalRun:'qa-old',reproduction:{attempt:'attempt-new',reviewer:'independent-reviewer'},provenance:'Actual review <reference>',note:'Exact expected/actual',source:'new-source'}]});
+  assert.match(html,/dispatched: 2; started: 1; first-attempt failures: 1/);
+  assert.match(html,/Initial: failed/);assert.match(html,/Initial: blocked/);
+  assert.match(html,/collected 3; observed 3; skipped 1/);
+  assert.match(html,/finding-original/);assert.match(html,/Actual review &lt;reference&gt;/);
+});
+
+test('report exposes literal shared attempts partial gaps and separate independent review',()=>{
+  const html=reportHTML({id:'qa-shared',status:'running',lanes:[{id:'lane-1',scenarios:[{id:'case-a',title:'A',functional:'passed',visual:'passed',attempts:[{id:'checkpoint-a',scenarioAttempt:'attempt-a',functional:'passed',visual:'passed'}]},{id:'case-b',title:'B',functional:'not-run',visual:'not-run'}],
+    captures:[{path:'lane-1/shared.png',coverage:{sha256:'digest'}}],coverageGroups:[{status:'active',completed:['case-a'],coverage:{sha256:'digest',declaration:{id:'group-1',session:'session-1',declaredAt:'before-image',source:'source',url:'/?workspace=owned',viewport:{width:1280,height:800},activity:{epoch:7},members:[{scenario:'case-a',attempt:'attempt-a'},{scenario:'case-b',attempt:'attempt-b'}]}}}]}],reviews:[{targetLane:'lane-1',scenario:'case-a',attempt:'checkpoint-a',verdict:'accepted'}]});
+  assert.match(html,/Declared same-state capture coverage/);
+  assert.match(html,/case-a · scenario attempt attempt-a · function passed, visual passed · independent review accepted/);
+  assert.match(html,/case-b · scenario attempt attempt-b · function not-run, visual not-run · independent review pending/);
+  assert.match(html,/Active; remaining cases still require checkpoints/);
+  assert.match(html,/browser activity epoch: 7/);
+  assert.match(html,/lane-1\/shared.png/);
+});
