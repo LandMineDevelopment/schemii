@@ -431,12 +431,17 @@ SAFETY_OBJECTS_QUERY = """
          'definition',pg_get_indexdef(i.indexrelid),'method',iam.amname,'unique',i.indisunique,
          'valid',i.indisvalid,'predicate',pg_get_expr(i.indpred,i.indrelid,true)) ORDER BY ic.relname)
          FROM pg_index i JOIN pg_class ic ON ic.oid=i.indexrelid JOIN pg_am iam ON iam.oid=ic.relam WHERE i.indrelid=c.oid),'[]'::jsonb),
-      'default_grantees',COALESCE((SELECT jsonb_agg(DISTINCT CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END)
+      'default_grantees',COALESCE((SELECT jsonb_agg(DISTINCT CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END ORDER BY CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END)
          FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
          WHERE d.defaclrole=(SELECT oid FROM pg_roles WHERE rolname=current_user)
            AND d.defaclobjtype='r' AND d.defaclnamespace IN (0,n.oid)),'[]'::jsonb),
       'properties',jsonb_build_object('persistence',c.relpersistence,'row_security',c.relrowsecurity,
-          'force_row_security',c.relforcerowsecurity,'replica_identity',c.relreplident)::text
+          'force_row_security',c.relforcerowsecurity,'replica_identity',c.relreplident,
+          'policies',COALESCE((SELECT jsonb_agg(jsonb_build_object('name',pol.polname,'permissive',pol.polpermissive,
+             'command',pol.polcmd,'roles',ARRAY(SELECT CASE WHEN role=0 THEN 'PUBLIC' ELSE pg_get_userbyid(role) END
+                FROM unnest(pol.polroles) role ORDER BY role),
+             'using',pg_get_expr(pol.polqual,pol.polrelid,true),'check',pg_get_expr(pol.polwithcheck,pol.polrelid,true)) ORDER BY pol.polname)
+             FROM pg_policy pol WHERE pol.polrelid=c.oid),'[]'::jsonb))::text
     )::text AS value) descriptor
     WHERE n.nspname=settings.namespace AND c.relkind IN ('r','p','v','m','f','S','c')
     ORDER BY c.relname LIMIT %s
@@ -449,8 +454,9 @@ SAFETY_DEPENDENCIES_QUERY = """
       SELECT 'pg_class'::regclass::oid AS classid,c.oid AS objid,'relation'::text AS kind,n.nspname AS namespace,c.relname AS name,''::text AS signature
       FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
       UNION ALL
-      SELECT 'pg_type'::regclass::oid,t.oid,CASE WHEN t.typrelid=0 THEN 'type' ELSE 'relation' END,n.nspname,COALESCE(c.relname,t.typname),''
+      SELECT 'pg_type'::regclass::oid,t.oid,CASE WHEN c.oid IS NULL AND ec.oid IS NULL THEN 'type' ELSE 'relation' END,n.nspname,COALESCE(c.relname,ec.relname,t.typname),''
       FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace LEFT JOIN pg_class c ON c.oid=t.typrelid
+      LEFT JOIN pg_type element ON element.oid=t.typelem LEFT JOIN pg_class ec ON ec.oid=element.typrelid
       UNION ALL
       SELECT 'pg_proc'::regclass::oid,p.oid,'routine',n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)
       FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -487,6 +493,14 @@ SAFETY_UNKNOWNS_QUERY = """
       EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
         WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') AS routine_bodies,
       EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('f','c')) AS opaque_dependencies,
+        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('f','c'))
+      OR EXISTS(SELECT 1 FROM pg_depend d
+        LEFT JOIN pg_class c ON d.refclassid='pg_class'::regclass AND c.oid=d.refobjid
+        LEFT JOIN pg_type t ON d.refclassid='pg_type'::regclass AND t.oid=d.refobjid
+        LEFT JOIN pg_proc p ON d.refclassid='pg_proc'::regclass AND p.oid=d.refobjid
+        JOIN pg_namespace n ON n.oid=COALESCE(c.relnamespace,t.typnamespace,p.pronamespace)
+        WHERE d.classid NOT IN ('pg_class'::regclass,'pg_type'::regclass,'pg_proc'::regclass,
+          'pg_rewrite'::regclass,'pg_constraint'::regclass,'pg_trigger'::regclass,'pg_attrdef'::regclass)
+          AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') AS opaque_dependencies,
       NOT has_schema_privilege(%s,'USAGE') AS inaccessible
 """

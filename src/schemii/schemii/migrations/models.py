@@ -94,6 +94,7 @@ class MigrationPlanCreate(ApiModel):
         pattern=r"^[0-9a-f]{64}$",
     )
     allow_destructive: bool = False
+    refresh_materialized_view_ids: list[DesignObjectId] = Field(default_factory=list, max_length=100)
     column_type_conversions: list[ColumnTypeConversionChoice] = Field(default_factory=list, max_length=100)
     rebuild_table_ids: list[DesignObjectId] | None = Field(
         default=None,
@@ -102,6 +103,8 @@ class MigrationPlanCreate(ApiModel):
 
     @model_validator(mode="after")
     def unique_rebuild_tables(self) -> "MigrationPlanCreate":
+        if len(self.refresh_materialized_view_ids) != len(set(self.refresh_materialized_view_ids)):
+            raise ValueError("each materialized view may be refreshed once per review")
         identifiers = [choice.column_id for choice in self.column_type_conversions]
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("each column may have one conversion choice")
@@ -188,6 +191,19 @@ class MigrationCompatibility(ApiModel):
     blocking_reasons: list[str]
 
 
+class MigrationMaterializedMaintenance(ApiModel):
+    view_id: DesignObjectId
+    name: DesignIdentifier
+    operation: Literal["refresh", "replace"]
+    eligible: bool
+    populated_before: bool
+    populated_after: bool
+    preserved_indexes: list[str]
+    lock: Literal["ACCESS EXCLUSIVE"] = "ACCESS EXCLUSIVE"
+    cached_data_consequence: str
+    blocking_reasons: list[str]
+
+
 class MigrationPlan(ApiModel):
     """Immutable server-derived review of desired, baseline, and live state."""
 
@@ -204,6 +220,9 @@ class MigrationPlan(ApiModel):
     drift_status: MigrationDriftStatus
     complete: bool
     compatibility: MigrationCompatibility | None = None
+    materialized_maintenance: list[MigrationMaterializedMaintenance] = Field(default_factory=list, max_length=100)
+    materialized_refresh_candidates: list[MigrationMaterializedMaintenance] = Field(default_factory=list, max_length=5000)
+    requires_materialized_maintenance_acknowledgement: bool = False
     apply_capable: bool
     destructive: bool
     column_type_conversions: list[ColumnTypeConversion] = Field(default_factory=list, max_length=160000)
@@ -272,6 +291,7 @@ class MigrationExecutionCreate(ApiModel):
     review_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     confirm_destructive: bool = False
     confirm_external_changes: bool = False
+    confirm_materialized_maintenance: bool = False
 
 
 class MigrationExecution(ApiModel):

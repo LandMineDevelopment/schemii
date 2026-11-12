@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from dataclasses import dataclass
 
@@ -601,6 +602,23 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
     }
     if catalog.safety is not None:
         for item in catalog.safety.preservation:
+            try:
+                properties = json.loads(item.properties)
+            except ValueError:
+                properties = None
+            if not isinstance(properties, dict) or properties.get("policies") or properties.get("row_security") or properties.get("force_row_security"):
+                _issue(issues, "row_security", f"{item.identity.namespace}.{item.identity.name}",
+                    "Row-security policies and properties are preserved as protected PostgreSQL metadata, not editable design definitions")
+            if item.partition_parents and item.relation_kind == "r" and not any(table.name == item.identity.name and table.is_partition for table in catalog.tables):
+                _issue(issues, "inheritance", f"{item.identity.namespace}.{item.identity.name}",
+                    "Table inheritance ancestry is preserved as protected PostgreSQL metadata, not an editable design contract")
+            if item.relation_kind == "m" and (item.reloptions or item.tablespace is not None or item.access_method not in {None,"heap"}
+                or item.owner != item.actor or any(grant.grantee != item.owner for grant in item.acl)):
+                _issue(issues, "materialized_view_preservation", f"{item.identity.namespace}.{item.identity.name}",
+                    "Materialized-view storage, ownership, or grants are not editable design definitions; reviewed maintenance must preserve and verify them")
+            if item.relation_kind == "m" and item.indexes:
+                _issue(issues, "materialized_view_indexes", f"{item.identity.namespace}.{item.identity.name}",
+                    "Materialized-view indexes are not editable design definitions; reviewed maintenance must replay and verify them")
             if item.relation_kind in {"f", "S", "c"}:
                 _issue(issues, "opaque_relation", f"{item.identity.namespace}.{item.identity.name}",
                     "Foreign tables, standalone sequence contracts, and composite types are preserved as protected PostgreSQL objects, not editable design definitions")

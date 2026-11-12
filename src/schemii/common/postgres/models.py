@@ -263,6 +263,13 @@ class PostgresSafetyEvidence(_PostgresModel):
     dependency_complete: bool
     unknown_reasons: tuple[CatalogText, ...]
 
+    @field_validator("version", mode="before")
+    @classmethod
+    def strict_evidence_version(cls, value: Any) -> int:
+        if type(value) is not int or value != 1:
+            raise ValueError("unknown catalog evidence version")
+        return value
+
     @model_validator(mode="after")
     def honest_completeness(self) -> "PostgresSafetyEvidence":
         if self.dependency_complete == bool(self.unknown_reasons):
@@ -325,9 +332,9 @@ _V1_PROJECTION = {"database": True, "namespace": True, "server_version": True, "
 def _catalog_digest(catalog: Any) -> str:
     # Version1 is the frozen historical projection. Evidence is an explicit
     # new version; defaulted future fields must never reinterpret old authority.
-    payload = catalog.model_dump(mode="json", include=_V1_PROJECTION)
-    if catalog.fingerprint_version == 2:
-        payload.update(fingerprint_version=2, safety=catalog.safety.model_dump(mode="json"))
+    payload = (catalog.model_dump(mode="json", include=_V1_PROJECTION)
+        if catalog.fingerprint_version == 1 else
+        catalog.model_dump(mode="json", exclude={"captured_at", "fingerprint"}))
     canonical = json.dumps(
         payload,
         ensure_ascii=False,
@@ -341,6 +348,13 @@ def _catalog_digest(catalog: Any) -> str:
 class PostgresCatalog(_PostgresCatalogContent):
     captured_at: datetime
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("fingerprint_version", mode="before")
+    @classmethod
+    def strict_fingerprint_version(cls, value: Any) -> int:
+        if type(value) is not int or value not in {1,2}:
+            raise ValueError("unknown catalog fingerprint version")
+        return value
 
     @field_validator("captured_at")
     @classmethod
@@ -389,7 +403,7 @@ def build_postgres_catalog(
     """Build a validated catalog and derive its content fingerprint."""
 
     selected_version = 2 if safety is not None else 1
-    if fingerprint_version is not None and fingerprint_version != selected_version:
+    if fingerprint_version is not None and (type(fingerprint_version) is not int or fingerprint_version != selected_version):
         raise ValueError("catalog version and evidence must agree")
     content = _PostgresCatalogContent(
         fingerprint_version=selected_version,
