@@ -21,7 +21,8 @@ export async function performDesignHistoryMove({
   let presentation = null;
   try {
     if (delta.length) {
-      const preview = await applyPreview(delta);
+      const preview = await applyPreview(delta, { isCurrent });
+      if (!isCurrent()) return null;
       presentation = preview.presentation;
       previewApplied = true;
     }

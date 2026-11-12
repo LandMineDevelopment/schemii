@@ -86,6 +86,20 @@ test("a nonmatching authoritative confirmation replaces the preview exactly once
   assert.equal(f.state.design.content, authoritative);
 });
 
+test("navigation during asynchronous preview preparation cannot submit a stale history mutation", async () => {
+  const f = fixture(), prepared = deferred();
+  f.args.applyPreview = async (delta, { isCurrent }) => {
+    await prepared.promise;
+    assert.equal(isCurrent(), false);
+    return { presentation: null };
+  };
+  const pending = performDesignHistoryMove(f.args);
+  f.supersede();
+  prepared.resolve();
+  assert.equal(await pending, null);
+  assert.deepEqual(f.calls, []);
+});
+
 test("a history error rolls back once and returns the original error for application reload policy", async () => {
   const f = fixture(), error = Object.assign(new Error("Design changed"), { code: "design_changed" });
   const pending = performDesignHistoryMove(f.args);

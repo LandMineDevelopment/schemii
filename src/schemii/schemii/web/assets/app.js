@@ -3467,11 +3467,15 @@ function applyDesignHistoryMutation(mutation, { cue = true, render = true } = {}
   if (cue) showDesignChanges(beforeContent, mutation.design.content);
 }
 
-async function applyDesignHistoryPreview(delta) {
+async function applyDesignHistoryPreview(delta, { isCurrent = () => true } = {}) {
   const beforeContent = state.design.content;
   const afterContent = applyJsonDelta(state.design.content, delta);
   const targets = designChangeTargets(beforeContent, afterContent);
   const prepared = await prepareDesignChangeTransition(targets, { reveal: true });
+  if (!isCurrent()) {
+    changeTransitions.restore(prepared);
+    return { presentation: null };
+  }
   const design = {
     ...state.design,
     content: afterContent,
@@ -3484,6 +3488,10 @@ async function applyDesignHistoryPreview(delta) {
   const focusedView = revealTarget?.scope === "views"
     ? focusChangedViewState(revealTarget)
     : null;
+  // History can restore a view whose prior analysis has been evicted. Assemble
+  // its detail before replacing the mounted surface, just as a cache hit would.
+  if (focusedView) await syncViewAnalysisSelection();
+  if (!isCurrent()) return { presentation: null };
   cancelColumnAuthoring();
   renderCatalogSurfaces();
   renderCatalogState();
