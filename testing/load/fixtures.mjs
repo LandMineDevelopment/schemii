@@ -597,7 +597,7 @@ export async function prepareOwnedFixtures({ dir, spec, authority, Client = HTTP
 }
 
 export async function cleanupOwnedFixtures({ dir, receipt, origin, Client = HTTPClient, provisionSource = sourceFixture, authority: supplied,
-  witness = sampleSource }) {
+  witness = sampleSource, observeFixture = fixtureExecutions }) {
   const authority = supplied || await heldFixture(receipt.authorityFile);
   if (authority.tag !== receipt.tag || authority.kind !== 'schemii-pressure-load-hold' || authority.status !== 'held' || !same(authority.profile, receipt.profile)) bad('cleanup_fixture_authority_changed');
   const save = () => writeSnapshot(join(dir, 'fixtures-private.json'), receipt);
@@ -656,7 +656,7 @@ export async function cleanupOwnedFixtures({ dir, receipt, origin, Client = HTTP
       if (pending.size > 1000000 || executions.size > 1000000) bad('cleanup_journal_memory_budget');
     }
     if (receipt.fixtureObserver && !receipt.executionCleanupComplete) {
-      const observed = await fixtureExecutions(receipt.fixtureObserver);
+      const observed = await observeFixture(receipt.fixtureObserver);
       // Persist actual late IDs before any cleanup request. This is bounded by
       // the fixture channel, separate from the single-writer journey journal.
       receipt.fixtureExecutionCleanupJournal ||= [];

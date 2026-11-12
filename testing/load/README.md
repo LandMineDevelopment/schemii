@@ -18,7 +18,10 @@ edit source or rebuild while either harness owns a lease.
 
 Disposable report and CSV journeys declare a run-owned operation nonce after
 their private intent is durable, before sending the authenticated request. CSV
-uses a saved dashboard tile. The fixture wrapper correlates the nonce through
+uses a saved dashboard tile, sharing the one-tile dashboard with `report-1`.
+This demand counts against the existing 100-dashboard owner limit before any
+provisioning; retained-mode model export remains a distinct path. The fixture
+wrapper correlates the nonce through
 ASGI tasks and `asyncio.to_thread`, then records the actual base Console reserve
 return synchronously. It returns the identical receipt and preserves application
 errors and cleanup order, including a reserve that finishes after cancellation.
