@@ -107,7 +107,7 @@ def initial_positions(services, owner, catalog):
     return catalog
 
 
-def source_dependencies(catalog, definition, *, previous=None):
+def source_dependencies(catalog, definition, *, previous=None, _lookup_bindings=None):
     """Resolve authored fields and implicit join/grain inputs to physical columns.
 
     Client contract entries are never an input to dependency discovery. Aliases
@@ -215,8 +215,11 @@ def source_dependencies(catalog, definition, *, previous=None):
                 lookup_definition = definition
                 if previous is not None and prior_bindings.get(key) != current_bindings.get(key):
                     lookup_definition = {**definition, "sourceContract": None}
-                lookup = parameter_domain(catalog, lookup_definition, alternative, parameter)
+                lookup = parameter_domain(catalog, lookup_definition, alternative, parameter, scope_id=scope.get("id"))
                 domain(lookup)
+                if lookup and _lookup_bindings is not None:
+                    _lookup_bindings.append({"scopeId": scope["id"], "alternativeId": alternative["id"],
+                                             "inputId": parameter["id"], **lookup})
                 if lookup and lookup.get("relationshipId"):
                     used_relationships.add(lookup["relationshipId"])
     for node in nodes.values():
@@ -247,9 +250,11 @@ def source_dependencies(catalog, definition, *, previous=None):
 
 def catalog_contract(catalog, definition=None, *, previous=None):
     """Schema-only baseline, scoped server-side for new model writes."""
-    selected, relationships = source_dependencies(catalog, definition, previous=previous) if definition is not None else (None, None)
+    bindings = []
+    selected, relationships = source_dependencies(catalog, definition, previous=previous, _lookup_bindings=bindings) if definition is not None else (None, None)
     return {
         "scope": "model" if selected is not None else "catalog",
+        "parameterDomains": bindings,
         "tables": [{"name": table["name"], "primaryKey": list(table.get("primaryKey", [])),
                     **({"uniqueKeys": deepcopy(table.get("uniqueKeys", []))} if selected is not None else {}),
                     "columns": [{"name": column["name"], "dataType": column.get("dataType", ""),

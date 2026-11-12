@@ -44,7 +44,7 @@ def test_explicit_source_and_multiple_models_without_workspace(setup):
     assert api.app.state.services.workspaces.list(model["ownerId"]) == []
     created = api.post("/api/v1/schemoo/models", json={"name": "Second", "connectionId": model["connectionId"], "namespace": "public"})
     assert created.status_code == 201
-    assert created.json()["definition"]["sourceContract"] == {"scope": "model", "tables": [], "relationships": []}
+    assert created.json()["definition"]["sourceContract"] == {"scope": "model", "tables": [], "relationships": [], "parameterDomains": []}
     assert len(api.get("/api/v1/schemoo/models").json()["models"]) == 2
     assert api.get("/api/v1/schemoo/prototype/catalog").status_code == 404
 

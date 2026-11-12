@@ -100,6 +100,35 @@ def test_saved_no_fk_lookup_stays_local_when_the_first_foreign_key_appears():
     assert saved.sourceContract.relationships == []
 
 
+@pytest.mark.parametrize("already_bound", [False, True])
+def test_new_input_on_same_column_cannot_steal_an_unchanged_inputs_domain(already_bound):
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemoo.routes import _scoped_definition
+    from schemii.schemoo.service import document, domain_query
+    source, rules = inferred_lookup_fixture()
+    if not already_bound:
+        source["relationships"] = []
+    saved = _scoped_definition(source, ModelDefinition.model_validate(rules), creating=True)
+    body = SimpleNamespace(scope_id="parent", alternative_id="pick", parameter_id="value", search="")
+    old_sql = domain_query(source, SimpleNamespace(definition=saved), body)["sql"]
+    current = deepcopy(source)
+    other = deepcopy(current["tables"][0]); other["name"] = "other_parent"
+    current["tables"].append(other)
+    current["relationships"].insert(0, {**catalog()["relationships"][0], "id": "new_fk",
+                                         "targetTable": "other_parent"})
+    updated_rules = document(saved)
+    new_scope = deepcopy(updated_rules["scopes"][0]); new_scope["id"] = "new_scope"
+    updated_rules["scopes"].append(new_scope)
+    updated = _scoped_definition(current, ModelDefinition.model_validate(updated_rules), saved)
+    assert domain_query(current, SimpleNamespace(definition=updated), body)["sql"] == old_sql
+    body.scope_id = "new_scope"
+    assert '"other_parent"' in domain_query(current, SimpleNamespace(definition=updated), body)["sql"]
+    bindings = updated.sourceContract.parameterDomains
+    assert len(bindings) == 2
+    assert {item.scopeId for item in bindings} == {"parent", "new_scope"}
+    assert source_issues(current, document(updated)) == []
+
+
 def catalog():
     return {"tables": [
         {"name": "parent", "primaryKey": ["id"], "columns": [{"name": "id", "dataType": "uuid", "nullable": False}]},
