@@ -370,3 +370,40 @@ test('reasoning level persists independently and resets for an unsupported model
   await expect(reasoning).toBeDisabled();
   expect(requests.filter(item => item.path.endsWith('/preferences')).at(-1).body.reasoningEffort).toBe('default');
 });
+
+test("a delayed first conversation cannot send its prompt into a model opened later", async ({ page }) => {
+  const requests = await fixture(page);
+  const otherModel = "model_delayed_creation_fixture";
+  let releaseCreation, creationStarted = false;
+  const creationGate = new Promise(resolve => { releaseCreation = resolve; });
+  await page.route(/\/api\/v1\/schemoo\/ai\/chats(?:\?|$)/, async route => {
+    if (route.request().method() === "POST") {
+      creationStarted = true;
+      const body = route.request().postDataJSON();
+      await creationGate;
+      return route.fulfill({ json: { ...body, id: "delayed-chat", revision: 1, status: "idle", messages: [], activity: [] } });
+    }
+    if (new URL(route.request().url()).searchParams.get("model_id") === otherModel) return route.fulfill({ json: { chats: [] } });
+    return route.fallback();
+  });
+  await page.evaluate(async id => { window.currentModelId = id; await window.assistant.modelChanged(); }, otherModel);
+  const input = page.getByRole("textbox", { name: "Message to model assistant" });
+  await input.fill("Change only the newly opened model");
+  await input.press("Enter");
+  await expect.poll(() => creationStarted).toBe(true);
+  await page.getByRole("button", { name: "Close assistant", exact: true }).click();
+  await page.evaluate(async id => { window.currentModelId = id; await window.assistant.modelChanged(); }, modelId);
+  await page.getByRole("button", { name: "Open model assistant", exact: true }).click();
+  await expect(page.locator(".model-ai-status")).toHaveText("Ready");
+  await input.fill("Draft for the original model");
+  const creationResponse = page.waitForResponse(response => response.url().endsWith("/ai/chats") && response.request().method() === "POST");
+  releaseCreation();
+  const response = await creationResponse;
+  await response.finished();
+  // Flush the browser's rendering turn after the controlled response body is
+  // delivered, so assertions observe the component's asynchronous continuation.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await expect(input).toHaveValue("Draft for the original model");
+  await expect(page.locator(".model-ai-status")).toHaveText("Ready");
+  expect(requests.filter(request => request.path.endsWith("/messages"))).toHaveLength(0);
+});
