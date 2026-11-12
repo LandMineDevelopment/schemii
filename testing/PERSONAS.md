@@ -130,3 +130,21 @@ removes only the selected account's ledgered starter dashboard and then its
 model. It refuses an account reserved by a run and preserves the QA account,
 profile, credentials, source schema, and unledgered objects. Running normal
 `setup` later creates fresh starter fixtures.
+
+### Populated shared viewer fixture
+
+Viewer slots remain Schemer-only. Explicitly pair one with a fully provisioned
+retained author using `./test.sh provision-viewer --account qa_report_viewer_001
+--author qa_report_author_001 --admin-credentials /private/admin.json`.
+This uses supported direct-access grants: the same role contains the source
+connection (`allow_authoring=false`) and exact dashboard with export/drill.
+It grants no Schemoo or author capability. `sharedNamespace` belongs to the paired
+author and is deliberately separate from the viewer's own retained `schema`.
+The Orders starter is populated (source 513 rows, report limit 100); it does not
+establish all-513 paging or UI acceptance. Preflight checks exact ownership/model.
+
+Pairing is idempotent, preserves credentials, refuses unrelated access/collisions,
+and persists its dependency before an uncertain grant update. A registered pairing
+protects its author fixtures from `cleanup-author-fixture`, even after interrupted
+provisioning. Do not remove registry flags to bypass this protection. Explicit
+unsharing/reconciliation and actual live integration remain coordinator-owned.

@@ -18,6 +18,7 @@ const help = `Usage: ./test.sh COMMAND [options]
   cleanup-sweep Delete only exact-prefix objects from a stopped owned sweep
   cleanup-author-fixture Delete selected report-author starter dashboards and models
   provision-chat Grant one retained designer access to the tested shared AI model
+  provision-viewer Pair one retained viewer with an explicit retained author report
   provision-writer Prepare and attach one isolated writable Schemii QA target
   reset-writer Reset one marked writable QA target after a run
   verify-writer Verify one marked writable QA target is empty
@@ -95,7 +96,7 @@ const commandOptions = {
   setup: ['copies-per-persona','admin-credentials'], 'provision-chat': ['account','admin-credentials','model','reasoning'],
   'cleanup-author-fixture': ['accounts'],
   'cleanup-sweep': ['run','workspace-fixtures'],
-  'provision-writer': ['account','admin-credentials'], 'reset-writer': ['account'], 'verify-writer': ['account'],
+  'provision-writer': ['account','admin-credentials'], 'provision-viewer': ['account','author','admin-credentials'], 'reset-writer': ['account'], 'verify-writer': ['account'],
   reset: ['space'], 'verify-data': ['space'], 'check-reset': ['space'],
   'export-credentials': ['output'], 'import-credentials': ['input'],
   plan: [...selectionOptions,'headless'],
@@ -342,6 +343,12 @@ async function execute(command,o) {
     await runCommand('python',['testing/provision.py','chat','--admin-credentials',resolve(o['admin-credentials']),
       '--account',o.account,'--model',o.model||'gpt-6-luna','--reasoning',o.reasoning||'default','--state-dir',stateDir]);
     return;
+  }
+  if(command==='provision-viewer') {
+    if(!/^qa_report_viewer_[0-9]{3}$/.test(o.account||'')||!/^qa_report_author_[0-9]{3}$/.test(o.author||'')||!o['admin-credentials'])throw invalid('provision-viewer needs --account VIEWER --author AUTHOR --admin-credentials FILE.');
+    await privateJSON(resolve(o['admin-credentials']));
+    return withFileLock(deploymentLockPath(root),()=>withAvailableAccounts([o.account,o.author],()=>
+      runCommand('python',['testing/provision.py','viewer','--account',o.account,'--author',o.author,'--admin-credentials',resolve(o['admin-credentials']),'--state-dir',stateDir]),{root}));
   }
   if(command==='provision-writer') {
     if(!o['admin-credentials']||!o.account)throw invalid('--admin-credentials and --account are required.');
