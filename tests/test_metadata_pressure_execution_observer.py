@@ -19,6 +19,7 @@ from schemii.schemii.console.repository import InMemoryConsoleRepository
 from schemii.schemii.console.service import ConsoleService
 from schemii.schemer.access import ReportConsole
 from schemii.schemer import streaming
+from schemii.common.postgres.console.models import ConsoleResultColumn
 
 ACTOR = "user_owned"
 RESOURCE = "dashboard_owned"
@@ -364,3 +365,59 @@ def test_cleanup_worker_order_is_unchanged_by_observer(tmp_path):
 
     asyncio.run(run())
     assert order == ["cancel", "joined", "close"]
+
+
+def test_actual_csv_asgi_send_failure_retains_capture_and_closes_native_iterator(
+    tmp_path,
+):
+    async def request(services, scope, send):
+        response = streaming.response(services, ACTOR, MODEL, TILES, export=True)
+        await response(scope, lambda: None, send)
+
+    wrapper, observer, base, _ = fixture(tmp_path, request=request)
+    declare(observer)
+    commands = json.loads(observer.commands.read_text())
+    csv_path = f"/api/v1/schemer/dashboards/{RESOURCE}/tiles/tile/export"
+    commands["operations"][0].update(path=csv_path, kind="tile-csv")
+    observer.commands.write_text(json.dumps(commands))
+    order = []
+    base.run = lambda *args, **kwargs: order.append("run")
+
+    def get_owned(owner, identifier):
+        actual = base._repository.get(owner, identifier).execution
+        return NS(
+            id=actual.id,
+            revision=actual.revision,
+            status="succeeded",
+            results=[NS(id="res_" + "f" * 32)],
+        )
+
+    base.get_owned = get_owned
+
+    def page(*args):
+        order.extend(["fetch", "worker-exited"])
+        return NS(
+            columns=[ConsoleResultColumn(name="value", data_type="text")],
+            rows=[["PRIVATE_CSV_ROW"]],
+            next_cursor="next",
+            truncated=False,
+        )
+
+    base.page = page
+    base.cancel = lambda *args: order.append("cancel")
+    base.close_result = lambda *args: order.append("close")
+    error = RuntimeError("PRIVATE_SEND_FAILURE")
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            raise error
+
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(
+            invoke(wrapper, send=send, path=csv_path, asgi={"spec_version": "2.4"})
+        )
+    assert caught.value is error
+    assert order == ["run", "fetch", "worker-exited", "cancel", "close"]
+    entry = observer.operations["1" * 32]
+    assert len(entry["receipts"]) == 1 and entry["request"] == "failed"
+    assert "PRIVATE_" not in (tmp_path / "execution-observation.json").read_text()
