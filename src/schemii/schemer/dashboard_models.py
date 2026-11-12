@@ -99,6 +99,8 @@ class DashboardTile(Contract):
             if len({(f.table, f.column, f.aggregate) for f in fields}) != len(fields):
                 raise ValueError("Duplicate tile fields are not allowed")
         if self.kind == "pivot":
+            if len({(f.table, f.column) for f in [*axes, *self.measures, *self.detail_fields]}) > 64:
+                raise ValueError("Pivot and detail columns together support at most 64 semantic inputs")
             if self.dimensions or not self.row_dimensions or not self.column_dimensions:
                 raise ValueError("Pivot reports require separate row and column dimensions, with no legacy dimensions")
             if len(self.measures) > 8 or any(field.aggregate == "none" for field in self.measures):

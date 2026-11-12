@@ -434,3 +434,20 @@ def test_backend_numeric_predicate_json_types_are_not_restricted_by_editor_preci
     parsed = AggregateFilter.model_validate_json(json.dumps(payload))
     assert parsed.value == value and type(parsed.value) is type(value)
     assert json.loads(parsed.model_dump_json(by_alias=True))["value"] == value
+
+
+def test_persisted_pivot_round_trip_keeps_ordered_axes_and_all_total_options():
+    tile = {'id': 'pivot', 'title': 'People pivot', 'kind': 'pivot',
+        'rowDimensions': [{**FIELD, 'column': 'region'}, {**FIELD, 'column': 'team'}],
+        'columnDimensions': [{**FIELD, 'column': 'type'}],
+        'measures': [{**FIELD, 'aggregate': 'count_distinct'}], 'detailFields': [FIELD],
+        'pivotTotals': {'rowSubtotals': False, 'columnSubtotals': True, 'rowTotals': True,
+            'columnTotals': False, 'grandTotal': True, 'maximumColumns': 4, 'maximumRows': 8}}
+    repo = InMemoryDashboardRepository()
+    saved = repo.create('alice', create(tiles=[tile]))
+    wire = saved.model_dump(mode='json', by_alias=True)['tiles'][0]
+    assert [field['column'] for field in wire['rowDimensions']] == ['region', 'team']
+    assert wire['pivotTotals'] == tile['pivotTotals']
+    assert wire['dimensions'] == []
+    wire['rowDimensions'].reverse()
+    assert repo.get('alice', saved.id).tiles[0].row_dimensions[0].column == 'region'

@@ -309,6 +309,8 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     for item in values:
         if not isinstance(item, dict) or set(item) != {"table", "column", "value"}:
             _problem("A dimension selection needs its table, column and value.")
+        if not isinstance(item["table"], str) or not isinstance(item["column"], str):
+            _problem("A selected dimension must name a saved table and column.")
         key = item["table"], item["column"]
         if key in selected or key not in {_key(field) for field in expected_dimensions}:
             _problem("The selected dimensions do not match this tile.")
@@ -394,5 +396,15 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
         plan["pivotScope"] = {"kind": scope, **pivot_depths, "dimensions": values,
                               "measureIndex": measure_index, "population": "qualifying groups before Top N" if scope != "cell" else "selected qualifying cell"}
         warnings.append("Pivot totals drill into the complete qualifying population before Top N; contributors are never top-N limited.")
+    if tile.kind == "pivot" and exporting:
+        import json
+        # A raw CSV is independently interpretable after it leaves the report.
+        # Fixed scope columns retain the exact typed selection without changing
+        # contributor membership, grouping or row limits.
+        scope_columns = [exp.Literal.string(scope).as_("Pivot scope", quoted=True),
+            exp.Literal.number(pivot_depths["rowDepth"]).as_("Row grouping depth", quoted=True),
+            exp.Literal.number(pivot_depths["columnDepth"]).as_("Column grouping depth", quoted=True),
+            exp.Literal.string(json.dumps(plan["pivotScope"], ensure_ascii=False, allow_nan=False)).as_("Pivot selection", quoted=True)]
+        statement = statement.select(*scope_columns)
     return model, _ordered(plan, statement, tile.limit,
                         _text_order_fields(catalog, model.definition, tile.detail_fields))

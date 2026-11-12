@@ -38,7 +38,7 @@ test('Schemer controls use registered shared icons', () => {
 });
 
 
-import { dashboardUpdate, reportOutputs, reportOutputKey, reportControlErrors, numericFilterValue, validTimeFilterValue } from '../../src/schemii/schemer/web/dashboard-state.js';
+import { dashboardUpdate, reportOutputs, reportOutputKey, reportControlErrors, numericFilterValue, validTimeFilterValue, tileDimensions, pivotDefaults, tileErrors, TILE_TYPES, fieldChoices } from '../../src/schemii/schemer/web/dashboard-state.js';
 import vm from 'node:vm';
 const reportTile = () => ({ id: 'report', title: 'Revenue', kind: 'bar', dimensions: [{ table: 'person', column: 'name', aggregate: 'none' }],
   measures: [{ table: 'person', column: 'salary', aggregate: 'sum' }], detailFields: [{ table: 'person', column: 'name', aggregate: 'none' }], reportFilters: [], selections: {}, limit: 2 });
@@ -93,7 +93,7 @@ test('only enabled time outputs can be used and their order matches complete win
 });
 
 const tileEditorSource = readFileSync(new URL('../../src/schemii/schemer/web/tile-editor.js', import.meta.url), 'utf8');
-function editorFixture({ tile = reportTile(), sourceModel = model, schema = catalog } = {}) {
+function editorFixture({ tile = reportTile(), sourceModel = model, schema = catalog, pivot = false } = {}) {
   const nodes = [], saves = [];
   const element = (tag, options = {}, children = []) => {
     const node = { tag, ...options, textContent: options.text || '', children: [...children], open: false,
@@ -106,8 +106,8 @@ function editorFixture({ tile = reportTile(), sourceModel = model, schema = cata
     createIconButton: ({ label }) => element('button', { text: label }),
     modelSelect: (label, choices, selected, change) => element('select', { text: label, choices, selected, change }),
     disposeSelects() {}, timeDimensions: () => [], fieldLabel: (_draft, _catalog, field) => field.column,
-    aggregateChoices, fieldChoices: () => [], fieldKey: field => JSON.stringify([field.table, field.column]),
-    TILE_TYPES: [['bar', 'Bar']], tileErrors: (tile, source, schema) => reportControlErrors(tile, source, schema), reportOutputs, reportOutputKey, numericFilterValue,
+    aggregateChoices, fieldChoices: (...args) => pivot ? fieldChoices(...args) : [], fieldKey: field => JSON.stringify([field.table, field.column]),
+    TILE_TYPES, tileErrors: (tile, source, schema) => pivot ? tileErrors(tile, source, schema) : reportControlErrors(tile, source, schema), reportOutputs, reportOutputKey, numericFilterValue, tileDimensions, pivotDefaults,
     tile, model: sourceModel, catalog: schema, onSave: async tile => saves.push(structuredClone(tile)),
   });
   vm.runInContext(tileEditorSource.replace(/^import .*;\n/gm, '').replace('export function openTileEditor', 'function openTileEditor'), context);
@@ -197,3 +197,14 @@ for (const [type, value, valid] of [
     assert(aggregateChoices(model.definition, schema, tile.measures[0]).some(([aggregate]) => aggregate === 'min'));
   });
 }
+
+test('actual editor persists independent pivot axes, explicit measures and bounded total options', async () => {
+  const f = editorFixture({ tile: { ...reportTile(), kind: 'pivot', dimensions: [], rowDimensions: [{ table: 'person', column: 'name', aggregate: 'none' }], columnDimensions: [{ table: 'person', column: 'salary', aggregate: 'none' }] }, pivot: true });
+  const cap = f.node('Maximum pivot column groups'); cap.value = '4'; cap.oninput();
+  const subtotal = f.node('Row subtotals'); subtotal.checked = false; subtotal.onchange();
+  const aggregation = f.node('Measure 1 aggregation'); assert.ok(aggregation.choices.every(([value]) => value !== 'none'));
+  aggregation.change('avg'); await f.node('Apply & run').onclick();
+  assert.equal(f.saves[0].kind, 'pivot'); assert.equal(f.saves[0].rowDimensions[0].column, 'name');
+  assert.equal(f.saves[0].columnDimensions[0].column, 'salary'); assert.equal(f.saves[0].measures[0].aggregate, 'avg');
+  assert.equal(f.saves[0].pivotTotals.maximumColumns, 4); assert.equal(f.saves[0].pivotTotals.rowSubtotals, false);
+});

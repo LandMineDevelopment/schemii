@@ -46,8 +46,8 @@ export function modelUpgradeIssues(draft, model, catalog) {
   for (const tile of draft.tiles) {
     const add = (message, extra = {}) => issues.push({ tileId: tile.id, message, ...extra });
     for (const message of tileErrors(tile, model, catalog)) add(message);
-    for (const [key, label] of [['dimensions', 'Dimension'], ['measures', 'Measure'], ['detailFields', 'Detail column']]) {
-      for (const field of tile[key]) {
+    for (const [key, label] of [['dimensions', 'Dimension'], ['rowDimensions', 'Pivot row dimension'], ['columnDimensions', 'Pivot column dimension'], ['measures', 'Measure'], ['detailFields', 'Detail column']]) {
+      for (const field of tile[key] || []) {
         const problem = fieldProblem(field);
         if (problem) add(`${label}: ${problem}`);
         else if (key === 'measures') {

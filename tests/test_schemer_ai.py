@@ -253,3 +253,31 @@ def test_revocation_before_background_turn_starts_releases_capacity(report):
     service.run("viewer", chat["id"], turn["turnId"])
     assert service.store.get("viewer",chat["id"])["status"] == "failed"
     assert service.active == {}
+
+
+@pytest.mark.parametrize('kind,rd,cd', [('cell', 1, 1), ('row', 1, 0), ('column', 0, 1), ('subtotal', 1, 1), ('grand_total', 0, 0)])
+def test_assistant_typed_pivot_scope_is_forwarded_without_sql_or_membership_overrides(report, monkeypatch, kind, rd, cd):
+    captured = []
+    selected = {'dimensions': [], 'measureIndex': 0, 'pivot': {'kind': kind, 'rowDepth': rd, 'columnDepth': cd}}
+    action = ai_tools.validate_action({'operation': 'drill_tile', 'args': {'tileId': 'pivot', 'selection': selected}})
+    bundle = ai_tools.authorize(report.services, 'author', report.dashboard.id, report.request)
+    monkeypatch.setattr(ai_tools, '_run_tile', lambda bundle, tile, selections, selection: captured.append(selection) or {'status': 'bounded'})
+    assert ai_tools.execute_action(bundle, 'author', report.dashboard.id, action) == {'status': 'bounded'}
+    assert captured == [selected]
+    from pydantic import ValidationError
+    for extra in [{'sql': 'SELECT 1'}, {'pivot': {**selected['pivot'], 'predicate': 'TRUE'}},
+                  {'pivot': {**selected['pivot'], 'rowDepth': True}}]:
+        with pytest.raises(ValidationError):
+            ai_tools.validate_action({'operation': 'drill_tile', 'args': {'tileId': 'pivot', 'selection': {**selected, **extra}}})
+
+
+def test_assistant_pivot_result_keeps_bounded_scope_metadata_and_semantic_warning(report, monkeypatch):
+    bundle = ai_tools.authorize(report.services, 'author', report.dashboard.id, report.request)
+    metadata = {'metadataOffset': 3, 'totalsPopulation': 'complete qualifying groups before Top N'}
+    warning = 'This is an average of per-owner semantic values, not raw-child rows.'
+    monkeypatch.setattr(ai_tools, 'tile_plan', lambda *args, **kwargs: (NS(), {'pivot': metadata, 'warnings': [warning]}))
+    monkeypatch.setattr(ai_tools, '_sample_plan', lambda *args: {'sample': {'rows': [[None, None, 20, 0, 0, 'data']]}})
+    result = ai_tools._run_tile(bundle, 'pivot')
+    assert result['pivot'] == metadata and result['warnings'] == [warning]
+    assert result['sample']['rows'][0][3:5] == [0, 0]
+    assert 'SQL' not in result

@@ -268,3 +268,14 @@ test('upgrade preserves stale report sort and aggregate-filter references for ex
   assert(issues.some(issue => /Result filter 1/.test(issue.message)));
   assert.deepEqual(draft.tiles[0].sort, before.sort); assert.deepEqual(draft.tiles[0].aggregateFilters, before.aggregateFilters);
 });
+
+test('stale pivot upgrade reviews both axes and preserves every grouping and total until explicit repair', () => {
+  const { dashboard, model, catalog, tile } = data();
+  Object.assign(tile, { kind: 'pivot', dimensions: [], rowDimensions: [field('name')], columnDimensions: [field('gone')], pivotTotals: { maximumColumns: 5, grandTotal: false } });
+  const draft = modelUpgradeDraft(dashboard, model), before = structuredClone(tile);
+  assert.ok(modelUpgradeIssues(draft, model, catalog).some(issue => /Pivot column dimension:.*unavailable/.test(issue.message)));
+  assert.deepEqual(tile, before); assert.equal(draft.tiles[0].pivotTotals.maximumColumns, 5);
+  draft.tiles[0].columnDimensions = [field('id')];
+  assert.deepEqual(modelUpgradeIssues(draft, model, catalog), []);
+  assert.equal(tile.columnDimensions[0].column, 'gone');
+});

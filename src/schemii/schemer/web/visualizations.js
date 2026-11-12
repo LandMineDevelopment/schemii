@@ -1,3 +1,4 @@
+import { renderPivot } from './pivot.js';
 import { element } from '#common/dom.js';
 import { createResultGrid } from './scroll-results.js';
 import { dimensionLabel, lineSeries, linePath } from './chart-dimensions.js';
@@ -23,6 +24,7 @@ function actionable(node, text, callback) {
   node.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); callback(); } };
 }
 export function renderVisualization(host, tile, result, { onDrill, compact = false, modelId } = {}) {
+  if (tile.kind === 'pivot') { renderPivot(host, tile, result, { onDrill, compact }); return; }
   const fullResult = result;
   const options = [['values', 'Period values'], ...(tile.timeAnalysis && tile.timeAnalysis.comparison !== 'none' ? [['change', 'Absolute change'], ['percent', 'Percentage change']] : []), ...(tile.timeAnalysis?.runningTotal ? [['running', 'Running totals']] : [])];
   const metric = options.some(([value]) => value === host.dataset.timeMetric) ? host.dataset.timeMetric : 'values';

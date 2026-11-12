@@ -1,6 +1,5 @@
 """Save private dashboard definitions independently of current slicer values."""
 
-from .dashboard_models import tile_dimensions
 from contextlib import contextmanager
 from fastapi import APIRouter, Depends, Query, Request, Response
 from schemii.common.api.errors import ApiProblem
@@ -13,7 +12,7 @@ from schemii.schemoo.service import load_model, model_catalog, plan_query
 from .time_analysis import validate_time_analysis
 from .tile_queries import validate_report_controls
 from .access import available_dashboards, owned_report_services, prepare_dashboard
-from .dashboard_models import Dashboard, DashboardCreate, DashboardUpdate
+from .dashboard_models import Dashboard, DashboardCreate, DashboardUpdate, tile_dimensions
 from .dashboard_store import (DashboardNotFoundError, DashboardConflictError,
                               DashboardLimitError, DashboardStorageUnavailableError)
 
