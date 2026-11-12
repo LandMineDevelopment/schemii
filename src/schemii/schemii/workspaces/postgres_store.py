@@ -374,9 +374,10 @@ class PostgresWorkspaceRepository:
                 """
                 INSERT INTO schemii.workspace_design_imports (
                     workspace_id, owner_id, catalog_fingerprint,
-                    catalog_captured_at, complete, imported_objects, issues
+                    catalog_captured_at, complete, imported_objects, issues,
+                    safety_evidence_version, migration_guidance
                 )
-                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
                 """,
                 (
                     workspace_id,
@@ -395,6 +396,8 @@ class PostgresWorkspaceRepository:
                         separators=(",", ":"),
                         sort_keys=True,
                     ),
+                    summary.safety_evidence_version,
+                    summary.migration_guidance,
                 ),
             )
         row.update(
@@ -965,7 +968,8 @@ class PostgresWorkspaceRepository:
         cursor.execute(
             """
             SELECT workspace_id, catalog_fingerprint, catalog_captured_at,
-                   complete, imported_objects, issues
+                   complete, imported_objects, issues,
+                   safety_evidence_version, migration_guidance
             FROM schemii.workspace_design_imports
             WHERE owner_id = %s
             ORDER BY workspace_id
@@ -986,7 +990,8 @@ class PostgresWorkspaceRepository:
         cursor.execute(
             """
             SELECT catalog_fingerprint, catalog_captured_at,
-                   complete, imported_objects, issues
+                   complete, imported_objects, issues,
+                   safety_evidence_version, migration_guidance
             FROM schemii.workspace_design_imports
             WHERE owner_id = %s AND workspace_id = %s
             """,
@@ -1061,4 +1066,6 @@ class PostgresWorkspaceRepository:
             complete=row["complete"],
             imported_objects=imported_objects,
             issues=[WorkspaceImportIssue.model_validate(issue) for issue in issues],
+            safety_evidence_version=row["safety_evidence_version"],
+            migration_guidance=row["migration_guidance"],
         )

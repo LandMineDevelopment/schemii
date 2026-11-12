@@ -21,6 +21,7 @@ from schemii.schemer.metadata.migrations import MIGRATION_PACKAGE as SCHEMER_MIG
 from schemii.schemoo.metadata.migrations import MIGRATION_PACKAGE as SCHEMOO_MIGRATION_PACKAGE
 from schemii.common.postgres.models import (
     PostgresColumn,
+    PostgresSafetyEvidence,
     PostgresTable,
     build_postgres_catalog,
 )
@@ -181,6 +182,12 @@ def test_workspace_import_commits_every_record_in_one_postgres_transaction(
     )
 
     assert workspace.import_summary == imported.summary
+    assert PostgresWorkspaceRepository(factory).get(
+        postgres_metadata.owner_id, workspace.id
+    ) == workspace
+    assert PostgresWorkspaceRepository(factory).list(
+        postgres_metadata.owner_id
+    ) == [workspace]
     assert PostgresDesignRepository(factory).get(
         postgres_metadata.owner_id, workspace.id
     ).content == imported.content
@@ -224,6 +231,76 @@ def test_workspace_import_commits_every_record_in_one_postgres_transaction(
         "baselines": 1,
         "baseline_heads": 1,
     }
+
+
+@pytest.mark.parametrize("dependency_complete", [True, False])
+def test_workspace_import_retains_current_safety_metadata_after_reopen(
+    postgres_metadata: PostgresMetadataHarness, dependency_complete: bool
+) -> None:
+    target = _target(postgres_metadata)
+    catalog = build_postgres_catalog(
+        database=target.database,
+        namespace="public",
+        server_version="18.6",
+        server_version_num=180006,
+        server_timezone="UTC",
+        tables=(), relationships=(), functions=(), views=(), materialized_views=(),
+        captured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        safety=PostgresSafetyEvidence(
+            version=2, dependencies=(), preservation=(),
+            dependency_complete=dependency_complete,
+            unknown_reasons=() if dependency_complete else ("untracked dependencies",),
+        ),
+    )
+    imported = import_postgres_catalog(catalog)
+    workspace = PostgresWorkspaceRepository(postgres_metadata.connection_factory).create(
+        postgres_metadata.owner_id,
+        WorkspaceCreateRecord(
+            connection_id=target.id, database=target.database, namespace="public"
+        ),
+        bootstrap=WorkspaceDesignBootstrap(
+            content=imported.content, layout=imported.layout,
+            import_summary=imported.summary,
+        ),
+        expected_connection_revision=target.revision,
+    )
+    reopened = PostgresWorkspaceRepository(postgres_metadata.connection_factory)
+    assert reopened.get(postgres_metadata.owner_id, workspace.id) == workspace
+    assert reopened.list(postgres_metadata.owner_id) == [workspace]
+    assert workspace.import_summary is not None
+    assert workspace.import_summary.safety_evidence_version == 2
+    assert ("Only changes outside" in workspace.import_summary.migration_guidance) is dependency_complete
+
+
+def test_legacy_import_columns_keep_unproven_safety_defaults(
+    postgres_metadata: PostgresMetadataHarness,
+) -> None:
+    target = _target(postgres_metadata)
+    repository = PostgresWorkspaceRepository(postgres_metadata.connection_factory)
+    workspace = repository.create(
+        postgres_metadata.owner_id,
+        WorkspaceCreateRecord(
+            name="Historical import", connection_id=target.id,
+            database=target.database, namespace="public",
+        ),
+        expected_connection_revision=target.revision,
+    )
+    with postgres_metadata.connection_factory() as connection:
+        connection.execute(
+            """INSERT INTO schemii.workspace_design_imports (
+                workspace_id, owner_id, catalog_fingerprint, catalog_captured_at,
+                complete, imported_objects, issues
+            ) VALUES (%s, %s, %s, %s, true, '{}'::jsonb, '[]'::jsonb)""",
+            (workspace.id, postgres_metadata.owner_id, "a" * 64,
+             datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        )
+        connection.commit()
+    summary = repository.get(postgres_metadata.owner_id, workspace.id).import_summary
+    assert summary is not None
+    assert summary.catalog_fingerprint == "a" * 64
+    assert summary.complete is True
+    assert summary.safety_evidence_version is None
+    assert summary.migration_guidance == "Historical import coverage does not establish operation-specific preservation safety."
 
 
 def test_workspace_import_rolls_back_all_postgres_records_when_baseline_fails(
