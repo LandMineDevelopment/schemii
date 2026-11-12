@@ -8,6 +8,7 @@ import { HTTPClient } from './http.mjs';
 import { readPrivateJSON, writePrivateJSON } from './runtime.mjs';
 import { readSnapshot, writeSnapshot, journalRecords } from './journal.mjs';
 import { Accounting } from './accounting.mjs';
+import { fixtureExecutions } from './fixtures.mjs';
 
 const noJobLanes = new Set(['cheap-read', 'catalog', 'compile', 'report-1', 'report-5', 'report-20', 'csv', 'slow-reader', 'disconnect', 'cancel',
   'sql-page', 'wide-rows', 'idle-expiry', 'shared-report', 'login-churn', 'metadata-write', 'mix']);
@@ -18,12 +19,13 @@ export function fresh(value, now = Date.now()) {
   return Number.isFinite(Date.parse(value?.at)) && now - Date.parse(value.at) <= 15000 && Date.parse(value.at) <= now + 5000;
 }
 
-export async function observeCohortWork(receipt, workload, { source, state = null, origin, now = Date.now(), clientFactory = options => new HTTPClient(options) } = {}) {
+export async function observeCohortWork(receipt, workload, { source, state = null, origin, now = Date.now(), clientFactory = options => new HTTPClient(options), fixtureObservation = null } = {}) {
   sourceEvidence(source, receipt.tag, now);
   if (!noJobLanes.has(workload) || !Array.isArray(receipt.accounts) || !receipt.accounts.length || receipt.accounts.length > 1000 || (receipt.jobs || []).length) throw new Error('cohort_job_policy_unknown');
   if (state && (state.runId !== receipt.tag || !same(state.authority, source.authority))) throw new Error('cohort_observation_authority_changed');
   state ||= { version: 1, runId: receipt.tag, authority: source.authority, recordCursor: 0, ownerCursor: 0, workCursor: 0, owners: {}, pending: {}, pendingIntents: {}, retired: 0, retiredLegacy: {}, serverManagedStreamsRetired: 0 };
   state.pendingIntents ||= {};
+  state.fixtureOperations ||= {};
   state.serverManagedStreamsRetired ||= 0;
   const observedAccounts = [...receipt.accounts, ...(receipt.recoveryAccount ? [receipt.recoveryAccount] : [])];
   const accounts = new Map(observedAccounts.map(account => [account.username, account]));
@@ -38,7 +40,12 @@ export async function observeCohortWork(receipt, workload, { source, state = nul
     const event = record.value;
     if (event.type === 'intent' && ['execution', 'stream'].includes(event.kind)) {
       if (!accounts.has(event.username)) throw new Error('cohort_intent_owner_invalid');
-      state.pendingIntents[record.sequence] = { kind: event.kind, username: event.username, status: 'pending' };
+      state.pendingIntents[record.sequence] = { ...event, status: 'pending' };
+      if (event.fixtureObserved) {
+        if (!/^[a-f0-9]{32}$/.test(event.operationNonce || '') || state.fixtureOperations[event.operationNonce]) throw new Error('cohort_fixture_intent_reused');
+        state.fixtureOperations[event.operationNonce] = { username: event.username, resource: event.dashboardId || event.modelId };
+        if (Object.keys(state.fixtureOperations).length > 4096) throw new Error('cohort_fixture_intent_budget');
+      }
     } else if (event.type === 'intent-update' && state.pendingIntents[event.intentSequence]) {
       const intent = state.pendingIntents[event.intentSequence];
       Object.assign(intent, event, { observedAt: new Date(now).toISOString() });
@@ -51,17 +58,42 @@ export async function observeCohortWork(receipt, workload, { source, state = nul
       if (!id(event.id, 'cex') || !accounts.has(event.username)) throw new Error('cohort_execution_owner_invalid');
       const current = state.pending[event.id];
       if (!current && event.action === 'created') state.pending[event.id] = { id: event.id, username: event.username, kind: event.kind || 'query',
-        dashboardId: event.dashboardId, dashboardRevision: event.dashboardRevision, modelId: event.modelId, modelRevision: event.modelRevision, status: 'unknown' };
+        dashboardId: event.dashboardId, dashboardRevision: event.dashboardRevision, modelId: event.modelId, modelRevision: event.modelRevision, operationNonce: event.operationNonce, status: 'unknown' };
       else if (current && current.username !== event.username) throw new Error('cohort_execution_owner_changed');
       if (current && event.action === 'terminal') {
         if (!Number.isFinite(Date.parse(event.terminalAt)) || event.terminalAt > new Date(now + 5000).toISOString()) throw new Error('cohort_terminal_invalid');
         current.streamTerminalAt = event.terminalAt; current.streamTerminal = event.terminal;
+        if (event.operationNonce) Object.assign(current, { fixtureStatus: event.fixtureStatus, fixtureObservedAt: event.fixtureObservedAt,
+          fixtureRequest: event.fixtureRequest, observerProcess: event.observerProcess });
       }
     }
     state.recordCursor = record.sequence;
   }
+  // A reservation may finish after its HTTP adapter aborts. Keep that exact ID
+  // attributable via the still-unacknowledged private operation; cleanup also
+  // consumes this fixed artifact. Never infer an empty execution from a miss.
+  if (fixtureObservation && receipt.fixtureObserver) for (const [key, intent] of Object.entries(state.pendingIntents)) {
+    if (!intent.fixtureObserved || !intent.operationNonce) continue;
+    const entry = fixtureObservation.operations.find(value => value.operation === intent.operationNonce), captured = entry?.receipts?.[0];
+    if (!captured) continue;
+    const account = accounts.get(intent.username);
+    if (entry.actor !== account.userId || captured.owner !== account.userId || entry.resource !== (intent.dashboardId || intent.modelId) || !id(captured.id, 'cex')) throw new Error('cohort_fixture_capture_changed');
+    state.pending[captured.id] ||= { id: captured.id, username: intent.username, kind: 'report-stream', operationNonce: intent.operationNonce,
+      dashboardId: intent.dashboardId, dashboardRevision: intent.dashboardRevision, modelId: intent.modelId, modelRevision: intent.modelRevision, status: 'unknown' };
+    Object.assign(state.pending[captured.id], { observerProcess: fixtureObservation.process, fixtureStatus: entry.unknown ? 'unknown' : captured.status,
+      fixtureObservedAt: captured.observedAt, fixtureRequest: entry.request, streamTerminalAt: fixtureObservation.at });
+    delete state.pendingIntents[key];
+  }
+  if (fixtureObservation && receipt.fixtureObserver) for (const pending of Object.values(state.pending)) {
+    if (!pending.operationNonce) continue;
+    const entry = fixtureObservation.operations.find(value => value.operation === pending.operationNonce), captured = entry?.receipts?.[0];
+    if (!entry || !captured) continue; // An acknowledged ID keeps its durable exact status.
+    if (entry.actor !== accounts.get(pending.username).userId || captured.owner !== entry.actor || captured.id !== pending.id || entry.resource !== (pending.dashboardId || pending.modelId)) throw new Error('cohort_fixture_capture_changed');
+    Object.assign(pending, { observerProcess: fixtureObservation.process, fixtureStatus: entry.unknown ? 'unknown' : captured.status,
+      fixtureObservedAt: captured.observedAt, fixtureRequest: entry.request, streamTerminalAt: fixtureObservation.at });
+  }
   for (const [key, intent] of Object.entries(state.pendingIntents)) {
-    if (intent.kind === 'stream' && intent.status === 'closed' && intent.idExposure === 'server_managed_not_exposed' && source.releaseVerified && Date.parse(source.at) >= Date.parse(intent.observedAt)) {
+    if (!receipt.fixtureObserver && intent.kind === 'stream' && intent.status === 'closed' && intent.idExposure === 'server_managed_not_exposed' && source.releaseVerified && Date.parse(source.at) >= Date.parse(intent.observedAt)) {
       delete state.pendingIntents[key]; state.serverManagedStreamsRetired++;
     }
   }
@@ -71,12 +103,22 @@ export async function observeCohortWork(receipt, workload, { source, state = nul
     if (!state.retiredLegacy[entry.id]) state.pending[entry.id] ||= { ...entry, terminalAt: undefined, observedAt: undefined, legacy: true, status: 'unknown' };
   }
   if (Object.keys(state.pending).length + Object.keys(state.pendingIntents).length > 100000) throw new Error('cohort_pending_observation_budget');
+  const fixtureGap = !!receipt.fixtureObserver && (!fixtureObservation || fixtureObservation.losses > 0 ||
+    !/^[a-f0-9]{32}$/.test(fixtureObservation.process?.incarnation || '') ||
+    fixtureObservation.operations.some(entry => {
+      const known = state.fixtureOperations[entry.operation];
+      return !known || accounts.get(known.username)?.userId !== entry.actor || known.resource !== entry.resource || entry.unknown || !entry.receipts.length;
+    }));
+  if (receipt.fixtureObserver && fixtureObservation) {
+    if (state.fixtureProcess && !same(state.fixtureProcess, fixtureObservation.process)) throw new Error('cohort_fixture_process_changed');
+    state.fixtureProcess ||= fixtureObservation.process;
+  }
   const freshnessMs = Math.max(120000, Math.ceil(accounts.size / 16) * 5000 + 15000), cutoff = now - freshnessMs;
   const retiredProofs = [];
   const retire = () => {
     for (const entry of Object.values(state.pending)) {
-      if (['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(entry.status) && entry.terminalAt && Date.parse(entry.observedAt) >= cutoff && source.releaseVerified && Date.parse(source.at) >= Date.parse(entry.terminalAt)) {
-        if (entry.observedAt === new Date(now).toISOString()) retiredProofs.push({ id: entry.id, status: entry.status, terminalAt: entry.terminalAt, observedAt: entry.observedAt });
+      if (!fixtureGap && ['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(entry.status) && entry.terminalAt && Date.parse(entry.observedAt) >= cutoff && source.releaseVerified && Date.parse(source.at) >= Date.parse(entry.terminalAt)) {
+        retiredProofs.push({ id: entry.id, status: entry.status, terminalAt: entry.terminalAt, observedAt: entry.observedAt });
         delete state.pending[entry.id]; if (entry.legacy) state.retiredLegacy[entry.id] = true; state.retired++;
       }
     }
@@ -120,7 +162,11 @@ export async function observeCohortWork(receipt, workload, { source, state = nul
           const current = await get(clients.get(entry.username), `/api/v1/schemoo/models/${entry.modelId}`);
           if (current.id !== saved.id || current.revision !== saved.revision) throw new Error('cohort_report_unavailable');
         }
-        if (entry.streamTerminal === 'drained' || ['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(entry.streamTerminal)) {
+        if (receipt.fixtureObserver) {
+          if (!entry.operationNonce || !entry.observerProcess?.incarnation || !executionStates.has(entry.fixtureStatus) ||
+              !Number.isFinite(Date.parse(entry.fixtureObservedAt)) || Date.parse(entry.fixtureObservedAt) > now + 5000 || !['complete', 'failed'].includes(entry.fixtureRequest)) entry.status = 'unknown';
+          else { entry.status = entry.fixtureStatus; entry.terminalAt = entry.streamTerminalAt; }
+        } else if (entry.streamTerminal === 'drained' || ['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(entry.streamTerminal)) {
           entry.status = entry.streamTerminal === 'drained' ? 'succeeded' : entry.streamTerminal; entry.terminalAt = entry.streamTerminalAt;
         }
         else entry.status = 'unknown';
@@ -135,9 +181,9 @@ export async function observeCohortWork(receipt, workload, { source, state = nul
   } finally { for (const client of clients.values()) client.close(); }
   retire();
   const outstanding = Object.values(state.pending);
-  const unknown = outstanding.filter(entry => !entry.observedAt || Date.parse(entry.observedAt) < cutoff || entry.status === 'unknown').length + Object.keys(state.pendingIntents).length;
+  const unknown = outstanding.filter(entry => !entry.observedAt || Date.parse(entry.observedAt) < cutoff || entry.status === 'unknown').length + Object.keys(state.pendingIntents).length + Number(fixtureGap);
   const uncoveredOwners = names.filter(name => state.owners[name]?.userId !== accounts.get(name).userId || Date.parse(state.owners[name]?.at) < cutoff || !state.owners[name]).length;
-  return { state, value: { version: 1, at: new Date(now).toISOString(), runId: receipt.tag, status: 'available', activeJobs: 0,
+  return { state, value: { version: 1, at: new Date(now).toISOString(), runId: receipt.tag, status: 'available', activeJobs: fixtureGap ? null : 0,
     activeExecutions: unknown || uncoveredOwners || backlog ? null : outstanding.filter(entry => ['reserved', 'running'].includes(entry.status)).length,
     unreleasedExecutions: outstanding.length, unknownExecutions: unknown + Number(backlog), unboundIntentCount: Object.keys(state.pendingIntents).length,
     serverManagedStreamsRetired: state.serverManagedStreamsRetired,
@@ -336,7 +382,8 @@ export async function observeOwnership(configPath, { origin, monitor = sampleSou
   if (receipt.kind === 'disposable') {
     const statePath = `${configPath}.work-state.json`; let previous = null;
     try { previous = await readSnapshot(statePath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const batch = await observeCohortWork(receipt, config.workload, { source, state: previous, origin });
+    const fixtureObservation = receipt.fixtureObserver ? await fixtureExecutions(receipt.fixtureObserver) : null;
+    const batch = await observeCohortWork(receipt, config.workload, { source, state: previous, origin, fixtureObservation });
     await writeSnapshot(statePath, batch.state); jobs = batch.value;
   } else jobs = await work(receipt, config.workload, { origin });
   return { version: 1, at: new Date().toISOString(), runId: config.runId, status: 'available', source, work: jobs };

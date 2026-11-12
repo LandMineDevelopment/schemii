@@ -19,6 +19,11 @@ import secrets
 import stat
 from threading import Event, RLock, Thread
 
+if __package__:
+    from .execution_observer import ExecutionObserver
+else:
+    from execution_observer import ExecutionObserver
+
 INTERVAL = 0.1
 MAXIMUM_BYTES = 16384
 FIELDS = {
@@ -98,6 +103,7 @@ class ObservedApplication:
             "incarnation": secrets.token_hex(16),
             "startedAt": timestamp(),
         }
+        self.executions = ExecutionObserver(run, directory, self.process)
 
     def snapshot(self):
         metadata = self.application.state.services.metadata
@@ -166,10 +172,28 @@ class ObservedApplication:
                     self.write()
                 except Exception:
                     self.failure = True
+            self.executions.sample()
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "lifespan":
-            return await self.application(scope, receive, send)
+            operation, token = self.executions.begin(scope)
+            completed = False
+            failed = False
+
+            async def observed_http_send(message):
+                nonlocal completed, failed
+                if message["type"] == "http.response.start":
+                    failed = message["status"] >= 400
+                await send(message)
+                if message["type"] == "http.response.body" and not message.get(
+                    "more_body", False
+                ):
+                    completed = True
+
+            try:
+                return await self.application(scope, receive, observed_http_send)
+            finally:
+                self.executions.finish(operation, token, failed or not completed)
 
         async def incoming():
             message = await receive()
@@ -196,6 +220,10 @@ class ObservedApplication:
                         self.failure = True
             with self.lock:
                 if message["type"] == "lifespan.startup.complete":
+                    try:
+                        self.executions.install(self.application.state.services.console)
+                    except Exception:
+                        self.executions.loss()
                     self.startup_complete = True
                     self.stage = "running"
                     try:
