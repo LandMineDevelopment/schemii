@@ -375,6 +375,27 @@ their original whole file; retries, skips and acceptance coverage are unchanged.
 The six-stack routing balances the serial cost plus the slower overlapping group,
 rather than dividing a serial plan and leaving its shared phase as the bottleneck.
 
+The routing calibration in `scripts/ci/browser-shards.mjs` records one accepted
+natural local run from November 12, 2026 (source `4497b5c`, local run
+`1794454748157`), with six lanes per device. Its device-specific file costs sum
+first-attempt setup, execution and teardown, including setup/teardown for skips.
+The metadata binds the original private receipt digest, source fingerprint,
+per-file source hashes and sanitized cost totals; it contains no test titles,
+rows, credentials or raw logs. Original receipts remain private.
+
+An unchanged spec uses its historical measured phase cost as a scheduling
+estimate. A changed, missing, unreadable or new spec receives the device's median
+positive calibration cost and appears in `unknownFiles`; it stays scheduled and
+does not gain parallel eligibility. File hashes establish only spec identity:
+application, helper, fixture, host and runtime changes can still change cost.
+These estimates are not measurements of current wall time. Offline balance
+forecasts do not establish the issue128 slowest/fastest wall target of 1.15,
+critical-path savings or ten-run reliability. The next legitimate feature
+acceptance measures the changed routing; subsequent comparable natural runs
+remain the monitoring cohort. Never create sample-only runs to fill it. Local
+acceptance currently executes browser commands sequentially, so redistributing
+files alone does not prove a reduction in that serial elapsed sum.
+
 Actual discovery proves the original case inventory. Child receipts retain
 original source/case identities despite their private working directories, and
 the joined receipt must contain every original case exactly once. Missing,
