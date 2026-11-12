@@ -237,7 +237,7 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
     const plotWidth=width-margin.left-margin.right,plotHeight=height-margin.top-margin.bottom;
     const chart = svg('svg', { viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', class: 'line-chart', role: 'img', 'aria-label': tile.title });
     chart.style.minWidth = `${width}px`;
-    chart.style.minHeight = `${height}px`;
+    if (!compact) chart.style.minHeight = `${height}px`;
     const x = index => margin.left + (lines.axis.length===1?0.5:index/(lines.axis.length-1))*plotWidth;
     const y = n => height-margin.bottom-(n/scale-low)/span*plotHeight;
     for (const {value,display,lines:labelLines} of ticks) {

@@ -109,8 +109,10 @@ export function measureEditor(tile,{outputs,onChange,element,modelSelect}) {
 }
 
 export function chooseConstituent(metadata,onSelect,element) {
-  const dialog=element('dialog',{className:'ui-dialog',attrs:{'aria-label':'Choose calculation contributing records'}});
-  const close=()=>{dialog.close();dialog.remove();};
+  const previous=document.activeElement;
+  const dialog=element('dialog',{className:'ui-dialog calculation-populations-dialog',attrs:{'aria-label':'Choose calculation contributing records'}});
+  const close=()=>dialog.close();
+  dialog.addEventListener('close',()=>{dialog.remove();if(previous?.isConnected)previous.focus();},{once:true});
   dialog.append(element('h2',{text:`Records for ${metadata.label}`}),element('p',{text:'A composite calculation has separate input populations. Choose the constituent to inspect; its raw rows are not a detail set for the combined ratio or variance.'}));
   if(!metadata.constituents.length) dialog.append(element('p',{text:'This calculation uses constants and has no raw contributing records.'}));
   for(const operand of metadata.constituents) {

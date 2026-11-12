@@ -10,7 +10,7 @@ function fixtures() {
   const dashboard = { id: dashboardId, revision: 1, modelId, modelRevision: 1, name: 'Workforce overview', optionalFilters: [], selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } }, tiles: [tile] };
   return { model, dashboard, catalog: { tables: [{ name: 'personnel', columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }, { name: 'org', dataType: 'text' }, { name: 'hired_at', dataType: 'date' }] }], relationships: [] } };
 }
-async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, dashboardCapacity = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false, pivot = false, calculated = false } = {}) {
+async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, dashboardCapacity = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false, pivot = false, calculated = false, formats = false } = {}) {
   const fixture = fixtures();
   fixture.model.revision = modelRevision;
   if(calculated) {
@@ -735,6 +735,7 @@ test('wide line axes keep their first points visible before horizontal scrolling
   expect(point.x + point.width).toBeLessThan(body.x + body.width);
   expect(point.y + point.height).toBeLessThan(body.y + body.height);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await test.info().attach(`wide-line-visible-points-${test.info().project.name}`, { body: await tile.screenshot(), contentType: 'image/png' });
 });
 
 
@@ -1254,9 +1255,26 @@ test('calculated measure offers separate constituent populations in the mounted 
   const {requests,errors}=await mock(page,{calculated:true});
   await page.goto('/schemer');
   const tile=page.locator('.analytics-tile');await expect(tile).toContainText('Calculated share');
-  await tile.locator('.bar-value-row').first().click();
+  await tile.getByRole('heading',{name:'Calculated share',exact:true}).click();
+  const expanded=page.getByRole('dialog',{name:'Calculated share',exact:true});
+  const mark=expanded.getByRole('button',{name:/^HQ: .*View records$/});
+  await mark.click();
   const chooser=page.getByRole('dialog',{name:'Choose calculation contributing records'});
   await expect(chooser).toContainText('separate input populations');
+  const geometry=await chooser.evaluate(node=>({viewport:document.documentElement.clientWidth,
+    buttons:[...node.querySelectorAll('button')].map(button=>({left:button.getBoundingClientRect().left,right:button.getBoundingClientRect().right,
+      height:button.getBoundingClientRect().height,content:button.scrollWidth,width:button.clientWidth}))}));
+  for(const button of geometry.buttons) {
+    expect(button.left).toBeGreaterThanOrEqual(0);expect(button.right).toBeLessThanOrEqual(geometry.viewport);
+    expect(button.height).toBeGreaterThanOrEqual(44);expect(button.content).toBeLessThanOrEqual(button.width+1);
+  }
+  await test.info().attach(`calculation-population-geometry-${test.info().project.name}`,{body:JSON.stringify(geometry,null,2),contentType:'application/json'});
+  await test.info().attach(`calculation-populations-${test.info().project.name}`, { body: await page.screenshot(), contentType: 'image/png' });
+  const before=requests.length;
+  await chooser.getByRole('button',{name:'Cancel',exact:true}).click();await expect(chooser).toHaveCount(0);await expect(mark).toBeFocused();
+  await mark.click();await expect(chooser).toBeVisible();await page.keyboard.press('Escape');
+  await expect(chooser).toHaveCount(0);await expect(mark).toBeFocused();expect(requests).toHaveLength(before);
+  await mark.click();await expect(chooser).toBeVisible();
   await chooser.getByRole('button',{name:/Source-filtered report population/}).click();
   await expect(page.locator('.drill-body')).toContainText('Alex');
   expect(requests.findLast(request=>request.body?.selection).body.selection.constituent.scope).toBe('source_population');
@@ -1277,8 +1295,10 @@ test('business formats stay readable, keyboard-editable and separate from exact 
   await page.locator('.analytics-tile').getByRole('heading',{name:'Positions by org'}).click();
   const expanded=page.getByRole('dialog',{name:'Positions by org',exact:true});
   await expect(expanded).toContainText('9.007.199.254.740.993,13');
-  await expect(expanded.locator('[data-number-tone="negative"]')).toContainText('▼ Below target');
+  await expect(expanded.locator('td[data-number-tone="negative"]')).toContainText('▼ Below target');
+  await expect(expanded.locator('li[data-number-tone="negative"]')).toContainText('▼ Below target');
   await expect(expanded).toContainText('NULL');await expect(expanded).toContainText('CSV contains RAW values');
+  await test.info().attach(`business-number-formats-${test.info().project.name}`, { body: await page.screenshot(), contentType: 'image/png' });
   for(const width of [1440,390,320]) {
     await page.setViewportSize({width,height:850});
     const geometry=await expanded.evaluate(node=>({dialog:node.getBoundingClientRect().width,viewport:document.documentElement.clientWidth,body:document.documentElement.scrollWidth}));
