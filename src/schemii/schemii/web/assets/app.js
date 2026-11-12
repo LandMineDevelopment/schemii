@@ -1,4 +1,6 @@
 import { setAssistantDesignSavedHandler } from "./ai-assistant.js";
+import { createProductContext, requireContextAccount } from "#common/product-context.js";
+let schemaHandoffPending = false, schemaHandoffGeneration = 0;
 import { createInspectorDataController } from "./inspector-data.js";
 import { createTableEditor } from "./table-editor.js";
 import { api } from "./api.js";
@@ -97,6 +99,7 @@ import {
   createLatestRequestController,
   createWorkspaceOperationController,
 } from "./request-coordinator.js";
+import { createDesignDeploymentController, detachedDesignEligible } from "./design-deployment.js";
 import { createMigrationReviewController } from "./migration-review.js";
 import { createSqlConsole } from "./sql-console.js";
 import { syncWorkspaceToolbar } from "./workspace-toolbar.js";
@@ -649,6 +652,21 @@ const migrationReview = createMigrationReviewController({
   confirm: askConfirmation,
   notify: showToast,
   notifyError: errorToast,
+});
+const designDeployment = createDesignDeploymentController({
+  api,
+  elements: {
+    dialog: byId("design-deployment-dialog"), connection: byId("deployment-connection"),
+    namespace: byId("deployment-namespace"), body: byId("deployment-review-body"),
+    status: byId("deployment-status"), review: byId("review-deployment-button"), copy: byId("copy-deployment-button"),
+  },
+  getContext: () => ({ workspace: state.activeWorkspace, design: state.design }),
+  openTarget: async workspace => {
+    const index = state.workspaces.findIndex(item => item.id === workspace.id);
+    if (index < 0) state.workspaces.push(workspace); else state.workspaces[index] = workspace;
+    if (await openWorkspace(workspace)) await migrationReview.open();
+  },
+  notify: showToast,
 });
 const relationDataSource = createRelationDataSource({
   api,
@@ -1271,8 +1289,12 @@ function updateHeader() {
   elements.reloadConflictButton.disabled = state.catalogLoading;
   elements.applyConnectionLayoutButton.disabled = state.catalogLoading;
   updateDesignControls();
+  byId("create-model-from-schema").disabled = !state.activeWorkspace || state.catalogLoading || state.designSubmitting || state.historySubmitting || tableEditor.hasDraft || schemaHandoffPending;
   tableEditor.updateActions();
   elements.downloadCatalogButton.textContent = designWorkspace ? "Download desired design JSON" : "Download live catalog JSON";
+  byId("deploy-design-button").hidden = !detachedDesignEligible(state.activeWorkspace, state.design);
+  byId("deploy-design-button").disabled = !detachedDesignEligible(state.activeWorkspace, state.design)
+    || state.catalogLoading || state.designSubmitting || state.historySubmitting || tableEditor.hasDraft;
   elements.exportDesignSqlButton.disabled = !designWorkspace || !state.design || state.catalogLoading;
   elements.reviewMigrationButton.disabled = !migrationReview.available()
     || state.catalogLoading
@@ -2438,6 +2460,7 @@ function confirmDeleteWorkspace(workspace) {
 }
 
 function clearActiveWorkspace({ historyMode = "replace" } = {}) {
+  designDeployment.close();
   designEditors.discardDrafts();
   const workspaceId = state.activeWorkspace?.id;
   persistCanvasView();
@@ -2512,6 +2535,7 @@ async function openWorkspace(workspace, { historyMode = "push", navigationReques
     if (!await flushLayoutBeforeTransition() || !request.isCurrent()) return false;
     if (!await designEditors.requestDiscardDrafts() || !request.isCurrent()) return false;
     persistCanvasView();
+    designDeployment.close();
     workspaceOperations.invalidate();
     viewAnalysis.clear();
     resetLayoutSaveState();
@@ -5046,6 +5070,32 @@ function bindEvents() {
     state.relationPreviewError = null;
     state.relationPreviewPagingError = null;
   });
+  byId("create-model-from-schema").addEventListener("click", async () => {
+    if (schemaHandoffPending || !state.activeWorkspace) return;
+    if (!state.activeWorkspace.connectionId) {
+      askConfirmation({ title: 'Choose a live source for a model', message: 'This detached desired design has no PostgreSQL source. Copy it to a concrete PostgreSQL target and review/apply its migration, then open that database-backed workspace to create a Schemoo model. Undeployed desired DDL cannot be used as a live model source.', label: 'Choose PostgreSQL target', tone: 'primary', callback: () => designDeployment.open() });
+      return;
+    }
+    const originId = state.activeWorkspace.id, handoffTicket = ++schemaHandoffGeneration;
+    schemaHandoffPending = true; updateHeader();
+    try {
+      if (!await flushLayoutBeforeTransition()) return;
+      if (handoffTicket !== schemaHandoffGeneration) return;
+      const origin = state.activeWorkspace;
+      if (origin?.id !== originId) throw new Error('The workspace changed. Send its current live schema again.');
+      const account = await requestJson('/api/v1/auth/me'); requireContextAccount(account, 'schemoo');
+      const workspace = await api.getWorkspace(origin.id);
+      const connection = await api.getConnection(workspace.connectionId);
+      if (handoffTicket !== schemaHandoffGeneration) return;
+      if (state.activeWorkspace?.id !== origin.id || workspace.connectionId !== origin.connectionId || workspace.namespace !== origin.namespace) throw new Error('The workspace source changed. Reload it and send the current live schema.');
+      location.assign(createProductContext('schema', account, { connectionId: workspace.connectionId, connectionOwnerId: connection.ownerId || account.user.id, connectionRevision: connection.revision, namespace: workspace.namespace }));
+    } catch (error) { errorToast(error); }
+    finally { schemaHandoffPending = false; updateHeader(); }
+  });
+  byId("deploy-design-button").addEventListener("click", async () => {
+    elements.objectsDialog.close();
+    await designDeployment.open();
+  });
   elements.reviewMigrationButton.addEventListener("click", async () => {
     elements.objectsDialog.close();
     await migrationReview.open();
@@ -5092,6 +5142,7 @@ function bindEvents() {
     });
   });
   window.addEventListener("pagehide", persistCanvasView);
+  window.addEventListener("pagehide", () => { schemaHandoffGeneration++; });
   window.addEventListener("beforeunload", event => {
     if (!tableEditor.hasDraft && !designEditors.hasDraft && !sqlConsole.hasOpenTransaction()) return;
     event.preventDefault();

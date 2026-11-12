@@ -106,9 +106,26 @@ h1,h2,h3,p { margin:0; } h1 { font-size:25px; line-height:1.25; font-weight:600;
 }
 
 /* The editor footer remains reachable when labels or browser text are enlarged. */
+.model-upgrade-dialog { width:min(780px,calc(100vw - 24px)); max-height:calc(100dvh - 24px); }
+.model-upgrade-dialog[open] { display:grid; grid-template-rows:auto auto minmax(0,1fr) auto; }
+.model-upgrade-dialog>p { padding:12px 18px 0; line-height:1.5; }
+.model-upgrade-body { min-height:0; overflow:auto; padding:16px 18px; display:grid; gap:16px; }
+.model-upgrade-body>.hint { line-height:1.6; }
+.model-repair-link { font-size:12px; color:var(--accent-bright); overflow-wrap:anywhere; }
+.upgrade-section { min-width:0; padding:14px; border:1px solid var(--line); border-radius:6px; display:grid; gap:12px; }
+.upgrade-section h3 { font-size:14px; overflow-wrap:anywhere; }
+.upgrade-section .actions { justify-content:flex-start; flex-wrap:wrap; }
+.upgrade-section .ui-button { white-space:normal; overflow-wrap:anywhere; }
+.upgrade-issue { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; font-size:12px; color:var(--danger); }
+.upgrade-issue p { flex:1 1 240px; overflow-wrap:anywhere; line-height:1.5; }
+.model-upgrade-dialog .ui-dialog__actions { flex-wrap:wrap; }
+.model-upgrade-dialog .ui-dialog__actions .error-message { flex-basis:100%; overflow-wrap:anywhere; }
+.model-upgrade-dialog .ui-dialog__actions .ui-button { min-height:40px; white-space:normal; }
 .tile-editor .ui-dialog__actions { flex-wrap: wrap; }
 .tile-editor .ui-dialog__actions > .ui-button { min-height: 40px; font-size: var(--ui-type-control); white-space: normal; }
 @media (max-width: 600px) {
+  .model-upgrade-dialog .ui-dialog__actions .ui-button { flex:1 1 auto; }
+  .model-upgrade-body { padding:12px; }
   .tile-editor-body { min-height: 0; }
   .tile-editor .ui-dialog__actions > .ui-button { flex: 1 1 auto; }
 }

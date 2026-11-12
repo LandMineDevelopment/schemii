@@ -1,3 +1,4 @@
+import { catalogTable, sourceIdentity, relationshipColumns, mappingLabel } from "./logical-relationships.js";
 import { edgeRelationship } from "./logical-relationships.js";
 /** Explain catalog-backed lookup cardinality, not query validity or permissions.
  * The server remains authoritative when validating and compiling the model.
@@ -24,18 +25,20 @@ export function summaryLookup(draft, catalog, source, target) {
   for(let node=target;node!==source;){const step=parents.get(node);steps.unshift({...step,next:node});node=step.previous;}
   const path=[];let multiplying=false, logical=false;
   for(const {previous,next,edge} of steps){
-    const relation=edgeRelationship(edge,catalog);
-    if(!relation || (edge.kind !== "logical" && (nodes.get(edge.source).table!==relation.sourceTable || nodes.get(edge.target).table!==relation.targetTable)))
+    const relation=edgeRelationship(edge,catalog,draft.nodes);
+    if(!relation || (edge.kind !== "logical" && (sourceIdentity(nodes.get(edge.source),catalog)!==sourceIdentity(relation,catalog,"source") || sourceIdentity(nodes.get(edge.target),catalog)!==sourceIdentity(relation,catalog,"target"))))
       return {status:"unknown",path:[],title:"Relationship needs refresh",message:"A relationship no longer matches the loaded schema. Refresh or repair the model before querying."};
     const forward=previous===edge.source;
-    if(edge.kind === "logical") {
-      logical=true;
-      const table=catalog.tables?.find(table=>table.name===nodes.get(next).table);
-      const column=forward?edge.targetColumn:edge.sourceColumn;
+    if(edge.kind === "logical" || !forward) {
+      logical ||= edge.kind === "logical";
+      if (!Array.isArray(catalog.tables)) return {status:"unknown",path:[],title:"Lookup metadata unavailable",message:"Reload the source catalog before checking lookup uniqueness."};
+      const table=catalogTable(nodes.get(next),catalog);
+      if (!table) return {status:"unknown",path:[],title:"Lookup metadata unavailable",message:"Reload the source catalog before checking lookup uniqueness."};
+      const columns=relationshipColumns(relation).map(pair=>pair[forward?"target":"source"]);
       const keys=[table?.primaryKey || [],...(table?.uniqueKeys || [])];
-      multiplying ||= !keys.some(key=>Array.isArray(key) && key.length===1 && key[0]===column);
-    } else multiplying ||= !forward;
-    path.push(`${nodes.get(previous).label}.${forward?relation.sourceColumn:relation.targetColumn} → ${nodes.get(next).label}.${forward?relation.targetColumn:relation.sourceColumn}`);
+      multiplying ||= !keys.some(key=>Array.isArray(key) && key.length>0 && key.every(column=>columns.includes(column)));
+    }
+    path.push(`${nodes.get(previous).label}.${mappingLabel(relation,forward?"source":"target")} → ${nodes.get(next).label}.${mappingLabel(relation,forward?"target":"source")}`);
   }
   return multiplying
     ? {status:"multiplying",path,title:"Lookup can multiply source records",message:"A joined column on this path is not known to be unique. Source-first summaries reject it; summarize those records separately before connecting them."}

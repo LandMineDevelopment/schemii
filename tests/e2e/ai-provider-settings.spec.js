@@ -2,14 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test.use({ trace: "off", video: "off" });
 
-async function setup(page, request, { providerId = "opencode", working = false, zenConnected = true, sharedConnected = false } = {}) {
-  const { workspaces } = await (await request.get("/api/v1/schemii/workspaces")).json();
-  const workspace = workspaces.find(item => item.connectionId);
-  const createdAt = new Date().toISOString();
-  const state = { connected: false, apiConnected: false, zenConnected, sharedConnected, apiKey: null,
-    sent: [], cancelled: 0, working, final: false, login: "pending", statusScopes: [] };
-  const chat = { id: `chat_${"3".repeat(32)}`, workspaceId: workspace.id, title: "Provider test", revision: 1,
-    providerId, modelId: "test-model", capabilities: {}, status: working ? "working" : "idle", createdAt, updatedAt: createdAt };
+async function mockProviderConnections(page, state) {
   await page.route("**/api/v1/ai/status*", route => { const url = new URL(route.request().url()); state.statusScopes.push({ product: url.searchParams.get("product"), resourceId: url.searchParams.get("resourceId") }); return route.fulfill({ json: { enabled: true, healthy: true, providers: [
     { id: "opencode", name: "OpenCode Zen", available: state.zenConnected, authenticated: state.zenConnected,
       privacy: "Free models may train on your prompts. Do not send confidential data.",
@@ -20,19 +13,41 @@ async function setup(page, request, { providerId = "opencode", working = false, 
       models: [{ id: "test-model", name: "GPT-6 Luna", status: "active", reasoningLevels: ["low", "medium", "high"] }] },
     { id: "openai", name: "OpenAI API", available: state.apiConnected, authenticated: state.apiConnected, models: [] },
   ] } }); });
-  await page.route("**/api/v1/ai/prototype/**", route => {
-    if (route.request().method() === "DELETE") { state.cancelled++; return route.fulfill({ json: {} }); }
-    return route.fulfill({ json: route.request().method() === "POST" ? { id: "login-test" } : {
-      status: state.login, userCode: "TEST-1234", verificationUrl: "https://auth.openai.com/codex/device",
-    } });
+  await page.route("**/api/v1/ai/prototype/**", async route => {
+    const method = route.request().method();
+    if (method === "DELETE") { state.cancelled++; state.cancelledIds.push(new URL(route.request().url()).pathname.split("/").at(-1)); return route.fulfill({ json: {} }); }
+    if (method === "POST") {
+      const attempt = ++state.starts;
+      if (attempt === 1) state.firstLoginRequest = route.request();
+      if (state.holdStart && attempt === 1) await state.holdStart.promise;
+      if (state.failStart && attempt === 1) return route.fulfill({ status: 503, json: { error: { message: "Controlled sign-in failure" } } });
+      return route.fulfill({ json: { id: `login-${attempt}` } });
+    }
+    return route.fulfill({ json: { status: state.login, userCode: "TEST-1234", verificationUrl: "https://auth.openai.com/codex/device" } });
   });
   await page.route("**/api/v1/ai/credentials/openai-codex", route => {
     state.connected = false; return route.fulfill({ json: {} });
   });
   await page.route("**/api/v1/ai/credentials/openai", route => {
-    state.apiKey = route.request().postDataJSON().apiKey;
-    state.apiConnected = true; return route.fulfill({ json: {} });
+    if (route.request().method() === "DELETE") state.apiConnected = false;
+    else {
+      state.apiKey = route.request().postDataJSON().apiKey;
+      if (state.failKey) return route.fulfill({ status: 503, json: { error: { message: "Controlled key failure" } } });
+      state.apiConnected = true;
+    }
+    return route.fulfill({ json: {} });
   });
+}
+
+async function setup(page, request, { providerId = "opencode", working = false, zenConnected = true, sharedConnected = false } = {}) {
+  const { workspaces } = await (await request.get("/api/v1/schemii/workspaces")).json();
+  const workspace = workspaces.find(item => item.connectionId);
+  const createdAt = new Date().toISOString();
+  const state = { connected: false, apiConnected: false, zenConnected, sharedConnected, apiKey: null,
+    sent: [], cancelled: 0, cancelledIds: [], starts: 0, working, final: false, login: "pending", statusScopes: [] };
+  const chat = { id: `chat_${"3".repeat(32)}`, workspaceId: workspace.id, title: "Provider test", revision: 1,
+    providerId, modelId: "test-model", capabilities: {}, status: working ? "working" : "idle", createdAt, updatedAt: createdAt };
+  await mockProviderConnections(page, state);
   await page.route("**/api/v1/schemii/ai/**", async route => {
     const path = new URL(route.request().url()).pathname;
     let json;
@@ -80,17 +95,17 @@ test("Codex device connection can cancel, reconnect, complete, and disconnect", 
   const state = await setup(page, request);
   await page.getByRole("button", { name: "Assistant settings", exact: true }).click();
   const provider = page.locator(".ai-provider-card").filter({ has: page.locator("summary strong").getByText("Codex", { exact: true }) });
-  await provider.locator("summary").click();
+  if (!(await provider.evaluate(card => card.open))) await provider.locator("summary").click();
   await provider.getByRole("button", { name: "Connect Codex" }).click();
   await expect(provider).toContainText("TEST-1234");
   await expect(provider.getByRole("link", { name: "Continue at OpenAI" })).toHaveAttribute("href", "https://auth.openai.com/codex/device");
   await provider.getByRole("button", { name: "Cancel sign-in" }).click();
   await expect.poll(() => state.cancelled).toBe(1);
-  await provider.locator("summary").click();
+  if (!(await provider.evaluate(card => card.open))) await provider.locator("summary").click();
   await provider.getByRole("button", { name: "Connect Codex" }).click();
   state.connected = true; state.login = "succeeded";
   await expect(page.locator("#ai-settings-status")).toHaveText("Codex connected to your account.");
-  await provider.locator("summary").click();
+  if (!(await provider.evaluate(card => card.open))) await provider.locator("summary").click();
   await provider.getByRole("button", { name: "Disconnect", exact: true }).click();
   await expect.poll(() => state.connected).toBe(false);
 });
@@ -114,7 +129,7 @@ test("API key input is masked and removed after connection", async ({ page, requ
   await page.getByRole("button", { name: "Assistant settings", exact: true }).click();
   const provider = page.locator(".ai-provider-card").filter({ hasText: "OpenAI API" });
   await provider.locator("summary").click();
-  const key = provider.getByLabel("API key");
+  const key = provider.getByLabel("OpenAI API key", { exact: true });
   await expect(key).toHaveAttribute("type", "password");
   await key.fill("test-secret-never-render");
   await provider.getByRole("button", { name: "Connect", exact: true }).click();
@@ -150,6 +165,112 @@ test("shared Codex settings show the administrator's locked model and reasoning 
   await expect(page.locator("#ai-settings-reasoning")).toHaveValue("high");
   await expect(page.locator("#ai-settings-reasoning")).toBeDisabled();
 });
+
+// Mount the actual shared product shell against mocked provider APIs. Schemii
+// uses its real workspace shell above; no test performs live provider sign-in.
+async function setupProductProviders(page, request, product) {
+  let state;
+  if (product === "schemii") state = await setup(page, request);
+  else {
+    state = { connected: false, apiConnected: false, zenConnected: true, sharedConnected: true,
+      apiKey: null, sent: [], cancelled: 0, cancelledIds: [], starts: 0, login: "pending", statusScopes: [] };
+    await mockProviderConnections(page, state);
+    const subjectKey = product === "schemoo" ? "modelId" : "dashboardId", subject = `${product}_provider_fixture`;
+    const chat = { id: "provider_fixture_chat", [subjectKey]: subject, revision: 1, status: "idle", providerId: "opencode", aiModelId: "test-model", messages: [], activity: [] };
+    await page.route(`**/api/v1/${product}/ai/**`, route => {
+      const path = new URL(route.request().url()).pathname;
+      const json = path.endsWith("/settings") ? { actions: [], modes: {}, providerId: "opencode", aiModelId: "test-model" }
+        : path.endsWith("/chats") ? { chats: [chat] } : chat;
+      return route.fulfill({ json });
+    });
+    await page.route("**/provider-connections-fixture", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/assets/common/ui.css"><link rel="stylesheet" href="/assets/common/searchable-select.css"><link rel="stylesheet" href="/assets/common/model-assistant.css"></head><body><button id="open">Open assistant</button><script type="module">
+      import { createProductAssistant } from '/assets/common/model-assistant.js';
+      window.assistant = createProductAssistant({ trigger: document.querySelector('#open'), getSubjectId: () => '${subject}', api: '/api/v1/${product}/ai', productLabel: '${product}', subjectLabel: '${product === "schemoo" ? "model" : "dashboard"}', subjectKey: '${subjectKey}', subjectQueryKey: '${product === "schemoo" ? "model_id" : "dashboard_id"}', title: 'Product assistant', emptyTitle: 'Provider fixture', emptyDescription: 'Provider connection contracts', examplePrompts: [] });
+      </script></body></html>` }));
+    await page.goto("/provider-connections-fixture");
+    await page.getByRole("button", { name: "Open assistant", exact: true }).click();
+    await expect(page.locator(".model-ai-status")).toHaveText("Ready");
+  }
+  await page.getByRole("button", { name: "Assistant settings", exact: true }).click();
+  const dialog = product === "schemii" ? page.locator("#ai-settings-dialog") : page.getByRole("dialog", { name: "Assistant settings", exact: true });
+  await expect(dialog).toBeVisible();
+  const card = name => dialog.locator(product === "schemii" ? ".ai-provider-card" : ".model-ai-provider").filter({ has: page.locator("summary strong").getByText(name, { exact: true }) });
+  const expand = async provider => { if (!(await provider.evaluate(node => node.open))) await provider.locator("summary").click(); };
+  const status = product === "schemii" ? page.locator("#ai-settings-status") : dialog.locator("p[role=status]");
+  return { state, card, expand, status, dialog };
+}
+const deferredStart = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
+
+for (const product of ["schemii", "schemoo", "schemer"]) {
+  for (const failStart of [false, true]) {
+    test(`${product} connection panel ignores late sign-in creation ${failStart ? "failure" : "success"} after cancel and reconnect`, async ({ page, request }) => {
+      const { state, card, expand, status } = await setupProductProviders(page, request, product);
+      state.holdStart = deferredStart(); state.failStart = failStart;
+      const codex = card("Codex"); await expand(codex);
+      await codex.getByRole("button", { name: "Connect Codex", exact: true }).click();
+      await expect.poll(() => state.starts).toBe(1);
+      await codex.getByRole("button", { name: "Cancel sign-in", exact: true }).click();
+      await codex.getByRole("button", { name: "Connect Codex", exact: true }).click();
+      await expect.poll(() => state.starts).toBe(2);
+      await expect(codex).toContainText("TEST-1234");
+      const oldResponse = page.waitForResponse(response => response.request() === state.firstLoginRequest);
+      state.holdStart.resolve(); await oldResponse;
+      if (!failStart) await expect.poll(() => state.cancelledIds).toContain("login-1");
+      await expect(codex).toContainText("TEST-1234");
+      await expect(status).not.toContainText("Controlled sign-in failure");
+      await codex.getByRole("button", { name: "Cancel sign-in", exact: true }).click();
+      await expect.poll(() => state.cancelledIds).toContain("login-2");
+      await expect(codex.getByRole("button", { name: "Connect Codex", exact: true })).toBeEnabled();
+    });
+  }
+  test(`${product} connection panel completes and disconnects Codex without changing permissions`, async ({ page, request }) => {
+    const { state, card, expand, status } = await setupProductProviders(page, request, product);
+    const codex = card("Codex"); await expand(codex);
+    await codex.getByRole("button", { name: "Connect Codex", exact: true }).click();
+    await expect(codex).toContainText("TEST-1234");
+    state.login = "succeeded"; state.connected = true;
+    await expect(status).toHaveText("Codex connected to your account.");
+    await expand(codex);
+    if (product !== "schemii") page.once("dialog", dialog => dialog.accept());
+    await codex.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await expect.poll(() => state.connected).toBe(false);
+    await expect(status).toHaveText("Codex disconnected.");
+    expect(state.statusScopes.every(scope => scope.product === product && scope.resourceId)).toBe(true);
+  });
+  test(`${product} connection panel clears masked keys on failure and recovery`, async ({ page, request }) => {
+    const { state, card, expand, status } = await setupProductProviders(page, request, product);
+    const api = card("OpenAI API"); await expand(api); state.failKey = true;
+    const key = api.getByLabel("OpenAI API key", { exact: true });
+    await expect(key).toHaveAttribute("type", "password");
+    await key.fill("private-mocked-provider-key"); const detached = await key.elementHandle();
+    await api.getByRole("button", { name: "Connect", exact: true }).click();
+    await expect(status).toHaveText("Controlled key failure");
+    expect(await detached.evaluate(node => node.value)).toBe("");
+    await expect(key).toHaveValue("");
+    await expect(page.locator("body")).not.toContainText("private-mocked-provider-key");
+    state.failKey = false; await key.fill("private-mocked-provider-key");
+    await api.getByRole("button", { name: "Connect", exact: true }).click();
+    await expect(status).toHaveText("OpenAI API connected.");
+    await expect(key).toHaveCount(0);
+    await expect(page.locator("body")).not.toContainText("private-mocked-provider-key");
+  });
+  test(`${product} connection controls are readable and managed providers expose no personal mutations`, async ({ page, request }) => {
+    const { card, expand, dialog } = await setupProductProviders(page, request, product);
+    for (const name of ["OpenCode Zen", "Shared ChatGPT Codex"]) {
+      const provider = card(name); await expand(provider);
+      await expect(provider).toContainText("An administrator manages");
+      await expect(provider.locator("input, button")).toHaveCount(0);
+    }
+    await expect(card("Shared ChatGPT Codex")).toContainText("Administrator policy: GPT-6 Luna · High reasoning");
+    const api = card("OpenAI API"); await expand(api);
+    const key = api.getByLabel("OpenAI API key", { exact: true }), connect = api.getByRole("button", { name: "Connect", exact: true });
+    for (const control of [key, connect]) {
+      const box = await control.boundingBox(); expect(box.height).toBeGreaterThanOrEqual(44);
+      expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize().width);
+    }
+    expect(await dialog.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+  });
+}
 
 async function mockAdminPerson(page, person, connection) {
   let user = { ...person, role_ids: [], direct_access: { capabilities: ['schemii:access', 'schemoo:access'], connections: [], dashboards: [] } };

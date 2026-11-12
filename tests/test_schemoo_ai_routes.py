@@ -130,6 +130,17 @@ def test_first_model_chat_adopts_created_model_and_keeps_history(setup):
     adopted = api.get(url).json()
     assert adopted["status"] == "idle" and adopted["modelId"].startswith("model_")
     assert adopted["activity"][0]["operation"] == "create_model"
+    created = api.get(f"/api/v1/schemoo/models/{adopted['modelId']}").json()
+    assert created["definition"]["nodes"] == []
+    assert created["definition"]["sourceContract"] == {"scope": "model", "tables": [], "relationships": [], "parameterDomains": []}
+    filled = api.patch(f"/api/v1/schemoo/models/{adopted['modelId']}", json={
+        "expectedRevision": created["revision"], "root": "people",
+        "nodes": {"upsert": [{"id": "people", "table": "people", "label": "People"}]},
+        "expose": [{"table": "people", "column": "name"}],
+    })
+    assert filled.status_code == 200, filled.text
+    assert filled.json()["definition"]["sourceContract"]["scope"] == "model"
+    assert [table["name"] for table in filled.json()["definition"]["sourceContract"]["tables"]] == ["people"]
     assert api.get(f"/api/v1/schemoo/ai/chats?model_id={adopted['modelId']}").json()["chats"][0]["id"] == chat["id"]
     followup = api.post(url + "/messages", json={"text": "Inspect it",
         "expectedRevision": adopted["revision"]})
@@ -291,3 +302,25 @@ def test_current_account_denial_preserves_unsent_message_or_pending_review(setup
     # Cleanup remains owner-bound even when a pending review has lost access.
     service.cancel(model["ownerId"], chat["id"])
     assert service.store.get(model["ownerId"], chat["id"])["status"] == "idle"
+
+
+from test_schemoo_routes import namespace_catalog, namespace_draft
+
+
+def test_assistant_full_update_acquires_proposed_namespace_and_preserves_current_grants(namespace_catalog):
+    from schemii.schemoo.ai_tools import execute_action
+    f = namespace_catalog
+    draft = namespace_draft(f.model)
+    action = {"operation": "update_model", "args": {"expectedRevision": 1, "name": "Cross schema", "definition": draft}}
+    result = execute_action(f.services, f.model["ownerId"], f.model["id"], action)
+    saved = f.api.get(f"/api/v1/schemoo/models/{f.model['id']}").json()
+    assert saved["revision"] == 2 and saved["name"] == "Cross schema"
+    assert {node.get("namespace") or "public" for node in saved["definition"]["nodes"]} == {"public", "other"}
+    assert result
+    action["args"]["expectedRevision"] = 2
+    f.grants["other"] = set()
+    from schemii.common.api.errors import ApiProblem
+    with pytest.raises(ApiProblem) as rejected:
+        execute_action(f.services, f.model["ownerId"], f.model["id"], action)
+    assert rejected.value.code == "invalid_model_definition"
+    assert f.api.get(f"/api/v1/schemoo/models/{f.model['id']}").json() == saved

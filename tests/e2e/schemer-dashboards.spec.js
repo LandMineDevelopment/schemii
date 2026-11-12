@@ -10,7 +10,7 @@ function fixtures() {
   const dashboard = { id: dashboardId, revision: 1, modelId, modelRevision: 1, name: 'Workforce overview', optionalFilters: [], selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } }, tiles: [tile] };
   return { model, dashboard, catalog: { tables: [{ name: 'personnel', columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }, { name: 'org', dataType: 'text' }, { name: 'hired_at', dataType: 'date' }] }], relationships: [] } };
 }
-async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false } = {}) {
+async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, dashboardCapacity = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false } = {}) {
   const fixture = fixtures();
   fixture.model.revision = modelRevision;
   if (jsonCells) {
@@ -48,7 +48,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
         if (streamError) break;
       }
       frames.push(streamError ? { type: 'error', tileId: tile.id, message: 'Source connection interrupted', code: 'query_failed' }
-        : { type: 'complete', tileId: tile.id, rowCount: rows.length, limitReached: capped, reason: capped ? 'row_limit' : null, snapshotAt });
+        : { type: 'complete', tileId: tile.id, rowCount: rows.length, limitReached: capped, reason: capped ? dashboardCapacity ? 'dashboard_row_limit' : 'row_limit' : null, snapshotAt });
     }
     frames.push({ type: 'end' });
     return frames.map(frame => JSON.stringify(frame)).join('\n') + '\n';
@@ -60,7 +60,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
       : tile.kind === 'kpi' ? { rows: [[3]], columns: [{ name: 'COUNT id', dataType: 'bigint' }], size: tile.limit }
         : { rows: manyBars || manyRows ? Array.from({ length: 500 }, (_, index) => [`Organization ${index + 1}`, index + 1]) : [['HQ', 3], ['Branch', 2]], columns: [{ name: 'org', dataType: 'text' }, { name: 'COUNT id', dataType: 'bigint' }], size: tile.limit };
   }
-  const requests = [], errors = []; page.on('pageerror', error => errors.push(error.message));
+  const requests = [], writes = [], errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.context().route('**/api/v1/**', async route => {
     const request = route.request(), url = new URL(request.url()), body = request.headers()['content-type']?.includes('application/x-www-form-urlencoded') ? JSON.parse(new URLSearchParams(request.postData()).get('payload')) : request.postDataJSON();
     let response;
@@ -71,7 +71,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
     else if (url.pathname === '/api/v1/schemoo/catalog') response = fixture.catalog;
     else if (url.pathname === '/api/v1/schemer/dashboards') response = { dashboards: multidimensional === 'many' ? [fixture.dashboard, ...Array.from({ length: 4 }, (_, index) => ({ ...fixture.dashboard, id: `other-${index}`, name: `Long multidimensional dashboard ${index}` }))] : [fixture.dashboard] };
     else if (url.pathname === `/api/v1/schemer/dashboards/${dashboardId}`) {
-      if (request.method() === 'PUT') fixture.dashboard = { ...fixture.dashboard, ...body, revision: fixture.dashboard.revision + 1 };
+      if (request.method() === 'PUT') { writes.push(body); fixture.dashboard = { ...fixture.dashboard, ...body, revision: fixture.dashboard.revision + 1 }; }
       response = fixture.dashboard;
     } else if (url.pathname === `/api/v1/schemer/dashboards/${dashboardId}/executions/stream`) {
       requests.push({ body, path: url.pathname });
@@ -89,7 +89,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
     } else response = {};
     await route.fulfill({ status: 200, json: response });
   });
-  return { fixture, requests, errors };
+  return { fixture, requests, writes, errors };
 }
 
 test('a changed Schemoo model blocks query refresh until the dashboard is revalidated and updated', async ({ page }) => {
@@ -103,6 +103,7 @@ test('a changed Schemoo model blocks query refresh until the dashboard is revali
   expect(requests).toHaveLength(0);
 
   await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  await page.getByRole('button', { name: 'Save repairs & upgrade', exact: true }).click();
   await expect(update).toBeHidden();
   await expect(page.locator('.analytics-tile')).toContainText('2 groups');
   expect(fixture.dashboard.modelRevision).toBe(2);
@@ -160,6 +161,7 @@ test('refresh checks for a Schemoo model update before it reruns dashboard queri
   expect(requests.filter(request => request.path.endsWith('/executions/stream')).length).toBe(executionsBeforeRefresh);
 
   await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  await page.getByRole('button', { name: 'Save repairs & upgrade', exact: true }).click();
   await expect(page.locator('#model-update')).toBeHidden();
   expect(fixture.dashboard.modelRevision).toBe(2);
   expect(errors).toEqual([]);
@@ -740,4 +742,277 @@ test('bars cluster under one dimension with consistent colors and regroup withou
     { table: 'person', column: 'name', value: 'Alex' },
   ]);
   expect(errors).toEqual([]);
+});
+
+
+test('model upgrade repairs hidden fields locally and saves the new revision in one request', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.model.definition.exposedFields = [field('id')];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('field is no longer exposed');
+  await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
+  await review.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('button', { name: 'Remove Dimensions 1', exact: true }).click();
+  await editor.getByRole('combobox', { name: 'Add dimensions', exact: true }).fill('id');
+  await page.getByRole('option', { name: 'Personnel · id', exact: true }).click();
+  await editor.getByRole('tab', { name: 'Drill-through columns' }).click();
+  await editor.getByRole('button', { name: 'Remove Drill-through columns 2', exact: true }).click();
+  await editor.getByRole('button', { name: 'Apply repair', exact: true }).click();
+  expect(writes).toHaveLength(0);
+  expect(fixture.dashboard.modelRevision).toBe(1);
+  expect(fixture.dashboard.tiles[0].dimensions).toEqual([field('org')]);
+  await expect(review).toContainText('All dashboard references are ready');
+  await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+  await expect(review).toHaveCount(0);
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toMatchObject({ expectedRevision: 1, modelRevision: 2, tiles: [{ dimensions: [field('id')], detailFields: [field('id')] }] });
+  expect(errors).toEqual([]);
+});
+
+test('cancel preserves an incompatible dashboard and explicit tile removal permits an empty upgrade', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.dashboard.tiles[0].dimensions = [{ table: 'removed_alias', column: 'old', aggregate: 'none' }];
+  const saved = structuredClone(fixture.dashboard);
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  let review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('source was removed from the model');
+  await review.getByRole('button', { name: 'Remove Positions by org', exact: true }).click();
+  page.once('dialog', dialog => dialog.accept());
+  await review.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(fixture.dashboard).toEqual(saved); expect(writes).toHaveLength(0);
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await review.getByRole('button', { name: 'Remove Positions by org', exact: true }).click();
+  await expect(review).toContainText('No tiles remain');
+  await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+  await expect(review).toHaveCount(0);
+  expect(writes).toHaveLength(1); expect(writes[0].tiles).toEqual([]);
+  expect(fixture.dashboard.modelRevision).toBe(2); expect(errors).toEqual([]);
+});
+
+test('upgrade review identifies stale comparison operands and inactive scope choices for explicit repair', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.model.definition.exposedFields = [field('org'), field('id'), field('name')];
+  fixture.dashboard.selections.organization.alternativeId = 'old-choice';
+  fixture.dashboard.optionalFilters = ['removed-filter'];
+  fixture.dashboard.selections['removed-filter'] = { active: false, values: {} };
+  fixture.dashboard.tiles[0].reportFilters = [{ id: 'compare', label: 'Old comparison', mode: 'rows', conditions: [{ ...field('id'), operator: 'eq', compareColumn: 'removed-column' }] }];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('removed-column');
+  await review.getByRole('button', { name: 'Remove offered filter', exact: true }).click();
+  await review.getByRole('button', { name: 'Reset saved choice', exact: true }).click();
+  await review.getByRole('button', { name: 'Remove report filter', exact: true }).click();
+  expect(writes).toHaveLength(0);
+  await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+  await expect(review).toHaveCount(0);
+  expect(writes[0].selections).toEqual({}); expect(writes[0].optionalFilters).toEqual([]);
+  expect(writes[0].tiles[0].reportFilters).toEqual([]); expect(errors).toEqual([]);
+});
+
+for (const [status, code] of [[503, 'dashboard_storage_unavailable'], [409, 'dashboard_revision_conflict'], [409, 'model_revision_conflict']]) {
+  test(`upgrade ${code} keeps the saved dashboard and local repairs`, async ({ page }) => {
+    const { fixture, errors } = await mock(page, { modelRevision: 2 });
+    const saved = structuredClone(fixture.dashboard);
+    await page.goto('/schemer');
+    await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+    const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+    await review.getByRole('button', { name: 'Remove Positions by org', exact: true }).click();
+    await page.route(`**/api/v1/schemer/dashboards/${dashboardId}`, route => route.request().method() === 'PUT'
+      ? route.fulfill({ status, json: { error: { code, message: 'Save rejected by server' } } }) : route.fallback());
+    await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+    await expect(review.getByRole('alert')).toContainText('Save rejected by server');
+    await expect(review).toContainText('No tiles remain');
+    expect(fixture.dashboard).toEqual(saved);
+    if (status === 409) await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
+    else await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeEnabled();
+    expect(errors).toEqual([]);
+  });
+}
+
+test('missing physical model sources give a reachable Schemoo repair path without saving', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.catalog.tables = [];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('source personnel is missing from the database');
+  await expect(review.getByRole('link', { name: 'Review or repair the source model in Schemoo' })).toHaveAttribute('href', `/schemoo?model=${modelId}`);
+  await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
+  expect(writes).toHaveLength(0); expect(fixture.dashboard.modelRevision).toBe(1); expect(errors).toEqual([]);
+});
+test('dashboard capacity is explicit in the card and expanded cached result', async ({ page }) => {
+  await mock(page, { capped: true, dashboardCapacity: true });
+  await page.goto('/schemer');
+  const card = page.locator('.analytics-tile').first();
+  await expect(card.locator('.tile-status')).toContainText('dashboard preview capacity reached');
+  await expect(card.locator('.stream-progress')).toHaveText('Dashboard preview capacity reached · download full results');
+  await card.click();
+  await expect(page.locator('dialog[open] .stream-progress').first()).toHaveText('Dashboard preview capacity reached · download full results');
+});
+
+test('later KPI renders while an earlier detail stream remains pending', async ({ page }) => {
+  const { fixture, errors } = await mock(page, { chartTypes: true });
+  fixture.dashboard.tiles = ['detail', 'kpi'].map(kind => fixture.dashboard.tiles.find(tile => tile.kind === kind));
+  await page.addInitScript(({ dashboardId }) => {
+    const original = window.fetch;
+    window.fetch = (input, options) => {
+      if (!String(input).endsWith(`/api/v1/schemer/dashboards/${dashboardId}/executions/stream`)) return original(input, options);
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({ start(controller) {
+        const emit = frame => controller.enqueue(encoder.encode(JSON.stringify(frame) + '\n'));
+        emit({ type: 'start', snapshotAt: '2026-11-11T12:00:00Z', tiles: ['detail', 'kpi'].map(tileId => ({ tileId, plan: {} })), tileErrors: [] });
+        emit({ type: 'rows', tileId: 'kpi', columns: [{ name: 'COUNT id', dataType: 'bigint' }], rows: [[42]] });
+        emit({ type: 'complete', tileId: 'kpi', rowCount: 1, limitReached: false });
+        window.__issue13Release = () => {
+          emit({ type: 'rows', tileId: 'detail', columns: [{ name: 'id' }, { name: 'name' }], rows: [[1, 'Arrived later']] });
+          emit({ type: 'complete', tileId: 'detail', rowCount: 1, limitReached: false });
+          emit({ type: 'end' }); controller.close();
+        };
+        options?.signal?.addEventListener('abort', () => controller.error(new DOMException('Stopped', 'AbortError')), { once: true });
+      } });
+      return Promise.resolve(new Response(stream, { headers: { 'Content-Type': 'application/x-ndjson' } }));
+    };
+  }, { dashboardId });
+  await page.goto('/schemer');
+  await expect(page.locator('[data-tile-id="kpi"] .tile-body')).toContainText('42');
+  await expect(page.locator('[data-tile-id="kpi"] .tile-status')).toContainText('complete');
+  await expect(page.locator('[data-tile-id="detail"] .tile-status')).toContainText(/loading|Fetching/i);
+  await page.evaluate(() => window.__issue13Release());
+  await expect(page.locator('[data-tile-id="detail"] .tile-body')).toContainText('Arrived later');
+  expect(errors).toEqual([]);
+});
+
+async function displayedAssistant(page) {
+  const state = { attachments: [], providerCalls: 0 };
+  let chat = { id: 'chat_displayed_fixture', dashboardId, revision: 1, status: 'idle',
+    providerId: 'openai', aiModelId: 'fixture-model', title: 'Displayed explanation', modes: { explain_displayed_result: 'ask' }, messages: [], activity: [] };
+  state.withhold = () => { chat = { ...chat, revision: chat.revision + 1, stream: '', messages: [
+    { id: 'displayed-answer', role: 'assistant', transient: true,
+      text: 'This displayed-result explanation was temporary. Attach the displayed result again to explain it; no source query is rerun automatically.' },
+  ] }; };
+  await page.route('**/api/v1/ai/status*', route => route.fulfill({ json: { healthy: true, providers: [
+    { id: 'openai', name: 'OpenAI', authenticated: true, available: true, models: [{ id: 'fixture-model', name: 'Fixture model', status: 'active' }] },
+  ] } }));
+  await page.route('**/api/v1/schemer/ai/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    let response = chat;
+    if (path.endsWith('/settings')) response = { providerId: 'openai', aiModelId: 'fixture-model', modes: { explain_displayed_result: 'ask' },
+      actions: [{ id: 'explain_displayed_result', label: 'Explain displayed result', group: 'Results', readsRows: true }] };
+    else if (path.endsWith('/chats')) response = { chats: [chat] };
+    else if (path.endsWith('/messages') && route.request().method() === 'POST') {
+      state.attachments.push(route.request().postDataJSON());
+      chat = { ...chat, revision: chat.revision + 1, status: 'waiting_approval', pending: {
+        id: `approval_${'d'.repeat(32)}`, kind: 'displayed_result',
+        summary: 'Share the attached displayed sample? This will not query the source.',
+        actions: [{ operation: 'explain_displayed_result', args: {} }],
+      } };
+      response = chat;
+    } else if (path.endsWith('/approval') && route.request().method() === 'POST') {
+      state.providerCalls++;
+      chat = { ...chat, revision: chat.revision + 1, status: 'idle', pending: null,
+        messages: [{ id: 'displayed-answer', role: 'assistant', transient: true, text: 'These unverified displayed rows are a bounded sample, not database totals.' }] };
+      response = chat;
+    }
+    return route.fulfill({ json: response });
+  });
+  return state;
+}
+
+test('explain displayed result freezes current report rows and applied filters without another source request', async ({ page }) => {
+  const { requests, errors } = await mock(page, { manyBars: true });
+  const ai = await displayedAssistant(page);
+  await page.goto('/schemer');
+  const tile = page.locator('.analytics-tile');
+  await expect(tile.locator('.tile-status')).toContainText('500 groups');
+  const sourceRequests = requests.length;
+  await tile.getByRole('button', { name: 'Explain displayed result for Positions by org', exact: true }).click();
+  await expect.poll(() => ai.attachments.length).toBe(1);
+  const attachment = ai.attachments[0];
+  expect(attachment).toMatchObject({ acknowledgedProviderId: 'openai', displayedResult: {
+    dashboardId, dashboardRevision: 1, modelId, modelRevision: 1, tileId: 'positions', pane: 'main',
+    snapshotAt: '2026-09-20T12:00:00Z', cachedRows: 500, displayedRows: 500, clientSampleTruncated: true,
+    selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } },
+  } });
+  expect(attachment.displayedResult.rows).toHaveLength(100);
+  expect(attachment.text).not.toContain('Organization 1');
+  await expect(page.getByRole('button', { name: 'Approve batch', exact: true })).toBeVisible();
+  expect(ai.providerCalls).toBe(0);
+  expect(requests).toHaveLength(sourceRequests);
+  await page.getByRole('button', { name: 'Approve batch', exact: true }).click();
+  await expect(page.locator('.model-ai-messages')).toContainText('not database totals');
+  await expect(page.locator('.model-ai-messages')).toContainText('Temporary · not saved');
+  expect(ai.providerCalls).toBe(1); expect(requests).toHaveLength(sourceRequests);
+  expect(errors).toEqual([]);
+});
+
+test('explain displayed detail rows captures the selected drill snapshot and never refreshes it', async ({ page }) => {
+  const { requests, errors } = await mock(page);
+  const ai = await displayedAssistant(page);
+  await page.goto('/schemer');
+  const tile = page.locator('.analytics-tile'); await expect(tile).toContainText('2 groups');
+  await tile.getByRole('heading', { name: 'Positions by org' }).click();
+  const expanded = page.getByRole('dialog', { name: 'Positions by org', exact: true });
+  await expanded.getByRole('button', { name: 'HQ: 3. View records', exact: true }).click();
+  await expect(expanded.locator('.drill-body')).toContainText('Casey');
+  const sourceRequests = requests.length;
+  await expanded.getByRole('button', { name: 'Explain displayed detail rows', exact: true }).click();
+  await expect(expanded).toHaveCount(0);
+  await expect.poll(() => ai.attachments.length).toBe(1);
+  expect(ai.attachments[0].displayedResult).toMatchObject({ pane: 'drill', metric: 'values',
+    rows: [[1, 'Alex'], [2, 'Blake'], [3, 'Casey']],
+    drillSelection: { dimensions: [{ table: 'person', column: 'org', value: 'HQ' }], measureIndex: 0 },
+    snapshotAt: '2026-09-20T12:00:00Z', cachedRows: 3, displayedRows: 3 });
+  expect(requests).toHaveLength(sourceRequests); expect(ai.providerCalls).toBe(0);
+  expect(errors).toEqual([]);
+});
+
+for (const pane of ['main', 'drill']) {
+  test(`displayed ${pane} attachment freezes dashboard and saved tile filter provenance`, async ({ page }) => {
+    const { fixture, requests, errors } = await mock(page, { optionalFilter: true });
+    fixture.dashboard.optionalFilters = ['region'];
+    fixture.dashboard.selections.region = { alternativeId: 'choose', active: true, values: { region: 'dashboard region' } };
+    fixture.dashboard.tiles[0].selections = { region: { alternativeId: 'choose', active: true, values: { region: 'tile region' } } };
+    fixture.catalog.tables[0].columns.push({ name: 'threshold', dataType: 'integer' });
+    fixture.dashboard.tiles[0].reportFilters = [{ mode: 'rows', conditions: [{ table: 'person', column: 'id', operator: 'gt', compareColumn: 'threshold' }] }];
+    const ai = await displayedAssistant(page);
+    await page.goto('/schemer');
+    const tile = page.locator('.analytics-tile'); await expect(tile).toContainText('2 groups');
+    if (pane === 'drill') {
+      await tile.getByRole('heading', { name: 'Positions by org' }).click();
+      const expanded = page.getByRole('dialog', { name: 'Positions by org', exact: true });
+      await expanded.getByRole('button', { name: 'HQ: 3. View records', exact: true }).click();
+      await expect(expanded.locator('.drill-body')).toContainText('Casey');
+      await expanded.getByRole('button', { name: 'Explain displayed detail rows', exact: true }).click();
+    } else await tile.getByRole('button', { name: 'Explain displayed result for Positions by org', exact: true }).click();
+    const before = requests.length;
+    await expect.poll(() => ai.attachments.length).toBe(1);
+    expect(ai.attachments[0].displayedResult).toMatchObject({ pane,
+      selections: { region: { values: { region: 'dashboard region' } } },
+      tileSelections: { region: { values: { region: 'tile region' } } },
+      reportFilters: [{ conditions: [{ column: 'id', compareColumn: 'threshold' }] }],
+    });
+    expect(requests).toHaveLength(before); expect(ai.providerCalls).toBe(0); expect(errors).toEqual([]);
+  });
+}
+
+test('reopening a withheld displayed explanation replaces old derived text with safe reattachment recovery', async ({ page }) => {
+  const { requests, errors } = await mock(page);
+  const ai = await displayedAssistant(page);
+  await page.goto('/schemer');
+  await expect(page.locator('.analytics-tile')).toContainText('2 groups');
+  await page.getByRole('button', { name: 'Explain displayed result for Positions by org', exact: true }).click();
+  await page.getByRole('button', { name: 'Approve batch', exact: true }).click();
+  await expect(page.locator('.model-ai-messages')).toContainText('not database totals');
+  const before = requests.length; ai.withhold();
+  await page.getByRole('button', { name: 'Conversation history', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Conversation history', exact: true }).getByRole('button', { name: 'Displayed explanation', exact: true }).click();
+  await expect(page.locator('.model-ai-messages')).toContainText('Attach the displayed result again');
+  await expect(page.locator('.model-ai-messages')).not.toContainText('bounded sample, not database totals');
+  expect(requests).toHaveLength(before); expect(ai.providerCalls).toBe(1); expect(errors).toEqual([]);
 });

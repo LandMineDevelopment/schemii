@@ -8,7 +8,7 @@ import threading
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from schemii.common.errors import MetadataStorageUnavailableError
 from schemii.common.json_delta import json_delta
@@ -534,6 +534,22 @@ def design_object_ids(content: SchemiiDesignContent) -> dict[str, str]:
     return ids
 
 
+@dataclass(frozen=True)
+class DesignCopyGuard:
+    """Exact preview inputs rechecked inside the target metadata transaction."""
+
+    source: SchemiiDesign
+    source_workspace_revision: int
+    target_workspace_revision: int
+    target_fingerprint: str
+    connection_id: str
+    connection_revision: int
+    connection_owner_id: str
+    database: str
+    namespace: str
+    revalidate: Callable[[], None]
+
+
 @runtime_checkable
 class DesignRepository(Protocol):
     def initialize(
@@ -554,6 +570,7 @@ class DesignRepository(Protocol):
         *,
         operation_kind: str = "edit",
         expected_baseline_id: str | None = None,
+        copy_guard: DesignCopyGuard | None = None,
     ) -> SchemiiDesign: ...
 
     def history_state(
@@ -611,6 +628,10 @@ class InMemoryDesignRepository:
         self._history_action_limit = history_action_limit
         self._mutation_guard: Any = None
         self._lock = threading.RLock()
+
+    def metadata_transaction(self):
+        """Share one reentrant metadata boundary with in-memory migration state."""
+        return self._lock
 
     def set_mutation_guard(self, guard: Any) -> None:
         self._mutation_guard = guard
@@ -689,10 +710,16 @@ class InMemoryDesignRepository:
         *,
         operation_kind: str = "edit",
         expected_baseline_id: str | None = None,
+        copy_guard: DesignCopyGuard | None = None,
     ) -> SchemiiDesign:
         del expected_baseline_id
         validate_design_content(request.content)
         with self._lock:
+            if copy_guard is not None:
+                source = self._design(owner_id, copy_guard.source.workspace_id)
+                if (source.revision, source.fingerprint) != (copy_guard.source.revision, copy_guard.source.fingerprint):
+                    raise DesignConflictError(source.revision)
+                copy_guard.revalidate()
             self._guard_mutation(owner_id, workspace_id, operation_kind)
             current = self._design(owner_id, workspace_id)
             self._ensure_history(owner_id, workspace_id, current)

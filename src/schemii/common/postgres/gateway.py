@@ -956,6 +956,9 @@ class PsycopgPostgresGateway:
             if not isinstance(transaction_id, str) or not transaction_id:
                 raise PostgresCatalogValidationError()
             on_started(transaction_id, identity)
+            # Authored CREATE TYPE/routine/trigger SQL is deliberately unqualified.
+            # Bind it to the exact reviewed namespace, never the login default.
+            self._set_console_namespace(database_connection, namespace)
             for statement in statements:
                 if not isinstance(statement, str) or not statement.strip():
                     raise PostgresCatalogValidationError()

@@ -54,15 +54,18 @@
 .model-ai-permissions small { display:block; margin-top:4px; color:#909eb2; font-size:11px; line-height:1.5; }
 .model-ai-permissions select { font-size:12px; width:100%; }
 .model-ai-provider { border:1px solid #303b4c; border-radius:7px; padding:12px; margin-bottom:9px; }
-.model-ai-provider summary { cursor:pointer; font-size:13px; }
-.model-ai-provider summary span { float:right; color:#9cacbf; font-size:11px; }
+.model-ai-provider summary { display:flex; min-height:44px; align-items:center; justify-content:space-between; gap:10px; cursor:pointer; font-size:13px; }
+.model-ai-provider summary strong { min-width:0; overflow-wrap:anywhere; }
+.model-ai-provider summary span { flex:none; color:#9cacbf; font-size:11px; }
 .model-ai-provider p { font-size:12px; color:#9baac0; line-height:1.6; }
 .model-ai-provider a, .model-ai-provider > strong { display:block; margin:10px 0; }
 .model-ai-provider a { color:#ae9cf0; }
 .model-ai-provider .ui-button { margin-top:9px; }
-.model-ai-auth { display:flex; gap:8px; align-items:center; margin-top:10px; }
-.model-ai-auth input { flex:1; }
-.model-ai-auth .ui-button { margin:0; }
+.model-ai-auth { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:end; margin-top:10px; }
+.model-ai-auth > p, .model-ai-auth > strong, .model-ai-auth > a { grid-column:1 / -1; margin:0; overflow-wrap:anywhere; }
+.model-ai-auth label { display:grid; min-width:0; gap:5px; font-size:12px; color:#9baac0; }
+.model-ai-auth input { width:100%; min-height:44px; }
+.model-ai-auth .ui-button { min-height:44px; margin:0; }
 .model-ai-history article { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid #303a4b; }
 .model-ai-history article > div { min-width:0; }
 .model-ai-history article > div > button { max-width:100%; height:auto; text-align:left; white-space:normal; }
