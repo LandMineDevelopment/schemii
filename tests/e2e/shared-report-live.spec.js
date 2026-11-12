@@ -70,7 +70,7 @@ test('granted viewers retain deep links, isolate filters and rows, recover edits
     expect(saved.selections.minimum.values.amount).toBe(0);
     await eastPage.locator('.analytics-tile').getByRole('heading').click();
     let expanded = eastPage.getByRole('dialog', { name: 'Sales by region', exact: true });
-    await expect(expanded.getByRole('button', { name: 'Download full results', exact: true })).toBeHidden();
+    await expect(expanded.getByRole('button', { name: 'Download full results · RAW CSV', exact: true })).toBeHidden();
     await expect(expanded.getByRole('button', { name: /View records/ })).toHaveCount(0);
     await expanded.getByRole('button', { name: 'Close expanded tile' }).click();
 
@@ -86,7 +86,7 @@ test('granted viewers retain deep links, isolate filters and rows, recover edits
       eastPage.once('download', resolve);
       east.once('page', popup => popup.once('download', resolve));
     });
-    await expanded.getByRole('button', { name: 'Download full results', exact: true }).click();
+    await expanded.getByRole('button', { name: 'Download full results · RAW CSV', exact: true }).click();
     let downloadTimeout;
     const download = await Promise.race([downloadPromise, new Promise((_, reject) => {
       downloadTimeout = setTimeout(() => reject(new Error('No browser download received within 15 seconds')), 15_000);

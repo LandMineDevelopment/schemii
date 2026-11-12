@@ -492,3 +492,18 @@ def test_revocation_blocks_parked_rows_after_a_completed_peer_returns_its_share(
     assert [row for event in events if event["type"] == "rows" for row in event["rows"]] == [[1]]
     assert next(event for event in events if event["type"] == "error")["code"] == "report_access_revoked"
     assert console.closed == ["empty", "detail"]
+
+
+@pytest.mark.parametrize('value', ['-9007199254740993','-12345678901234567890.123456789','-1e-100','+0','0','-0'])
+def test_raw_csv_exact_numeric_text_uses_only_numeric_column_metadata(value):
+    assert streaming._csv_value(value, 'numeric') == value
+    assert streaming._csv_value(value, 'bigint') == value
+    for kind in ['text', 'json', 'jsonb', 'numeric[]', 'unknown']:
+        assert streaming._csv_value(value, kind) == ("'"+value if value[0] in '+-' else value)
+
+
+@pytest.mark.parametrize('value', ['-1;=HYPERLINK("x")','-1\n=2',' -1','\t+1','-1e99999999999999999999','-Infinity','+NaN','@SUM(1)','=1+1'])
+def test_raw_csv_hostile_or_nonfinite_numeric_lookalikes_remain_escaped(value):
+    assert streaming._csv_value(value, 'numeric') == "'" + value
+    assert streaming._csv_value(value, 'text') == "'" + value
+    assert streaming._csv_value(value, 'jsonb') == "'" + value

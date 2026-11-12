@@ -1,3 +1,4 @@
+import { createNumberPresentation, decorateNumber, numberFormatLegend } from './number-format.js';
 import { element } from '#common/dom.js';
 import { pivotDefaults } from './dashboard-state.js';
 
@@ -62,8 +63,8 @@ export function pivotMatrix(tile, result) {
     rowsOmitted, qualifyingGroups, partial: Boolean(result?.loading || result?.limitReached || result?.error || result?.rows?.length > source.length) };
 }
 
-function caption(axis, count, all) {
-  return axis.depth ? `${axis.values.map(text).join(' › ')}${axis.depth < count ? ' · subtotal' : ''}` : all;
+function caption(axis, count, all, render=text) {
+  return axis.depth ? `${axis.values.map(render).join(' › ')}${axis.depth < count ? ' · subtotal' : ''}` : all;
 }
 function action(node, label, invoke) {
   const button = element('button', { type: 'button', className: 'pivot-drill', text: node.textContent, attrs: { 'aria-label': label } });
@@ -97,9 +98,12 @@ export function displayedPivot(host, tile, result) {
 }
 export function renderPivot(host, tile, result, { onDrill, compact = false } = {}) {
   host.replaceChildren();
-  const matrix = pivotMatrix(tile, result);
-  const view = { tile, result: { ...result, cachedRows: result.rows.length }, matrix, first: 0, end: 0 };
+  const matrix = pivotMatrix(tile, result), present = createNumberPresentation(tile, result);
+  const view = { tile, result: { ...result, cachedRows: result.rows.length }, matrix, present, first: 0, end: 0 };
   displayedPivots.set(host, view);
+  const rowCaption=row=>caption(row,tile.rowDimensions.length,'All rows',(value,index)=>present(value,index).text);
+  const columnCaption=column=>caption(column,tile.columnDimensions.length,'All columns',(value,index)=>present(value,tile.rowDimensions.length+index).text);
+  const formatLegend=numberFormatLegend(tile,result,element);if(formatLegend) host.append(formatLegend);
   if (matrix.capacity || matrix.error) {
     host.append(element('p', { className: 'pivot-notice error', attrs: { role: 'alert' }, text: matrix.error || `Pivot has at least ${matrix.count} column groups; its limit is ${matrix.maximum}. Add a source or aggregate-result filter, change column dimensions, or increase the bound in Edit tile. Full pivot CSV remains available.` }));
     return;
@@ -124,7 +128,7 @@ export function renderPivot(host, tile, result, { onDrill, compact = false } = {
       const column = matrix.columns[start], groupKey = JSON.stringify([column.depth <= level ? column.depth : level + 1, ...column.values.slice(0, level + 1)]);
       let end = start + 1;
       while (end < matrix.columns.length && JSON.stringify([matrix.columns[end].depth <= level ? matrix.columns[end].depth : level + 1, ...matrix.columns[end].values.slice(0, level + 1)]) === groupKey) end++;
-      const title = column.depth > level ? `${tile.columnDimensions[level].column}: ${text(column.values[level])}` : column.depth ? 'Subtotal' : 'All columns';
+      const title = column.depth > level ? `${tile.columnDimensions[level].column}: ${present(column.values[level],tile.rowDimensions.length+level).text}` : column.depth ? 'Subtotal' : 'All columns';
       const headerId = id(`column-${level}-${start}`);
       for (let column = start; column < end; column++) columnHeaders[column].push(headerId);
       tr.append(element('th', { text: title, attrs: { id: headerId, colspan: (end - start) * measureCount, scope: 'colgroup' } })); start = end;
@@ -133,7 +137,7 @@ export function renderPivot(host, tile, result, { onDrill, compact = false } = {
   }
   const metrics = element('tr');
   matrix.columns.forEach((column, columnIndex) => tile.measures.forEach((_, measureIndex) => {
-    const th = element('th', { text: measureLabel(measureIndex), attrs: { id: id(`measure-${columnIndex}-${measureIndex}`), scope: 'col', headers: columnHeaders[columnIndex].join(' '), title: caption(column, tile.columnDimensions.length, 'All columns') } });
+    const th = element('th', { text: measureLabel(measureIndex), attrs: { id: id(`measure-${columnIndex}-${measureIndex}`), scope: 'col', headers: columnHeaders[columnIndex].join(' '), title: columnCaption(column) } });
     metrics.append(th);
   }));
   head.append(metrics);
@@ -147,14 +151,15 @@ export function renderPivot(host, tile, result, { onDrill, compact = false } = {
     const spacer = count => { const tr = element('tr', { attrs: { 'aria-hidden': 'true' } }), td = element('td', { attrs: { colspan: matrix.columns.length * measureCount + 1 } }); td.style.height = `${count * rowHeight}px`; tr.append(td); return tr; };
     if (first) children.push(spacer(first));
     for (let rowIndex = first; rowIndex < end; rowIndex++) {
-      const row = matrix.rows[rowIndex], title = caption(row, tile.rowDimensions.length, 'All rows');
+      const row = matrix.rows[rowIndex], title = rowCaption(row);
       const tr = element('tr', { className: row.depth < tile.rowDimensions.length ? 'pivot-total-row' : '', attrs: { 'aria-rowindex': rowIndex + tile.columnDimensions.length + 2 } });
       tr.append(element('th', { className: 'pivot-row-label', text: title, attrs: { id: id(`row-${rowIndex}`), scope: 'row', title, 'aria-label': row.depth ? tile.rowDimensions.slice(0, row.depth).map((field, index) => `${field.column}: ${text(row.values[index])}`).join(' · ') + (row.depth < tile.rowDimensions.length ? ' · subtotal' : '') : 'All rows' } }));
       matrix.columns.forEach((column, columnIndex) => {
         const values = matrix.cells.get(JSON.stringify([key(row), key(column)]));
         tile.measures.forEach((_, measureIndex) => {
-          const value = values?.[tile.rowDimensions.length + tile.columnDimensions.length + measureIndex], label = `${title} · ${caption(column, tile.columnDimensions.length, 'All columns')} · ${measureLabel(measureIndex)}: ${values ? text(value) : 'not displayed or no qualifying cell'}`;
-          const td = element('td', { className: !row.depth || !column.depth ? 'pivot-total' : '', text: values ? text(value) : '—', attrs: { headers: `${id(`row-${rowIndex}`)} ${columnHeaders[columnIndex].join(' ')} ${id(`measure-${columnIndex}-${measureIndex}`)}`, title: label } });
+          const value = values?.[tile.rowDimensions.length + tile.columnDimensions.length + measureIndex], formatted=present(value,tile.rowDimensions.length+tile.columnDimensions.length+measureIndex), label = `${title} · ${columnCaption(column)} · ${measureLabel(measureIndex)}: ${values ? formatted.text+(formatted.warning?' · '+formatted.warning:'') : 'not displayed or no qualifying cell'}`;
+          const td = element('td', { className: !row.depth || !column.depth ? 'pivot-total' : '', text: values ? formatted.text : '—', attrs: { headers: `${id(`row-${rowIndex}`)} ${columnHeaders[columnIndex].join(' ')} ${id(`measure-${columnIndex}-${measureIndex}`)}`, title: label } });
+          if(values) decorateNumber(td,formatted);
           if (values && onDrill) action(td, `${label}. View contributing records`, () => onDrill(pivotSelection(tile, row, column, measureIndex)));
           tr.append(td);
         });

@@ -1,3 +1,4 @@
+import { createNumberPresentation, decorateNumber } from '../../src/schemii/schemer/web/number-format.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -50,7 +51,7 @@ function fixture({ budget = new cacheModule.CacheBudget(), pending = false, wait
     emit({ ...rows([source.length]), tileId: tile.id }); await mainGate.promise; emit({ ...complete, tileId: tile.id });
   } });
   const openExpanded = runInNewContext(`${viewerSource.replace(/^import .*;\n/gm, '').replaceAll('export function ', 'function ')}\nopenExpanded`, {
-    document, element: (tag, options, children) => new Node(tag, options, children),
+    createNumberPresentation, decorateNumber, document, element: (tag, options, children) => new Node(tag, options, children),
     createIconButton: ({ label }) => new Node('button', { attrs: { 'aria-label': label } }),
     scrollPosition: () => ({}), restoreScroll() {}, createResultGrid: data => new Node('grid', { data }),
     appendStreamStatus() {}, renderVisualization: (host, _tile, _result, { onDrill }) => { host.onDrill = onDrill; },
@@ -192,8 +193,8 @@ test('freshness: full export discloses a fresh snapshot and uses current revisio
   const f = fixture();
   try {
     await Promise.resolve(); f.select(); const earlier = f.drill(); await earlier.pending; f.flush();
-    assert.equal(f.text('export-snapshot-note'), 'Full download uses a fresh snapshot.');
-    const full = f.detailButton('Download full results');
+    assert.equal(f.text('export-snapshot-note'), 'CSV contains RAW values, without display formatting or indicators. Full download uses a fresh snapshot.');
+    const full = f.detailButton('Download full results · RAW CSV');
     assert.match(full.attributes.title, /fresh snapshot.*may differ/);
     f.dashboard.revision = 2; f.dashboard.selections = { region: { values: { region: 'current' } } };
     f.setSource(['export-only-source']); full.click();
@@ -210,11 +211,11 @@ test('cached pivot contributor CSV preserves exact grouping selection without mu
   const f = fixture({ kind: 'pivot', selected });
   try {
     await Promise.resolve(); f.select(); const drill = f.drill(); await drill.pending; f.flush();
-    f.button('Export cached rows as CSV').click();
+    f.button('Export cached rows as RAW CSV').click();
     assert.deepEqual(Array.from(f.csvs[0].columns.slice(-4), column => column.name), ['Pivot scope', 'Row grouping depth', 'Column grouping depth', 'Pivot selection']);
     assert.deepEqual(Array.from(f.csvs[0].rows[0].slice(-4)), ['row', 1, 0, JSON.stringify(selected)]);
     assert.deepEqual(drill.rows, [['original']]);
-    assert.ok(f.button('Export cached pivot groups with scope as CSV'));
+    assert.ok(f.button('Export cached pivot groups with scope as RAW CSV'));
   } finally { await f.finish(); }
 });
 
@@ -224,9 +225,9 @@ test('oversized cached pivot selection metadata offers streaming full CSV withou
   const f = fixture({ kind: 'pivot', selected });
   try {
     await Promise.resolve(); f.setSource(Array(10).fill('contributor')); f.select(); await f.drill().pending; f.flush();
-    const cached = f.button('Export cached rows as CSV');
+    const cached = f.button('Export cached rows as RAW CSV');
     assert.equal(cached.disabled, true); assert.match(cached.title, /scope metadata.*budget.*Download full results/);
-    assert.equal(f.csvs.length, 0); assert.ok(f.detailButton('Download full results'));
+    assert.equal(f.csvs.length, 0); assert.ok(f.detailButton('Download full results · RAW CSV'));
   } finally { await f.finish(); }
 });
 

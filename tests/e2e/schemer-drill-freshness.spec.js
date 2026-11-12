@@ -86,7 +86,7 @@ test('current drill discloses report/drill times, cached reopen is query-free, R
   const downloadEvent = new Promise(resolve => {
     page.once('download', resolve); page.context().once('page', popup => popup.once('download', resolve));
   });
-  await details.getByRole('button', { name: 'Download full results', exact: true }).click();
+  await details.getByRole('button', { name: 'Download full results · RAW CSV', exact: true }).click();
   const download = await downloadEvent;
   expect(await readFile(await download.path(), 'utf8')).toContain('Arrived before full export');
   await expect(details.locator('.drill-body')).toContainText('Changed while closed');

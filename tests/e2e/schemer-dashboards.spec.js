@@ -19,6 +19,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
       calculations:[{id:'share',label:'Share',operation:'percent_of',left:{output:field('id','count'),scope:'group'},right:{output:field('id','count'),scope:'source_population'},visible:true}],
       ...(calculated==='kpi'?{kpiComparison:{label:'Target',baseline:{constant:'50'},favorable:'higher'}}:{})});
   }
+  if (formats) Object.assign(fixture.dashboard.tiles[0], { kind: 'aggregate', numberFormats: [{ output: { table: 'person', column: 'id', aggregate: 'count', kind: 'value' }, style: 'currency', currency: 'EUR', precision: 2, percentScale: 'auto', unit: '', rules: [{ operator: 'lt', value: '0', label: 'Below target', symbol: 'down', tone: 'negative' }] }], formatLocale: 'de-DE' });
   if (jsonCells) {
     fixture.dashboard.tiles[0].kind = 'detail';
     fixture.dashboard.tiles[0].dimensions = [];
@@ -65,6 +66,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
   }
   function dataFor(tile, drill) {
     if(calculated&&!drill) return calculated==='kpi'?{columns:['Share','Target','Absolute variance','Variance (%)','KPI assessment'].map(name=>({name})),rows:[[40,50,-10,-20,'unfavorable']]}:{columns:[{name:'Organization'},{name:'Share'}],rows:[['HQ',40],['Field',60]]};
+    if (formats && !drill) return { rows: [['HQ', '9007199254740993.125'], ['Branch', '-0.0000001'], ['Missing', null]], columns: [{ name: 'org', dataType: 'text' }, { name: 'Count id', dataType: 'numeric' }] };
     if (pivot && !drill) {
       const rows = pivot === 'capacity' ? [[null, null, null, null, null, null, 0, 0, 'column_capacity', 5, false, 180, 'capacity']]
         : [[null, null, null, null, 39.1666666667, 4, 0, 0, 'data', 2, true, 180, 'grand_total'],
@@ -532,7 +534,7 @@ test('capped previews explain the limit and offer a full-result file download', 
     page.once('download', resolve);
     page.context().once('page', popup => popup.once('download', resolve));
   });
-  await expanded.getByRole('button', { name: 'Download full results', exact: true }).click();
+  await expanded.getByRole('button', { name: 'Download full results · RAW CSV', exact: true }).click();
   const download = await downloadEvent;
   expect(download.suggestedFilename()).toBe('schemer-results.csv');
   expect(requests.filter(request => request.path.endsWith('/export'))).toHaveLength(1);
@@ -546,10 +548,10 @@ test('cached CSV browser download preserves JSON object and array cells', async 
   await expect(tile.locator('.tile-status')).toContainText('1 rows cached');
   await tile.getByRole('heading', { name: 'Positions by org' }).click();
   const expanded = page.getByRole('dialog', { name: 'Positions by org', exact: true });
-  await expect(expanded.getByRole('button', { name: 'Export cached rows as CSV' })).toBeVisible();
+  await expect(expanded.getByRole('button', { name: 'Export cached rows as RAW CSV' })).toBeVisible();
 
   const downloadPromise = page.waitForEvent('download');
-  await expanded.getByRole('button', { name: 'Export cached rows as CSV' }).click();
+  await expanded.getByRole('button', { name: 'Export cached rows as RAW CSV' }).click();
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe('schemer-cached-rows.csv');
   expect(await readFile(await download.path(), 'utf8')).toBe(
@@ -621,7 +623,7 @@ test('renaming a dashboard keeps cached full-result downloads valid without reru
     page.once('download', resolve);
     page.context().once('page', popup => popup.once('download', resolve));
   });
-  await expanded.getByRole('button', { name: 'Download full results', exact: true }).click();
+  await expanded.getByRole('button', { name: 'Download full results · RAW CSV', exact: true }).click();
   const download = await downloadEvent;
   expect(download.suggestedFilename()).toBe('schemer-results.csv');
   expect(requests.filter(request => request.path.endsWith('/executions/stream'))).toHaveLength(1);
@@ -1189,11 +1191,11 @@ test('pivot matrix keeps labelled scrolling headers, totals population and exact
   expect(requests.findLast(request => request.body?.selection).body.selection).toEqual(selected);
   await expect(expanded.locator('.filter-chips')).toContainText('Pivot grand total');
   const downloadEvent = new Promise(resolve => { page.once('download', resolve); page.context().once('page', popup => popup.once('download', resolve)); });
-  await expanded.locator('.drill-pane').getByRole('button', { name: 'Download full results', exact: true }).click();
+  await expanded.locator('.drill-pane').getByRole('button', { name: 'Download full results · RAW CSV', exact: true }).click();
   await downloadEvent;
   expect(requests.findLast(request => request.path.endsWith('/export')).body.selection).toEqual(selected);
   await expanded.getByRole('button', { name: 'Workforce pivot', exact: true }).click();
-  await expect(expanded.getByRole('button', { name: 'Download full pivot groups', exact: true })).toBeVisible();
+  await expect(expanded.getByRole('button', { name: 'Download full pivot groups · RAW CSV', exact: true })).toBeVisible();
   for (const [pattern, kind, rd, cd, dimensions] of [
     [/^HQ · subtotal · All columns · Average person ID:/, 'subtotal', 1, 0, [['org', 'HQ']]],
     [/^HQ › 2024-01-01 · All columns · Average person ID:/, 'row', 2, 0, [['org', 'HQ'], ['hired_at', '2024-01-01']]],
@@ -1218,7 +1220,7 @@ test('pivot capacity blocks matrix allocation and offers editable recovery with 
   await expect(page.locator('.pivot-table')).toHaveCount(0);
   await page.locator('.analytics-tile').getByRole('heading', { name: 'Workforce pivot' }).click();
   const expanded = page.getByRole('dialog', { name: 'Workforce pivot', exact: true });
-  await expect(expanded.getByRole('button', { name: 'Download full pivot groups', exact: true })).toBeEnabled();
+  await expect(expanded.getByRole('button', { name: 'Download full pivot groups · RAW CSV', exact: true })).toBeEnabled();
   await expanded.getByRole('button', { name: 'Close expanded tile' }).click();
   await page.getByRole('button', { name: 'Edit Workforce pivot', exact: true }).click();
   const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
@@ -1267,4 +1269,29 @@ test('KPI comparison presents target variance and direction as accessible text',
   const comparison=page.getByRole('region',{name:'KPI target and variance'});
   await expect(comparison).toContainText('Target: 50');await expect(comparison).toContainText('Percentage variance: -20%');
   await expect(comparison).toContainText('unfavorable · higher is better');expect(errors).toEqual([]);
+});
+
+// Mounted on both desktop Chromium and the Pixel7 Android project; execution is coordinator-owned.
+test('business formats stay readable, keyboard-editable and separate from exact raw CSV', async ({ page }) => {
+  const { errors }=await mock(page,{formats:true});await page.goto('/schemer');
+  await page.locator('.analytics-tile').getByRole('heading',{name:'Positions by org'}).click();
+  const expanded=page.getByRole('dialog',{name:'Positions by org',exact:true});
+  await expect(expanded).toContainText('9.007.199.254.740.993,13');
+  await expect(expanded.locator('[data-number-tone="negative"]')).toContainText('▼ Below target');
+  await expect(expanded).toContainText('NULL');await expect(expanded).toContainText('CSV contains RAW values');
+  for(const width of [1440,390,320]) {
+    await page.setViewportSize({width,height:850});
+    const geometry=await expanded.evaluate(node=>({dialog:node.getBoundingClientRect().width,viewport:document.documentElement.clientWidth,body:document.documentElement.scrollWidth}));
+    expect(geometry.dialog).toBeLessThanOrEqual(geometry.viewport);expect(geometry.body).toBeLessThanOrEqual(geometry.viewport+2);
+  }
+  const downloaded=page.waitForEvent('download');await expanded.getByRole('button',{name:'Export cached rows as RAW CSV',exact:true}).click();
+  const download=await downloaded, contents=await readFile(await download.path(),'utf8');
+  expect(contents).toContain('9007199254740993.125');expect(contents).toContain('-0.0000001');expect(contents).not.toContain('€');expect(contents).not.toContain('Below target');
+  await expanded.getByRole('button',{name:'Close expanded tile',exact:true}).click();
+  await page.getByRole('button',{name:'Edit Positions by org',exact:true}).click();
+  const editor=page.getByRole('dialog',{name:'Configure analytics tile'});await editor.getByRole('tab',{name:'Number formats',exact:true}).click();
+  const precision=editor.getByLabel('Format 1 decimal places');await precision.focus();await precision.fill('4');
+  await editor.getByLabel('Format 1 rule 1 threshold').fill('-9007199254740993.000000001');
+  await editor.getByRole('button',{name:'Apply & run',exact:true}).focus();await page.keyboard.press('Enter');
+  await expect(editor).toBeHidden();expect(errors).toEqual([]);
 });

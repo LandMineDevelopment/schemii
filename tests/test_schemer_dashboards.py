@@ -468,3 +468,14 @@ def test_calculated_measure_and_exact_kpi_configuration_roundtrip_without_rows()
     with pytest.raises(ValidationError):
         create(tiles=[{**tile,'calculations':[{**tile['calculations'][0],'sql':'SELECT 1'}]}])
     assert 'rows' not in reopened['tiles'][0]
+
+
+def test_saved_number_format_metadata_is_exact_and_copy_isolated():
+    configured = {'id':'format','title':'Count','kind':'aggregate','measures':[{**FIELD,'aggregate':'count'}],
+        'numberFormats':[{'output':{**FIELD,'aggregate':'count','kind':'value'},'style':'number','precision':4,
+            'rules':[{'operator':'gt','value':'9007199254740993.000000001','label':'High','symbol':'up','tone':'positive'}]}], 'formatLocale':'de-DE'}
+    repo=InMemoryDashboardRepository();saved=repo.create('alice',create(tiles=[configured]))
+    read=repo.get('alice',saved.id)
+    assert read.tiles[0].number_formats[0].rules[0].value=='9007199254740993.000000001'
+    read.tiles[0].number_formats[0].rules[0].value='0'
+    assert repo.get('alice',saved.id).tiles[0].number_formats[0].rules[0].value=='9007199254740993.000000001'

@@ -113,6 +113,66 @@ class AggregateFilter(ReportOutput):
         return self
 
 
+FORMAT_LOCALES = ("en-US", "en-GB", "de-DE", "fr-FR", "es-ES", "pt-BR", "ja-JP", "zh-CN", "hi-IN", "ar-EG")
+
+
+def format_decimal(value):
+    if not isinstance(value, str) or len(value) > 200 or not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", value):
+        raise ValueError("Enter an exact finite decimal of at most 200 characters")
+    try:
+        number = Decimal(value)
+    except InvalidOperation:
+        raise ValueError("Enter a bounded finite decimal threshold") from None
+    if not number.is_finite() or abs(number.adjusted()) > 4096:
+        raise ValueError("The threshold magnitude must be between 1e-4096 and 1e4096")
+    return number
+
+
+class FormatOutput(ReportOutput):
+    kind: Literal["value", "comparison", "change", "percent_change", "running_total", "calculated", "kpi_baseline", "kpi_absolute", "kpi_percent"] = "value"
+
+
+class NumberRule(Contract):
+    operator: Literal["lt", "lte", "eq", "ne", "gte", "gt", "between", "is_null", "not_null"]
+    value: str | None = Field(default=None, max_length=200)
+    upper: str | None = Field(default=None, max_length=200)
+    tone: Literal["neutral", "positive", "caution", "negative"] = "neutral"
+    symbol: Literal["dot", "up", "down", "check", "warning"] = "dot"
+    label: str = Field(min_length=1, max_length=40)
+
+    @model_validator(mode="after")
+    def valid_rule(self):
+        if not self.label.strip() or any(ord(c) < 32 for c in self.label):
+            raise ValueError("Name the condition with plain readable text")
+        if self.operator in {"is_null", "not_null"}:
+            if self.value is not None or self.upper is not None:
+                raise ValueError("NULL rules do not take thresholds")
+        else:
+            lower = format_decimal(self.value)
+            if self.operator == "between":
+                if lower > format_decimal(self.upper):
+                    raise ValueError("The lower threshold must not exceed the upper threshold")
+            elif self.upper is not None:
+                raise ValueError("Only between rules take two thresholds")
+        return self
+
+
+class OutputNumberFormat(Contract):
+    output: FormatOutput
+    style: Literal["number", "currency", "percent"] = "number"
+    precision: int | None = Field(default=None, strict=True, ge=0, le=12)
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    percent_scale: Literal["auto", "fraction", "whole"] = "auto"
+    unit: str = Field(default="", max_length=24, pattern=r"^[\w °µ²³/·%.-]*$")
+    rules: list[NumberRule] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def valid_style(self):
+        if self.style == "currency" and self.currency is None:
+            raise ValueError("Choose a three-letter currency code")
+        return self
+
+
 class PivotTotals(Contract):
     row_subtotals: bool = True
     column_subtotals: bool = True
@@ -147,10 +207,15 @@ class DashboardTile(Contract):
     sort: list[ReportSort] = Field(default_factory=list, max_length=32)
     top_n: int | None = Field(default=None, strict=True, ge=1, le=2147483647)
     aggregate_filters: list[AggregateFilter] = Field(default_factory=list, max_length=32)
+    number_formats: list[OutputNumberFormat] = Field(default_factory=list, max_length=64)
+    format_locale: Literal["en-US", "en-GB", "de-DE", "fr-FR", "es-ES", "pt-BR", "ja-JP", "zh-CN", "hi-IN", "ar-EG"] | None = None
 
     @model_validator(mode="after")
     def valid_view(self):
         axes = tile_dimensions(self)
+        format_keys = [(item.output.table, item.output.column, item.output.aggregate, item.output.kind) for item in self.number_formats]
+        if len(set(format_keys)) != len(format_keys):
+            raise ValueError("Choose only one number format per semantic output")
         count = visible_measure_count(self)
         if len({item.id for item in self.calculations}) != len(self.calculations):
             raise ValueError("Calculated measure IDs must be unique")

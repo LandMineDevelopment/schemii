@@ -86,6 +86,7 @@ class _ReadCursor:
     export_position: int = 0
     export_pending: tuple[tuple[Any, ...], ...] = ()
     fixed_row_memory_bytes: int | None = None
+    type_oids: tuple[int, ...] = ()
 
 
 # Only these built-in scalar types have bounded wire output and ordinary Python
@@ -192,6 +193,7 @@ class PsycopgConsoleReadSession:
                 self._readers[statement_index] = _ReadCursor(
                     cursor=cursor, rows=(), statement=query,
                     fixed_row_memory_bytes=_fixed_row_memory_bytes(description),
+                    type_oids=tuple(column.type_code for column in description),
                 )
                 results.append(
                     ConsoleQueryResult(
@@ -280,8 +282,9 @@ class PsycopgConsoleReadSession:
                 pending.extend(batch)
             raw_row = pending.popleft()
             converted = tuple(
-                json_console_value(value, maximum_bytes=self._maximum_cell_bytes)
-                for value in raw_row
+                json_console_value(value, maximum_bytes=self._maximum_cell_bytes,
+                    type_oid=reader.type_oids[index] if index < len(reader.type_oids) else None)
+                for index, value in enumerate(raw_row)
             )
             row_bytes = len(json.dumps(converted, ensure_ascii=False).encode("utf-8"))
             if rows and used_bytes + row_bytes > self._page_memory_bytes:
@@ -546,11 +549,17 @@ def _execute_console_statements(
             rows: list[tuple[Any, ...]] = []
             result_bytes = 0
 
+            type_oids: tuple[int, ...] = ()
+            def described(columns):
+                nonlocal type_oids
+                type_oids = tuple(oid for _, oid in columns)
+
             def consume(raw_row):
                 nonlocal result_bytes
                 converted = tuple(
-                    json_console_value(value, maximum_bytes=maximum_cell_bytes)
-                    for value in raw_row
+                    json_console_value(value, maximum_bytes=maximum_cell_bytes,
+                        type_oid=type_oids[index] if index < len(type_oids) else None)
+                    for index, value in enumerate(raw_row)
                 )
                 row_bytes = len(json.dumps(converted, ensure_ascii=False).encode("utf-8"))
                 if result_bytes + row_bytes > maximum_result_bytes:
@@ -566,7 +575,7 @@ def _execute_console_statements(
                 result_bytes += row_bytes
 
             description, status_message = execute_incremental(
-                database_connection, statement, consume,
+                database_connection, statement, consume, on_description=described,
             )
             type_names = _console_type_names(
                 database_connection, tuple(oid for _, oid in description),
