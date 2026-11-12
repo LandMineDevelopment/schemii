@@ -1,7 +1,7 @@
 """Owner-scoped semantic modeling API, composed into the unified server."""
 
 from contextlib import contextmanager
-from typing import Annotated
+from typing import Annotated, Literal
 from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from pydantic import Field, StrictBool, ValidationError
@@ -239,9 +239,14 @@ def model_dependencies(model_id: str, request: Request,
 
 @router.delete("/models/{model_id}", status_code=204)
 def delete_model(model_id: str, request: Request, expected_revision: int = Query(ge=1),
+                 expected_layout_revision: int | None = Query(default=None, ge=1),
+                 expected_explore_revision: int | None = Query(default=None, ge=1),
+                 require_no_previews: Literal["true", "false"] = Query(default="false"),
                  principal: Principal = Depends(get_current_principal)):
     with api_errors():
-        request.app.state.services.models.delete(principal.user_id, model_id, expected_revision)
+        request.app.state.services.models.delete(principal.user_id, model_id, expected_revision,
+            expected_layout_revision=expected_layout_revision, expected_explore_revision=expected_explore_revision,
+            require_no_previews=require_no_previews == "true")
         return Response(status_code=204)
 
 

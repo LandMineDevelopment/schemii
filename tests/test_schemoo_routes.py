@@ -62,6 +62,60 @@ def test_save_revision_conflict_and_independent_layout_explore(setup):
     assert api.delete(url, params={"expected_revision": 2}).status_code == 204
 
 
+@pytest.mark.parametrize("change", ["layout", "explore", "preview"])
+def test_optional_delete_state_guards_preserve_independent_changes_and_hidden_owners(setup, change):
+    api, model, _, calls = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    guards = {"expected_revision": 1, "expected_layout_revision": 1,
+              "expected_explore_revision": 1, "require_no_previews": "true"}
+    assert api.get(url + "/previews").json() == {"previews": []}
+    if change == "preview":
+        assert api.post(url + "/previews", json={"name": "Saved after preflight", "explore": EXPLORE}).status_code == 201
+    else:
+        body = {"expectedRevision": 1, change: {"positions": [{"id": "people", "x": 3, "y": 7}]} if change == "layout" else EXPLORE}
+        assert api.put(url + "/" + change, json=body).status_code == 200
+    current, previews = api.get(url).json(), api.get(url + "/previews").json()
+    profile = api.get(f"/api/v1/connections/{model['connectionId']}").json()
+    before_calls = len(calls)
+    rejected = api.delete(url, params=guards)
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["error"]["code"] == "model_revision_conflict"
+    assert ("saved previews" if change == "preview" else change) in rejected.json()["error"]["message"]
+    assert rejected.json()["error"]["details"]["currentRevision"] == (1 if change == "preview" else 2)
+    assert api.get(url).json() == current and api.get(url + "/previews").json() == previews
+    api.app.dependency_overrides[get_current_principal] = lambda: Principal(user_id="other", authentication_source="local_prototype")
+    assert api.delete(url, params=guards).status_code == 404
+    api.app.dependency_overrides.clear()
+    assert api.get(f"/api/v1/connections/{model['connectionId']}").json() == profile
+    assert len(calls) == before_calls
+    # Explicit false retains deliberate preview cascade; omitted independent
+    # guards do not constrain a caller's intentional current-model deletion.
+    assert api.delete(url, params={"expected_revision": 1, "require_no_previews": "false"}).status_code == 204
+
+
+@pytest.mark.parametrize("key,value", [
+    ("expected_layout_revision", "0"), ("expected_layout_revision", "-1"),
+    ("expected_layout_revision", "not-an-integer"), ("expected_explore_revision", "0"),
+    ("expected_explore_revision", "1.5"), ("require_no_previews", "yes"),
+    ("require_no_previews", "1"), ("require_no_previews", "0"),
+    ("require_no_previews", ""), ("require_no_previews", "True"),
+])
+def test_invalid_optional_delete_guards_are_rejected_without_model_mutation(setup, key, value):
+    api, model, _, calls = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    before = len(calls)
+    response = api.delete(url, params={"expected_revision": 1, key: value})
+    assert response.status_code == 422, response.text
+    assert api.get(url).json() == model and len(calls) == before
+
+
+def test_matching_optional_delete_guards_allow_empty_preview_model_cleanup(setup):
+    api, model, _, _ = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    assert api.delete(url, params={"expected_revision": 1, "expected_layout_revision": 1,
+        "expected_explore_revision": 1, "require_no_previews": "true"}).status_code == 204
+
+
 def test_duplicate_saved_model_without_catalog_access_and_with_owner_fencing(setup):
     api, model, _, calls = setup
     url = f"/api/v1/schemoo/models/{model['id']}"
@@ -451,6 +505,10 @@ def test_model_deletion_reports_dashboards_and_preserves_source_connection(setup
     assert blocked.status_code == 409
     assert blocked.json()["error"]["code"] == "model_in_use"
     assert blocked.json()["error"]["details"] == {"dashboards": expected}
+    guarded = api.delete(url, params={"expected_revision": 1, "expected_layout_revision": 1,
+        "expected_explore_revision": 1, "require_no_previews": "true"})
+    assert guarded.status_code == 409 and guarded.json()["error"]["details"] == {"dashboards": expected}
+    assert api.get(f"/api/v1/schemer/dashboards/{dashboard['id']}").json() == dashboard
     assert api.get(url).status_code == 200
     assert api.delete(f"/api/v1/schemer/dashboards/{dashboard['id']}",
                       params={"expectedRevision": 1}).status_code == 204
