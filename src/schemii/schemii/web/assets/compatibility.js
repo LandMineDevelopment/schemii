@@ -21,10 +21,15 @@ export function materializedAuthoringGuidance(existing = false) {
 export function renderWorkspaceCompatibility(host, { workspace, design, loading = false, reviewDisabled = false, exportDisabled = false, onReview, onExport }) {
   const summary = workspace?.importSummary;
   const available = Boolean(design) && !loading;
-  const actionState = `${available}:${reviewDisabled}:${exportDisabled}`;
   const previous = renderedWorkspaces.get(host);
-  if (previous?.summary === summary && previous?.workspaceId === workspace?.id && previous?.actionState === actionState) return;
-  renderedWorkspaces.set(host, { summary, workspaceId: workspace?.id, actionState });
+  if (previous && previous.summary === summary && previous.workspaceId === workspace?.id) {
+    previous.onReview = onReview; previous.onExport = onExport;
+    if (previous.reviewButton) previous.reviewButton.disabled = !available || reviewDisabled;
+    if (previous.exportButton) previous.exportButton.disabled = !available || exportDisabled;
+    return;
+  }
+  const rendered = { summary, workspaceId: workspace?.id, onReview, onExport };
+  renderedWorkspaces.set(host, rendered);
   replace(host); host.hidden = !summary;
   if (!summary) return;
   const value = importCompatibility(workspace);
@@ -34,9 +39,10 @@ export function renderWorkspaceCompatibility(host, { workspace, design, loading 
     element('span', { text: `Import snapshot: ${formatTimestamp(value.capturedAt)}` }),
   ]);
   const actions = element('div', { className: 'compatibility-actions' });
-  for (const [label, callback, disabled] of [['Review migration safety', onReview, reviewDisabled], ['Export editable schema SQL', onExport, exportDisabled]]) {
+  for (const [label, action, disabled] of [['Review migration safety', 'Review', reviewDisabled], ['Export editable schema SQL', 'Export', exportDisabled]]) {
     const button = element('button', { type: 'button', className: 'ui-button compact', text: label });
-    button.disabled = !available || disabled; button.addEventListener('click', callback); actions.append(button);
+    rendered[`${action.toLowerCase()}Button`] = button;
+    button.disabled = !available || disabled; button.addEventListener('click', () => rendered[`on${action}`]?.()); actions.append(button);
   }
   host.append(heading, element('p', { text: value.complete
     ? 'Import coverage is historical. A fresh migration review decides which operations are safe against the current target.'

@@ -32,6 +32,8 @@ test("historical coverage and dependency uncertainty never establish current ope
 
 test("workspace guidance is visible before editing and explains omissions, SQL export and recovery", t => {
   withDom(t); const host = new CompatibilityNode(); let reviews = 0, exports = 0;
+  renderWorkspaceCompatibility(host, {}); assert.equal(host.hidden, true); assert.equal(host.textContent, "");
+  renderWorkspaceCompatibility(host, {}); assert.equal(host.hidden, true);
   const value = { workspace: { id: "one", importSummary: summary }, design: { revision: 1 }, onReview: () => { reviews += 1; }, onExport: () => { exports += 1; } };
   renderWorkspaceCompatibility(host, value); assert.equal(host.hidden, false);
   assert.match(host.textContent, /protected PostgreSQL features/); assert.match(host.textContent, /omitted features are not editable or reconstructed/);
@@ -49,6 +51,63 @@ test("protected-feature search and paging keep large imports usable without losi
   const more = nodes(host).find(node => node.textContent === "Show more protected features"); more.listeners.click(); assert.equal(nodes(host).filter(node => node.tagName === "article").length, 60);
   const search = nodes(host).find(node => node.tagName === "input"); search.value = "protected_74"; search.listeners.input(); assert.equal(nodes(host).filter(node => node.tagName === "article").length, 1); assert.equal(more.hidden, true);
   search.value = "absent"; search.listeners.input(); assert.match(host.textContent, /No matching protected features/);
+});
+
+test("readiness and action updates preserve disclosure, filter, focus and scroll with current callbacks", t => {
+  withDom(t); const host = new CompatibilityNode(); const calls = [];
+  const workspace = { id: "one", importSummary: { ...summary, issues: [issue, { ...issue, objectName: "public.other" }] } };
+  const initial = { workspace, design: {}, loading: true, onReview: () => calls.push("old review"), onExport: () => calls.push("old export") };
+  renderWorkspaceCompatibility(host, initial);
+  const details = nodes(host).find(node => node.tagName === "details"); details.open = true;
+  const search = nodes(host).find(node => node.tagName === "input"); search.value = "Archived"; search.listeners.input();
+  globalThis.document.activeElement = search; host.scrollTop = 73;
+  const [review, exportButton] = nodes(host).filter(node => node.tagName === "button");
+  assert.equal(review.disabled, true); assert.equal(exportButton.disabled, true);
+
+  renderWorkspaceCompatibility(host, { ...initial, loading: false, onReview: () => calls.push("ready review"), onExport: () => calls.push("ready export") });
+  assert.equal(nodes(host).find(node => node.tagName === "details"), details);
+  assert.equal(details.open, true); assert.equal(search.value, "Archived");
+  assert.equal(globalThis.document.activeElement, search); assert.equal(host.scrollTop, 73);
+  assert.equal(nodes(host).filter(node => node.tagName === "article").length, 1);
+  assert.equal(review.disabled, false); assert.equal(exportButton.disabled, false);
+  review.listeners.click(); exportButton.listeners.click();
+  assert.deepEqual(calls, ["ready review", "ready export"]);
+
+  renderWorkspaceCompatibility(host, { ...initial, loading: false, reviewDisabled: true, onExport: () => calls.push("restricted export") });
+  assert.equal(review.disabled, true); assert.equal(exportButton.disabled, false); assert.equal(details.open, true);
+  exportButton.listeners.click();
+  renderWorkspaceCompatibility(host, { ...initial, loading: false, exportDisabled: true, onReview: () => calls.push("restricted review") });
+  assert.equal(review.disabled, false); assert.equal(exportButton.disabled, true); assert.equal(search.value, "Archived");
+  review.listeners.click();
+  // Callback refresh must also work when the enabled/disabled state is unchanged.
+  renderWorkspaceCompatibility(host, { ...initial, loading: false, exportDisabled: true, onReview: () => calls.push("latest review") });
+  review.listeners.click();
+  assert.deepEqual(calls, ["ready review", "ready export", "restricted export", "restricted review", "latest review"]);
+  renderWorkspaceCompatibility(host, { ...initial, design: null, loading: false });
+  assert.equal(review.disabled, true); assert.equal(exportButton.disabled, true); assert.equal(details.open, true);
+});
+
+test("workspace or import-summary replacement resets disclosure context and action callbacks", t => {
+  withDom(t); const host = new CompatibilityNode(); const calls = [];
+  const value = { workspace: { id: "one", importSummary: summary }, design: {}, onReview: () => calls.push("one") };
+  renderWorkspaceCompatibility(host, value);
+  const originalDetails = nodes(host).find(node => node.tagName === "details"); originalDetails.open = true;
+  const originalSearch = nodes(host).find(node => node.tagName === "input"); originalSearch.value = "Archived";
+  renderWorkspaceCompatibility(host, { ...value, workspace: { id: "two", importSummary: summary }, onReview: () => calls.push("two") });
+  const nextDetails = nodes(host).find(node => node.tagName === "details");
+  assert.notEqual(nextDetails, originalDetails); assert.notEqual(nextDetails.open, true);
+  assert.equal(nodes(host).find(node => node.tagName === "input").value, "");
+  nodes(host).find(node => node.tagName === "button").listeners.click();
+  assert.deepEqual(calls, ["two"]);
+
+  const updated = { ...summary, complete: true, issues: [], migrationGuidance: "Updated import" };
+  renderWorkspaceCompatibility(host, { ...value, workspace: { id: "two", importSummary: updated }, onReview: () => calls.push("updated") });
+  assert.match(host.textContent, /Editable import complete/);
+  assert.equal(nodes(host).some(node => node.tagName === "details"), false);
+  nodes(host).find(node => node.tagName === "button").listeners.click();
+  assert.deepEqual(calls, ["two", "updated"]);
+  renderWorkspaceCompatibility(host, { ...value, workspace: { id: "two" } });
+  assert.equal(host.hidden, true); assert.equal(host.textContent, "");
 });
 
 test("fresh review renders server blockers and unknowns independently of editable coverage", t => {
