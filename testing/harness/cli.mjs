@@ -65,6 +65,8 @@ Setup:     --copies-per-persona 20 --admin-credentials /private/admin.json
 Author:    --accounts qa_report_author_001[,qa_report_author_002]
 Chat:      --account qa_designer_001 --admin-credentials /private/admin.json
            [--model gpt-6-luna --reasoning default]
+Viewer:    --account qa_report_viewer_001 --author qa_report_author_001
+           --admin-credentials /private/admin.json [--expected-pairing-file FILE]
 Writer:    --account qa_designer_010 --admin-credentials /private/admin.json
 Data:      --space qa_modeler_001|all
 Selection: --persona modeler --agents 1..10 OR --accounts USER1,USER2
@@ -106,7 +108,7 @@ const commandOptions = {
   setup: ['copies-per-persona','admin-credentials'], 'provision-chat': ['account','admin-credentials','model','reasoning'],
   'cleanup-author-fixture': ['accounts'],
   'cleanup-sweep': ['run','workspace-fixtures','reset-writers'],
-  'provision-writer': ['account','admin-credentials'], 'provision-viewer': ['account','author','admin-credentials'], 'unpair-viewer': ['account','author','admin-credentials'], 'reset-writer': ['account'], 'verify-writer': ['account'],
+  'provision-writer': ['account','admin-credentials'], 'provision-viewer': ['account','author','admin-credentials','expected-pairing-file'], 'unpair-viewer': ['account','author','admin-credentials','expected-pairing-file'], 'reset-writer': ['account'], 'verify-writer': ['account'],
   reset: ['space'], 'verify-data': ['space'], 'check-reset': ['space'],
   'export-credentials': ['output'], 'import-credentials': ['input'],
   plan: [...selectionOptions,'headless'],
@@ -367,7 +369,7 @@ async function execute(command,o) {
     if(!/^qa_report_viewer_[0-9]{3}$/.test(o.account||'')||!/^qa_report_author_[0-9]{3}$/.test(o.author||'')||!o['admin-credentials'])throw invalid('provision-viewer needs --account VIEWER --author AUTHOR --admin-credentials FILE.');
     await privateJSON(resolve(o['admin-credentials']));
     return withFileLock(deploymentLockPath(root),()=>withAvailableAccounts([o.account,o.author],()=>
-      runCommand('python',['testing/provision.py',command==='unpair-viewer'?'unpair-viewer':'viewer','--account',o.account,'--author',o.author,'--admin-credentials',resolve(o['admin-credentials']),'--state-dir',stateDir]),{root}));
+      runCommand('python',['testing/provision.py',command==='unpair-viewer'?'unpair-viewer':'viewer','--account',o.account,'--author',o.author,'--admin-credentials',resolve(o['admin-credentials']),'--state-dir',stateDir,...(o['expected-pairing-file']?['--expected-pairing-file',o['expected-pairing-file']]:[])]),{root}));
   }
   if(command==='provision-writer') {
     if(!o['admin-credentials']||!o.account)throw invalid('--admin-credentials and --account are required.');

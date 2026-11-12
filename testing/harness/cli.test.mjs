@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, writeFile, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, readdir, mkdir, copyFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -123,4 +123,68 @@ test('prepare requires credentials for every actual selected reviewer before bro
   assert.equal(result.status, 4, result.output);
   assert.match(result.output, /Credential missing for qa_report_author_014/);
   assert.deepEqual(await readdir(directory), ['credentials.json']);
+});
+
+test('viewer CLI forwards optional expectation unchanged while deployment and account guards remain held', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'schemii-cli-viewer-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const harness = join(directory, 'testing', 'harness');
+  await mkdir(harness, { recursive: true });
+  // Run the actual dispatcher and account/deployment lock implementation against
+  // disposable paths. The Python stand-in observes locks, never an application.
+  for (const name of ['cli.mjs', 'leases.mjs']) await copyFile(new URL(name, import.meta.url), join(harness, name));
+  await writeFile(join(harness, 'store.mjs'), `
+    import { readFile, stat } from 'node:fs/promises';
+    export const root = ${JSON.stringify(directory)};
+    export const privateJSON = async path => {
+      const info = await stat(path);
+      if (!info.isFile() || (info.mode & 0o077)) throw new Error('Invalid private fixture');
+      return JSON.parse(await readFile(path, 'utf8'));
+    };
+    export const runPath = () => { throw new Error('Unexpected run access'); };
+    export const readJSON = privateJSON, writeJSON = runPath, privateDir = runPath,
+      credentials = runPath, reportHTML = runPath, stamp = runPath;
+  `);
+  await writeFile(join(harness, 'deployment.mjs'), `
+    export const deploymentLockPath = root => root + '/deployment.lock';
+    export const sourceIdentity = () => { throw new Error('Unexpected deployment access'); };
+  `);
+  await writeFile(join(harness, 'native.mjs'), `
+    export const importVerification = () => { throw new Error('Unexpected native action'); };
+    export const importRemediation = importVerification, acceptance = importVerification;
+  `);
+  await writeFile(join(harness, 'prerequisites.mjs'), `
+    export const expandFixtureScenario = () => { throw new Error('Unexpected prerequisite action'); };
+  `);
+  const adminFile = join(directory, 'admin.json');
+  await writeFile(adminFile, '{}', { mode: 0o600 });
+  await writeFile(join(directory, 'python'), `#!/usr/bin/env node
+    const { spawnSync } = require('node:child_process');
+    const { join } = require('node:path');
+    const root = process.cwd();
+    const held = name => spawnSync('flock', ['--nonblock', join(root, name), 'true']).status === 1;
+    console.log(JSON.stringify({ args: process.argv.slice(2),
+      deploymentHeld: held('deployment.lock'), accountsHeld: held('qa-account-reservations.lock') }));
+  `, { mode: 0o700 });
+  const base = ['--account', 'qa_report_viewer_001', '--author', 'qa_report_author_001', '--admin-credentials', adminFile];
+  const expectation = './private fixture/expectation.json';
+  for (const command of ['provision-viewer', 'unpair-viewer']) {
+    for (const optional of [[], ['--expected-pairing-file', expectation]]) {
+      const result = spawnSync(process.execPath, [join(harness, 'cli.mjs'), command, ...base, ...optional], {
+        encoding: 'utf8', env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, SCHEMII_QA_STATE_DIRECTORY: join(directory, 'state') },
+      });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const receipt = JSON.parse(result.stdout);
+      assert.equal(receipt.deploymentHeld, true);
+      assert.equal(receipt.accountsHeld, true);
+      assert.deepEqual(receipt.args, ['testing/provision.py', command === 'provision-viewer' ? 'viewer' : command,
+        ...base, '--state-dir', join(directory, 'state'), ...optional]);
+    }
+    for (const invalid of [['--expected-pairing-file'], ['--expected-pairing-file', ''],
+      ['--expected-pairing-file', expectation, '--expected-pairing-file', expectation]]) {
+      const result = invoke(command, [...base, ...invalid]);
+      assert.equal(result.status, 2, result.output);
+      assert.match(result.output, /needs a value|Invalid or repeated option/);
+    }
+  }
 });

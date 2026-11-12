@@ -248,11 +248,73 @@ def verify_viewer(user, slot):
     user.call("GET", "/api/v1/schemii/workspaces", expected=403)
 
 
-def provision_viewer(directory, admin_file, username, author_username):
+def validate_pairing_expectation(value, operation):
+    """Expectations contain only the exact password-free retained projections."""
+    viewer_keys = {"username", "accountId", "provisioned", "reportViewerFixture"}
+    author_keys = {"username", "accountId", "connectionId", "schema", "reportAuthorFixture"}
+    pairing_keys = {"authorUsername", "authorAccountId", "connectionId", "namespace", "modelId", "dashboardId"}
+    if (not isinstance(value, dict) or set(value) != {"schemaVersion", "operation", "viewer", "author"}
+            or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
+            or value["operation"] != operation):
+        raise ValueError("Invalid pairing expectation schema or operation")
+    viewer, author = value["viewer"], value["author"]
+    if (not isinstance(viewer, dict) or set(viewer) != viewer_keys
+            or not isinstance(author, dict) or set(author) != author_keys
+            or type(viewer["provisioned"]) is not bool
+            or any(not isinstance(viewer[key], str) or not viewer[key] for key in ("username", "accountId"))
+            or any(not isinstance(author[key], str) or not author[key] for key in ("username", "accountId", "connectionId", "schema"))):
+        raise ValueError("Invalid pairing expectation projections")
+    fixture, pairing = author["reportAuthorFixture"], viewer["reportViewerFixture"]
+    if (not isinstance(fixture, dict) or set(fixture) != {"modelId", "dashboardId"}
+            or any(not isinstance(item, str) or not item for item in fixture.values())
+            or (pairing is not None and (not isinstance(pairing, dict) or set(pairing) != pairing_keys
+                or any(not isinstance(item, str) or not item for item in pairing.values())))):
+        raise ValueError("Invalid pairing expectation fixture projections")
+    return value
+
+
+def read_pairing_expectation(path, operation):
+    """Read once from a private, bounded regular file while provision is locked."""
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("Duplicate pairing expectation key")
+            value[key] = item
+        return value
+
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > 16 * 1024:
+                raise ValueError("Invalid private pairing expectation file")
+            content = stream.read(16 * 1024 + 1)
+            if len(content) > 16 * 1024:
+                raise ValueError("Oversized pairing expectation file")
+        value = json.loads(content.decode("utf-8"), object_pairs_hook=unique_object)
+        return validate_pairing_expectation(value, operation)
+    except (OSError, ValueError, RecursionError) as error:
+        # Neither paths nor supplied expected resource values belong in diagnostics.
+        raise ValueError("Invalid private pairing expectation file or contents") from error
+
+
+def check_pairing_expectation(expected, operation, viewer, author):
+    if expected is None:
+        return
+    validate_pairing_expectation(expected, operation)
+    if (not viewer or not author or type(viewer.get("provisioned")) is not bool
+            or {key: viewer.get(key) for key in expected["viewer"]} != expected["viewer"]
+            or {key: author.get(key) for key in expected["author"]} != expected["author"]):
+        raise ValueError("Pairing expectation does not match retained viewer/author state")
+
+
+def provision_viewer(directory, admin_file, username, author_username, *, expected=None):
     """Explicit opt-in pairing; never discover or adopt a dashboard by name."""
     registry = registry_load(directory)
     slots = {slot["username"]: slot for slot in registry["slots"]}
     viewer, author = slots.get(username), slots.get(author_username)
+    check_pairing_expectation(expected, "pair", viewer, author)
     if (not viewer or viewer["persona"] != "report_viewer" or not viewer.get("accountId")
             or not author or author["persona"] != "report_author" or not author.get("provisioned")
             or author.get("reportAuthorCleanupStarted") or not author.get("accountId") or not author.get("connectionId")
@@ -309,10 +371,12 @@ def provision_viewer(directory, admin_file, username, author_username):
         admin.logout()
 
 
-def unpair_viewer(directory, admin_file, username, author_username):
+def unpair_viewer(directory, admin_file, username, author_username, *, expected=None):
     """Revoke only the exact retained pairing, keeping dependency until verified."""
     registry = registry_load(directory)
-    viewer = next((slot for slot in registry["slots"] if slot["username"] == username), None)
+    slots = {slot["username"]: slot for slot in registry["slots"]}
+    viewer, author = slots.get(username), slots.get(author_username)
+    check_pairing_expectation(expected, "unpair", viewer, author)
     if not viewer or viewer["persona"] != "report_viewer" or not viewer.get("accountId"):
         raise ValueError("Unpair requires a retained report viewer")
     pairing = viewer.get("reportViewerFixture")
@@ -1002,10 +1066,12 @@ def main():
     viewer_parser.add_argument("--admin-credentials", type=Path, required=True)
     viewer_parser.add_argument("--account", required=True)
     viewer_parser.add_argument("--author", required=True)
+    viewer_parser.add_argument("--expected-pairing-file", type=Path)
     unpair_parser = subparsers.add_parser("unpair-viewer", help="Revoke only one exact retained shared report pairing")
     unpair_parser.add_argument("--admin-credentials", type=Path, required=True)
     unpair_parser.add_argument("--account", required=True)
     unpair_parser.add_argument("--author", required=True)
+    unpair_parser.add_argument("--expected-pairing-file", type=Path)
     author_cleanup_parser = subparsers.add_parser("cleanup-author", help="Delete only ledgered report-author starter dashboards and models")
     author_cleanup_parser.add_argument("--accounts", required=True, help="Comma-separated retained report-author QA usernames")
     export_parser = subparsers.add_parser("export", help="Export private credentials without deployment-specific IDs")
@@ -1034,9 +1100,11 @@ def main():
         elif args.command == "writer":
             result = provision_writer(directory, args.admin_credentials, args.account)
         elif args.command == "viewer":
-            result = provision_viewer(directory, args.admin_credentials, args.account, args.author)
+            expected = read_pairing_expectation(args.expected_pairing_file, "pair") if args.expected_pairing_file else None
+            result = provision_viewer(directory, args.admin_credentials, args.account, args.author, expected=expected)
         elif args.command == "unpair-viewer":
-            result = unpair_viewer(directory, args.admin_credentials, args.account, args.author)
+            expected = read_pairing_expectation(args.expected_pairing_file, "unpair") if args.expected_pairing_file else None
+            result = unpair_viewer(directory, args.admin_credentials, args.account, args.author, expected=expected)
         elif args.command == "cleanup-author":
             selected = args.accounts.split(",")
             if any(not re.fullmatch(r"qa_report_author_[0-9]{3}", name) for name in selected):

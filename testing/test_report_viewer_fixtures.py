@@ -1,6 +1,11 @@
 """Offline supported-API pairing and dependency protection; no live fixtures."""
 
+import contextlib
+import fcntl
+import io
 import json
+import os
+import sys
 import tempfile
 import unittest
 from copy import deepcopy
@@ -100,7 +105,7 @@ class ReportViewerFixturesTest(unittest.TestCase):
             self.admin_file, {"username": "admin", "password": "private"}
         )
 
-    def pair(self):
+    def pair(self, *, expected=None):
         with patch.object(
             provision, "Client", side_effect=[self.admin, self.owner, self.reader]
         ):
@@ -109,7 +114,287 @@ class ReportViewerFixturesTest(unittest.TestCase):
                 self.admin_file,
                 self.viewer["username"],
                 self.author["username"],
+                expected=expected,
             )
+
+    def expectation(self, operation):
+        author, viewer = provision.registry_load(self.directory)["slots"]
+        return {
+            "schemaVersion": 1,
+            "operation": operation,
+            "viewer": {
+                key: viewer.get(key)
+                for key in (
+                    "username",
+                    "accountId",
+                    "provisioned",
+                    "reportViewerFixture",
+                )
+            },
+            "author": {
+                key: author.get(key)
+                for key in (
+                    "username",
+                    "accountId",
+                    "connectionId",
+                    "schema",
+                    "reportAuthorFixture",
+                )
+            },
+        }
+
+    def assert_expected_refusal(self, operation, expected):
+        before = (self.directory / "registry.json").read_bytes()
+        function = (
+            provision.provision_viewer
+            if operation == "pair"
+            else provision.unpair_viewer
+        )
+        with (
+            patch.object(provision, "Client") as client,
+            self.assertRaises(ValueError) as raised,
+        ):
+            function(
+                self.directory,
+                self.admin_file,
+                self.viewer["username"],
+                self.author["username"],
+                expected=expected,
+            )
+        client.assert_not_called()
+        self.assertEqual((self.directory / "registry.json").read_bytes(), before)
+        for value in (
+            "private-resource-sentinel",
+            self.viewer["accountId"],
+            self.author["accountId"],
+        ):
+            self.assertNotIn(value, str(raised.exception))
+
+    def test_expected_pair_refuses_author_and_viewer_drift_before_client(self):
+        expected = self.expectation("pair")
+        original = provision.registry_load(self.directory)
+        cases = [
+            (0, "accountId", "private-resource-sentinel"),
+            (0, "connectionId", "pg_" + "8" * 32),
+            (
+                0,
+                "reportAuthorFixture",
+                {"modelId": "model_" + "8" * 32, "dashboardId": self.dashboard["id"]},
+            ),
+            (
+                0,
+                "reportAuthorFixture",
+                {
+                    "modelId": self.author["reportAuthorFixture"]["modelId"],
+                    "dashboardId": "dashboard_" + "8" * 32,
+                },
+            ),
+            (1, "accountId", "private-resource-sentinel"),
+            (1, "provisioned", False),
+            (1, "provisioned", 1),
+        ]
+        for index, key, value in cases:
+            with self.subTest(slot=index, key=key, value_type=type(value).__name__):
+                changed = deepcopy(original)
+                changed["slots"][index][key] = value
+                provision.write_private(self.directory / "registry.json", changed)
+                self.assert_expected_refusal("pair", expected)
+        provision.write_private(self.directory / "registry.json", original)
+        self.assertTrue(self.pair(expected=expected)["verified"])
+        # An already-paired current viewer no longer matches its unpaired baseline.
+        self.assert_expected_refusal("pair", expected)
+
+    def test_expected_unpair_refuses_changed_pair_receipt_before_client(self):
+        self.pair()
+        expected = self.expectation("unpair")
+        original = provision.registry_load(self.directory)
+        for field, value in (
+            ("accountId", "private-resource-sentinel"),
+            ("connectionId", "pg_" + "8" * 32),
+            ("modelId", "model_" + "8" * 32),
+            ("dashboardId", "dashboard_" + "8" * 32),
+            ("viewerAccountId", "private-resource-sentinel"),
+            ("viewerProvisioned", False),
+            ("missingAuthor", None),
+        ):
+            with self.subTest(field=field):
+                changed = deepcopy(original)
+                author, viewer = changed["slots"]
+                if field in ("modelId", "dashboardId"):
+                    author["reportAuthorFixture"][field] = value
+                    viewer["reportViewerFixture"][field] = value
+                elif field in ("accountId", "connectionId"):
+                    author[field] = value
+                    viewer["reportViewerFixture"][
+                        "authorAccountId" if field == "accountId" else field
+                    ] = value
+                elif field == "viewerAccountId":
+                    viewer["accountId"] = value
+                elif field == "viewerProvisioned":
+                    viewer["provisioned"] = value
+                else:
+                    changed["slots"].remove(author)
+                provision.write_private(self.directory / "registry.json", changed)
+                self.assert_expected_refusal("unpair", expected)
+        provision.write_private(self.directory / "registry.json", original)
+        with patch.object(provision, "Client", side_effect=[self.admin, self.reader]):
+            result = provision.unpair_viewer(
+                self.directory,
+                self.admin_file,
+                self.viewer["username"],
+                self.author["username"],
+                expected=expected,
+            )
+        self.assertTrue(result["unpaired"])
+        # A saved pair receipt cannot authorize an already-unpaired tuple.
+        self.assert_expected_refusal("unpair", expected)
+
+    def test_expected_schema_operation_and_identity_mismatches_refuse_before_client(
+        self,
+    ):
+        expected = self.expectation("pair")
+        cases = [
+            [],
+            {},
+            {**expected, "schemaVersion": True},
+            {**expected, "schemaVersion": 1.0},
+            {**expected, "operation": "unpair"},
+            {**expected, "password": "private-resource-sentinel"},
+            {
+                **expected,
+                "viewer": {
+                    **expected["viewer"],
+                    "username": "private-resource-sentinel",
+                },
+            },
+            {
+                **expected,
+                "author": {
+                    **expected["author"],
+                    "username": "private-resource-sentinel",
+                },
+            },
+            {**expected, "viewer": {**expected["viewer"], "provisioned": 1}},
+            {
+                **expected,
+                "viewer": {**expected["viewer"], "extra": "private-resource-sentinel"},
+            },
+            {
+                **expected,
+                "author": {**expected["author"], "extra": "private-resource-sentinel"},
+            },
+            {**expected, "author": {**expected["author"], "reportAuthorFixture": {}}},
+            {
+                **expected,
+                "author": {
+                    **expected["author"],
+                    "reportAuthorFixture": {
+                        **expected["author"]["reportAuthorFixture"],
+                        "extra": True,
+                    },
+                },
+            },
+            {**expected, "viewer": {**expected["viewer"], "reportViewerFixture": {}}},
+        ]
+        # None is the explicit legacy opt-out; malformed JSON null is rejected by the file reader.
+        for index, malformed in enumerate(cases):
+            with self.subTest(case=index):
+                self.assert_expected_refusal("pair", malformed)
+        self.assert_expected_refusal("unpair", expected)
+
+    def test_expected_file_is_bounded_private_regular_strict_json(self):
+        path = self.directory / "expectation.json"
+        expected = self.expectation("pair")
+        provision.write_private(path, expected)
+        self.assertEqual(provision.read_pairing_expectation(path, "pair"), expected)
+        contents = [
+            "{",
+            "null",
+            "[]",
+            json.dumps({**expected, "operation": "unpair"}),
+            '{"schemaVersion":1,"schemaVersion":1}',
+            " " * (16 * 1024 + 1),
+            b"\xff",
+            "[" * 2000,
+        ]
+        for index, content in enumerate(contents):
+            with self.subTest(case=index):
+                path.write_bytes(
+                    content if isinstance(content, bytes) else content.encode()
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "Invalid private pairing expectation"
+                ):
+                    provision.read_pairing_expectation(path, "pair")
+        provision.write_private(path, expected)
+        path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            provision.read_pairing_expectation(path, "pair")
+        path.chmod(0o600)
+        link = self.directory / "expectation-link.json"
+        link.symlink_to(path)
+        for invalid in (link, self.directory, self.directory / "missing"):
+            with self.subTest(path_kind=invalid.name), self.assertRaises(ValueError):
+                provision.read_pairing_expectation(invalid, "pair")
+        fifo = self.directory / "expectation-fifo"
+        os.mkfifo(fifo, 0o600)
+        with self.assertRaises(ValueError):
+            provision.read_pairing_expectation(fifo, "pair")
+
+    def test_main_reads_and_checks_expected_pairing_only_inside_provision_lock(self):
+        read = provision.read_pairing_expectation
+        check = provision.check_pairing_expectation
+
+        def assert_locked():
+            with (self.directory / ".provision.lock").open("r+") as contender:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        def locked_read(path, operation):
+            assert_locked()
+            return read(path, operation)
+
+        def locked_check(*args):
+            assert_locked()
+            return check(*args)
+
+        for command, operation in (("viewer", "pair"), ("unpair-viewer", "unpair")):
+            with self.subTest(command=command):
+                path = self.directory / "expectation.json"
+                provision.write_private(path, self.expectation(operation))
+                argv = [
+                    "provision.py",
+                    command,
+                    "--account",
+                    self.viewer["username"],
+                    "--author",
+                    self.author["username"],
+                    "--admin-credentials",
+                    str(self.admin_file),
+                    "--state-dir",
+                    str(self.directory),
+                    "--expected-pairing-file",
+                    str(path),
+                ]
+                clients = (
+                    [self.admin, self.owner, self.reader]
+                    if operation == "pair"
+                    else [self.admin, self.reader]
+                )
+                with (
+                    patch.object(sys, "argv", argv),
+                    patch.object(
+                        provision, "read_pairing_expectation", side_effect=locked_read
+                    ) as reader,
+                    patch.object(
+                        provision, "check_pairing_expectation", side_effect=locked_check
+                    ) as checker,
+                    patch.object(provision, "Client", side_effect=clients),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    provision.main()
+                reader.assert_called_once_with(path, operation)
+                checker.assert_called_once()
 
     def test_explicit_pairing_same_role_grants_preserves_credentials_and_is_idempotent(
         self,
