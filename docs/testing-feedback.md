@@ -577,3 +577,35 @@ or application; it is additionally runnable after `npm ci`. The reporter-free
 ~364ms overhead, not a percentile or controlled benchmark. The 12-case fixture
 subset emitted 7,319 bytes and completed in 0.05s with Python timing enabled.
 Those observations do not establish compatibility or speed on other runtimes.
+
+### Served disposable metadata-pressure boundary
+
+`./start.sh --qualify-metadata-pressure` is an explicit coordinator-owned #134
+qualification path, separate from ordinary acceptance and capacity testing. Its
+launcher, controller and fixed HTTPS probe live in `dev/pressure/`; preparation,
+ownership, restoration and interrupted recovery are described in
+[the testing setup](../testing/README.md#disposable-served-metadata-pressure-qualification-134).
+It requires the committed #135 source witness before creating any runtime
+resources, a source/config-matching healthy retained deployment, and canonical
+exclusive leases. Only fresh disposable metadata/source databases receive
+pressure; retained user metadata is never a target. Fake lifecycle controls prove
+ownership and recovery decisions, not a live served-pressure pass. The current
+recipe uses an explicit fixture-only ASGI owner sampler for saturated peak counts
+and original stock shutdown-completion accounting; missing/stale/forced outcomes
+remain incomplete. This instrumentation has unmeasured overhead and cannot prove
+uninstrumented stock capacity. The bounded held-consumer mode preserves exclusive
+leases and joins its exact consumer group before restoration. Exactly two fixed
+versioned profiles separate small metadata-pressure budgets from representative
+one-API load allocations; `--hold-load-fixture` selects the latter. Actual stock
+metadata composition (normal16/readiness2 for load), source admission and effective
+runtime allocations are checked without changing production defaults. Profile
+binding and a simulated1800s held lifecycle are pure/fake controls. A separate
+launcher-only disposable OS export reuses the reviewed process/cgroup helpers,
+requires exact journal/source/profile/parent/lease identity, and binds the actual
+API separately from Docker init. Missing or changed OS proof prevents held
+authority; configuration receipts cannot substitute for it. Normal runtime
+export restrictions remain unchanged. All actual export/collector qualification
+is still pending. Authored controls
+do not establish a live peak/lifespan/restore pass. Reuse unchanged native/real-PostgreSQL/assembled receipts
+where their original source and scope still apply; run only the missing served
+qualification after independent review and explicit coordinator scheduling.

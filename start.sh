@@ -5,6 +5,253 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${ROOT_DIR}/compose.test.yaml"
 ORIGINAL_ARGUMENTS=("$@")
 
+fail() {
+  printf 'Schemii startup error: %s\n' "$1" >&2
+  exit 1
+}
+
+ensure_docker_access() {
+  local current_groups account_name account_groups restart_command restart_argument escaped_restart_argument
+  command -v docker >/dev/null 2>&1 || fail "Docker is not installed or is not on PATH"
+  if ! docker info >/dev/null 2>&1; then
+    current_groups=" $(id -nG 2>/dev/null) " || fail "could not determine current group membership"
+    account_name="$(id -un 2>/dev/null)" || fail "could not determine the current account"
+    account_groups=" $(id -nG "$account_name" 2>/dev/null) " || fail "could not determine account group membership"
+    if [[ "$current_groups" != *" docker "* && "$account_groups" == *" docker "* ]]; then
+      command -v newgrp >/dev/null 2>&1 || fail "the account has Docker access, but this session is stale and newgrp is unavailable; start a new login session"
+      printf "Refreshing this process with the account's Docker group membership...\n" >&2
+      printf -v restart_command 'exec %q' "${ROOT_DIR}/start.sh"
+      for restart_argument in "${ORIGINAL_ARGUMENTS[@]}"; do
+        printf -v escaped_restart_argument ' %q' "$restart_argument"
+        restart_command+="$escaped_restart_argument"
+      done
+      exec newgrp docker -c "$restart_command"
+    fi
+    fail "Docker is unavailable; confirm that the daemon is running and the current account belongs to the docker group"
+  fi
+}
+
+if [[ "${1-}" == --qualify-metadata-pressure || "${1-}" == --recover-metadata-pressure || "${1-}" == --hold-metadata-pressure || "${1-}" == --hold-load-fixture || "${1-}" == --metadata-pressure-attach || "${1-}" == --metadata-pressure-heartbeat || "${1-}" == --metadata-pressure-detach ]]; then
+  case "$1" in
+    --qualify-metadata-pressure) (( $# <= 2 )) || fail "pressure qualification accepts at most one private run directory" ;;
+    --recover-metadata-pressure|--hold-metadata-pressure|--hold-load-fixture) (( $# == 2 )) || fail "pressure mode requires its one explicit argument" ;;
+    *) (( $# == 3 )) || fail "pressure attachment requires run directory and PID or attachment file" ;;
+  esac
+  source "$ROOT_DIR/dev/pressure/launcher.sh"
+  pressure_main "$@"
+fi
+
+# Exact-container diagnostics do not enter stack configuration or lifecycle
+# preflight. Reported ownership labels are opaque metadata, never paths to open.
+if [[ "${1-}" == --inspect-runtime || "${1-}" == --stop-retired-runtime ]]; then
+  runtime_action="$1"
+  shift
+  (( $# >= 1 && $# <= 8 )) || { printf 'Schemii runtime inspection requires 1 through 8 distinct full lowercase container IDs\n' >&2; exit 2; }
+  declare -A runtime_inspection_seen=()
+  for runtime_inspection_id in "$@"; do
+    [[ "$runtime_inspection_id" =~ ^[0-9a-f]{64}$ ]] || { printf 'Schemii runtime inspection requires 1 through 8 distinct full lowercase container IDs\n' >&2; exit 2; }
+    [[ -z "${runtime_inspection_seen[$runtime_inspection_id]+present}" ]] || { printf 'Schemii runtime inspection requires 1 through 8 distinct full lowercase container IDs\n' >&2; exit 2; }
+    runtime_inspection_seen[$runtime_inspection_id]=1
+  done
+  command -v python3 >/dev/null 2>&1 || fail "Python 3 is required for runtime inspection"
+  ensure_docker_access
+  exec python3 - "$runtime_action" "$ROOT_DIR" "$@" <<'PY'
+from contextlib import ExitStack
+import fcntl
+import json
+import os
+from pathlib import Path
+import select
+import stat
+import subprocess
+import sys
+import time
+
+TEMPLATE = '{"id":{{json .Id}},"name":{{json .Name}},"status":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"restartCount":{{json .RestartCount}},"restartPolicy":{{json .HostConfig.RestartPolicy.Name}},"restartRetryLimit":{{json .HostConfig.RestartPolicy.MaximumRetryCount}},"composeProject":{{json (index .Config.Labels "com.docker.compose.project")}},"composeService":{{json (index .Config.Labels "com.docker.compose.service")}},"composeWorkingDirectory":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"composeConfigFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}}}'
+FIELDS = ("id", "name", "status", "exitCode", "restartCount", "restartPolicy",
+          "restartRetryLimit", "composeProject", "composeService",
+          "composeWorkingDirectory", "composeConfigFiles")
+LABELS = FIELDS[7:]
+MAX_RECORD_BYTES = 16_384
+MODE, ROOT, *IDENTIFIERS = sys.argv[1:]
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError()
+        result[key] = value
+    return result
+
+
+def inspect(identifier):
+    try:
+        raw = bounded_command(["docker", "container", "inspect", "--format", TEMPLATE, identifier])
+        value = json.loads(raw, object_pairs_hook=unique_object)
+        if type(value) is not dict or set(value) != set(FIELDS) or value["id"] != identifier:
+            raise ValueError()
+        if type(value["name"]) is not str or not value["name"].startswith("/"):
+            raise ValueError()
+        if value["status"] not in {"created", "running", "paused", "restarting", "removing", "exited", "dead"}:
+            raise ValueError()
+        if value["restartPolicy"] not in {"", "no", "always", "unless-stopped", "on-failure"}:
+            raise ValueError()
+        for key in ("exitCode", "restartCount", "restartRetryLimit"):
+            if type(value[key]) is not int or not 0 <= value[key] <= 2**63 - 1:
+                raise ValueError()
+        for key in LABELS:
+            if value[key] is not None and type(value[key]) is not str:
+                raise ValueError()
+            if not value[key]:
+                value[key] = None
+        encoded = json.dumps({key: value[key] for key in FIELDS}, separators=(",", ":"), ensure_ascii=True)
+        if len(encoded) > MAX_RECORD_BYTES * 6:
+            raise ValueError()
+        return encoded
+    except Exception:
+        # CLI stderr and parser exceptions can contain secrets or target data.
+        sys.stderr.write(f"Schemii runtime inspection failed for container {identifier}\n")
+        raise SystemExit(1) from None
+
+
+def bounded_command(arguments, *, timeout=10, limit=MAX_RECORD_BYTES):
+    """Capture only bounded output, including failed or wedged CLI attempts."""
+    process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        raw = bytearray()
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:
+                raise ValueError()
+            chunk = os.read(process.stdout.fileno(), limit + 1 - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > limit:
+                raise ValueError()
+        if process.wait(timeout=max(0.01, deadline - time.monotonic())) != 0:
+            raise ValueError()
+        return raw.decode("utf-8")
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdout.close()
+
+
+def lease(stack, common, filename, variable, descriptor):
+    path = common / filename
+    inherited = os.environ.get(variable)
+    if inherited is not None:
+        if inherited != str(descriptor):
+            raise ValueError()
+        info = path.lstat()
+        current = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
+            raise ValueError()
+        stream = stack.enter_context(os.fdopen(os.dup(descriptor), "a"))
+    else:
+        stream = stack.enter_context(os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), "a"))
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError()
+    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def retired_identity(record, primary):
+    service = record["composeService"]
+    configs = ",".join(str(primary / name) for name in (
+        "compose.yaml", "compose.postgres.yaml", "compose.ai.yaml",
+        "compose.schemer.yaml", "compose.schemer.ai.yaml", "compose.tailnet.yaml",
+    ))
+    return (
+        record["composeProject"] == "schemii"
+        and service in {"schemii", "schemer"}
+        and record["name"] == f"/schemii-{service}-1"
+        and record["composeWorkingDirectory"] == str(primary)
+        and record["composeConfigFiles"] == configs
+        and record["restartPolicy"] == "on-failure"
+        and record["restartRetryLimit"] == 0
+    )
+
+
+def eligible(record, primary):
+    return (retired_identity(record, primary) and record["status"] == "restarting"
+            and record["exitCode"] == 1 and record["restartCount"] > 0)
+
+
+def stop_retired():
+    # Only Git-derived paths are opened. Container labels remain opaque values.
+    common = Path(bounded_command(["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"]).strip())
+    if not common.is_absolute() or not common.is_dir():
+        raise ValueError()
+    listed = bounded_command(["git", f"--git-dir={common}", "worktree", "list", "--porcelain", "-z"])
+    first = listed.split("\0", 1)[0]
+    if not first.startswith("worktree "):
+        raise ValueError()
+    primary = Path(first[len("worktree "):])
+    if not primary.is_absolute() or not primary.is_dir() or primary.resolve() != primary:
+        raise ValueError()
+    with ExitStack() as stack:
+        if os.environ.get("SCHEMII_QA_LEASE_MODE", "exclusive") != "exclusive":
+            raise ValueError()
+        lease(stack, common, "qa-startup.lock", "SCHEMII_QA_GATE_FD", 4)
+        lease(stack, common, "qa-deployment.lock", "SCHEMII_QA_LEASE_FD", 3)
+        records = [json.loads(inspect(identifier)) for identifier in IDENTIFIERS]
+        if not all(eligible(record, primary) for record in records):
+            raise ValueError()
+        stopped = []
+        confirmations = []
+        for index, identifier in enumerate(IDENTIFIERS):
+            stage = "revalidation"
+            try:
+                current = json.loads(inspect(identifier))
+                if not eligible(current, primary):
+                    raise ValueError()
+                stage = "stop-unconfirmed"
+                command_confirmed = False
+                try:
+                    output = bounded_command(["docker", "container", "stop", "--time", "10", identifier], timeout=15, limit=256)
+                    command_confirmed = output.strip() == identifier
+                except Exception:
+                    # A failed/timed-out CLI may still have stopped the target.
+                    # Observe exact owned state; never replay an uncertain write.
+                    pass
+                if command_confirmed:
+                    stage = "post-stop-unconfirmed"
+                after = json.loads(inspect(identifier))
+                if not retired_identity(after, primary) or after["status"] != "exited":
+                    raise ValueError()
+                stopped.append(identifier)
+                if not command_confirmed:
+                    confirmations.append({"id": identifier, "outcome": "confirmed-after-uncertain-command"})
+            except (Exception, SystemExit):
+                sys.stdout.write(json.dumps({"outcome": "incomplete", "stopped": stopped,
+                    "unconfirmed": identifier, "stage": stage,
+                    "unattempted": IDENTIFIERS[index + 1:],
+                    **({"confirmations": confirmations} if confirmations else {})}, separators=(",", ":")) + "\n")
+                sys.stderr.write("Schemii retired runtime stop incomplete; inspect the reported exact IDs before another action\n")
+                return 1
+        sys.stdout.write(json.dumps({"outcome": "stopped", "stopped": stopped,
+            **({"confirmations": confirmations} if confirmations else {})}, separators=(",", ":")) + "\n")
+        return 0
+
+
+if MODE == "--inspect-runtime":
+    records = [inspect(identifier) for identifier in IDENTIFIERS]
+    sys.stdout.write("\n".join(records) + "\n")
+else:
+    try:
+        outcome = stop_retired()
+    except (Exception, SystemExit):
+        sys.stderr.write("Schemii retired runtime stop refused before mutation: ownership, state or exclusive deployment lease could not be verified\n")
+        outcome = 1
+    raise SystemExit(outcome)
+PY
+fi
+
 # Local Compose deployment configuration. Environment values may override these defaults.
 SCHEMII_TEST_POSTGRES_PASSWORD_WAS_SET="${SCHEMII_TEST_POSTGRES_PASSWORD+x}"
 SCHEMII_TEST_APP_PORT="${SCHEMII_TEST_APP_PORT-8001}"
@@ -29,7 +276,7 @@ SCHEMII_RUNTIME_RECEIPT="${SCHEMII_RUNTIME_RECEIPT-}"
 SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
-  printf 'Usage: %s [--demo | --prepare-testing | --reset-testing SPACE | --check-testing-reset SPACE | --verify-testing [SPACE] | --prepare-testing-writable ACCOUNT | --reset-testing-writable ACCOUNT | --verify-testing-writable ACCOUNT | --backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
+  printf 'Usage: %s [--qualify-metadata-pressure [NEW_PRIVATE_RUN_DIRECTORY] | --hold-metadata-pressure SECONDS | --hold-load-fixture SECONDS | --metadata-pressure-attach RUN_DIRECTORY PID | --metadata-pressure-heartbeat RUN_DIRECTORY ATTACHMENT_FILE | --metadata-pressure-detach RUN_DIRECTORY ATTACHMENT_FILE | --recover-metadata-pressure PRIVATE_RUN_DIRECTORY | --inspect-runtime ID [ID ...] | --stop-retired-runtime ID [ID ...] | --demo | --prepare-testing | --reset-testing SPACE | --check-testing-reset SPACE | --verify-testing [SPACE] | --prepare-testing-writable ACCOUNT | --reset-testing-writable ACCOUNT | --verify-testing-writable ACCOUNT | --backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
 }
 
 list_demo_scenarios() {
@@ -130,11 +377,6 @@ if (( $# > 0 )); then
     *) usage >&2; exit 2 ;;
   esac
 fi
-
-fail() {
-  printf 'Schemii startup error: %s\n' "$1" >&2
-  exit 1
-}
 
 # Timing is opt-in for normal starts only. Disabled starts invoke no additional
 # external programs. EXIT observes the original status; RETURN cleanup traps in
@@ -309,22 +551,7 @@ create_local_certificate() {
   trap - RETURN
 }
 
-if ! docker info >/dev/null 2>&1; then
-  current_groups=" $(id -nG) "
-  account_name="$(id -un)"
-  account_groups=" $(id -nG "$account_name") "
-  if [[ "$current_groups" != *" docker "* && "$account_groups" == *" docker "* ]]; then
-    command -v newgrp >/dev/null 2>&1 || fail "the account has Docker access, but this session is stale and newgrp is unavailable; start a new login session"
-    printf "Refreshing this process with the account's Docker group membership...\n"
-    printf -v restart_command 'exec %q' "${ROOT_DIR}/start.sh"
-    for restart_argument in "${ORIGINAL_ARGUMENTS[@]}"; do
-      printf -v escaped_restart_argument ' %q' "$restart_argument"
-      restart_command+="$escaped_restart_argument"
-    done
-    exec newgrp docker -c "$restart_command"
-  fi
-  fail "Docker is unavailable; confirm that the daemon is running and the current account belongs to the docker group"
-fi
+ensure_docker_access
 
 # Preflight (arguments, deployment lease, configuration and runtime access) is
 # deliberately outside the receipt. Start only after stale-group re-exec has

@@ -8,6 +8,7 @@ import { fresh, sourceEvidence, observeOwnership } from './ownership.mjs';
 import { credentials } from '../harness/store.mjs';
 import { HTTPClient } from './http.mjs';
 import { isDeepStrictEqual as same } from 'node:util';
+import { createHash } from 'node:crypto';
 
 const finite = value => Number.isFinite(value) && value >= 0;
 const failure = error => ['ENOENT', 'ESRCH'].includes(error.code) || error.message === 'process_exited' ? 'process_exited' :
@@ -77,10 +78,19 @@ export async function sampleContainer(container, { procRoot = '/proc', cgroupRoo
       }
     }
     if ((await processIdentity(identity.pid, procRoot)).birthTick !== identity.birthTick) throw new Error('process_replaced');
+    let initProcessVerified = false, apiProcessVerified = false;
+    if (container.initProcess || container.apiProcess) {
+      const matches = (process, expected) => expected && process.pid === expected.pid && process.birthTick === expected.birthTick && process.namespacePid === expected.namespacePid;
+      const init = processes.filter(process => process.role === 'container_init'), api = processes.filter(process => process.role === 'api');
+      initProcessVerified = init.length === 1 && matches(init[0], container.initProcess) && init[0].pid === identity.pid && init[0].namespacePid === 1;
+      apiProcessVerified = api.length === 1 && matches(api[0], container.apiProcess);
+      if (!initProcessVerified || !apiProcessVerified || processes.some(process => !['container_init', 'api'].includes(process.role))) throw new Error('fixture_process_binding_changed');
+    }
     return { status: 'available', memoryCurrentBytes: counter(memory), ...budgets,
       cpuUsageUsec: counter(cpuValues.usage_usec || ''), cpuObservedMonotonicMs: cpu.observedMonotonicMs,
       throttledUsec: counter(cpuValues.throttled_usec || ''),
-      rssBytes: processes.reduce((total, process) => total + process.rssBytes, 0), processes, exitedDuringSample: exited };
+      rssBytes: processes.reduce((total, process) => total + process.rssBytes, 0), processes, exitedDuringSample: exited,
+      ...(container.initProcess || container.apiProcess ? { initProcessVerified, apiProcessVerified } : {}) };
   } catch (error) {
     let reason = failure(error);
     if (['ENOENT', 'ESRCH'].includes(error.code)) {
@@ -100,6 +110,7 @@ export function combineObservation(receipt, containers, internal, { previous = n
       capacityEligible: false, runOwnedBackends: 'unavailable', activeJobs: 'unavailable',
       ingressConnections: 'not_sampled', databaseActivity: 'not_sampled', eventLoopLagMs: 'not_sampled',
       executorWaitMs: 'not_sampled', ingressWaitMs: 'not_sampled', metadataWaitMs: 'not_sampled', sourceWaitMs: 'not_sampled' },
+    runtimeReceiptSha256: createHash('sha256').update(JSON.stringify(receipt)).digest('hex'),
     containers, internal: internal || { status: 'unavailable' } };
   if (app?.status !== 'available') return output;
   if (finite(app.memoryLimitBytes) && app.memoryLimitBytes > 0 && app.memoryCurrentBytes >= app.memoryLimitBytes * 0.85) {
@@ -123,9 +134,17 @@ export function combineObservation(receipt, containers, internal, { previous = n
       output.status = 'unavailable'; output.reason = 'owned_observation_unavailable'; return output;
     }
     const old = previous?.ownership;
+    const missingWork = old ? (old.work.executions || []).filter(value => !(ownership.work.executions || []).some(current => current.id === value.id)) : [];
+    const cohortRetirement = ownership.work.executionScope === 'bounded_fair_owner_reads_and_post_terminal_cohort_witness' &&
+      old?.work.executionScope === ownership.work.executionScope && ownership.source.releaseVerified &&
+      ownership.work.coverage.retired >= old.work.coverage.retired + missingWork.length &&
+      missingWork.every(value => {
+        const proof = value.terminalAt && ['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(value.status) ? value : ownership.work.retiredProofs?.find(current => current.id === value.id);
+        return proof?.terminalAt && ['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(proof.status) && Date.parse(ownership.source.at) >= Date.parse(proof.terminalAt);
+      });
     if (old && (old.runId !== ownership.runId || !same(old.source.authority, ownership.source.authority) ||
         old.source.captured.some(value => !ownership.source.captured.some(current => JSON.stringify(current) === JSON.stringify(value))) ||
-        ['executions', 'jobs'].some(key => (old.work[key] || []).some(value => !(ownership.work[key] || []).some(current => current.id === value.id))))) {
+        missingWork.length && !cohortRetirement || (old.work.jobs || []).some(value => !(ownership.work.jobs || []).some(current => current.id === value.id)))) {
       output.status = 'unavailable'; output.reason = 'owned_authority_or_journal_changed'; return output;
     }
     output.ownership = ownership;
@@ -135,6 +154,9 @@ export function combineObservation(receipt, containers, internal, { previous = n
     output.qualification.activeJobs = ownership.work.jobScope;
   }
   const apis = app.processes.filter(process => process.role === 'api');
+  if (app.processes.some(process => process.role === 'container_init') && (app.initProcessVerified !== true || app.apiProcessVerified !== true)) {
+    output.status = 'unavailable'; output.reason = 'fixture_process_binding_unqualified'; return output;
+  }
   if (previous?.apiProcesses === 1 && JSON.stringify(previous.containers.schemii.processes.filter(process => process.role === 'api').map(({ pid, birthTick }) => ({ pid, birthTick }))) !==
       JSON.stringify(apis.map(({ pid, birthTick }) => ({ pid, birthTick })))) {
     output.status = 'unavailable'; output.reason = 'api_process_identity_changed'; return output;
@@ -148,7 +170,7 @@ export function combineObservation(receipt, containers, internal, { previous = n
   }
   output.qualification.internalStatus = 'available';
   if (apis.length === 1 && apis[0].namespacePid === internal.processPid &&
-      app.processes.every(process => ['api', 'launcher_shell'].includes(process.role))) output.apiProcesses = 1;
+      app.processes.every(process => ['api', 'launcher_shell', 'container_init'].includes(process.role))) output.apiProcesses = 1;
   output.qualification.apiProcessScope = output.apiProcesses === 1 ? 'verified_cgroup_argv_and_endpoint_pid' : 'worker_count_unverified';
   const source = internal.sources?.source;
   if (source?.status === 'available') {
