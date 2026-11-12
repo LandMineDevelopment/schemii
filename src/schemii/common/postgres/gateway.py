@@ -1327,6 +1327,7 @@ class PsycopgPostgresGateway:
                     raise PostgresCatalogValidationError()
                 if unknown[field]: reasons.append(reason)
             safety = PostgresSafetyEvidence.model_validate_json(json.dumps({
+                "version": 2,
                 "dependencies": [json.loads(row["descriptor"]) for row in dependencies],
                 "preservation": [json.loads(row["descriptor"]) for row in objects],
                 "dependency_complete": not reasons, "unknown_reasons": reasons}))

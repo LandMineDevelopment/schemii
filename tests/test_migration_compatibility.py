@@ -28,6 +28,7 @@ def relation(name, namespace="public"):
 
 def mixed(*, unknown=False, edge=False, safety=True):
     evidence = PostgresSafetyEvidence(
+        version=2,
         preservation=tuple(
             PostgresPreservation(
                 identity=relation(name),
@@ -35,6 +36,7 @@ def mixed(*, unknown=False, edge=False, safety=True):
                 owner="author",
                 actor="author",
                 acl=(),
+                column_acl=(),
                 reloptions=(),
                 tablespace=None,
                 access_method="heap",
@@ -175,6 +177,7 @@ def materialized_catalog(
                 grantor=grantor, grantee="reader", privilege="SELECT", grantable=True
             ),
         ),
+        column_acl=(),
         reloptions=reloptions,
         tablespace=None,
         access_method="heap",
@@ -229,6 +232,7 @@ def materialized_catalog(
         ),
         captured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         safety=PostgresSafetyEvidence(
+            version=2,
             preservation=(descriptor,),
             dependencies=tuple(edges),
             dependency_complete=not unknown,
@@ -723,3 +727,344 @@ def test_opaque_policy_definitions_affect_drift_coverage_and_preservation():
     assert before.fingerprint != after.fingerprint
     live, desired = change(before, "ordinary")
     assert not migration_compatibility(before, live, desired).operation_safe
+
+
+@pytest.mark.parametrize("namespace", ["public", 'Sales.eu "quoted"'])
+@pytest.mark.parametrize("protected_name", ["orders", 'orders.part "quoted"'])
+def test_dotted_display_names_never_choose_the_protected_object_identity(
+    namespace, protected_name
+):
+    before = editable_catalog()
+    ordinary = before.tables[0]
+    orders = ordinary.model_copy(
+        update={
+            "namespace": namespace,
+            "name": protected_name,
+            "columns": (
+                ordinary.columns[0].model_copy(
+                    update={
+                        "name": "region.code",
+                        "collation_schema": "pg_catalog",
+                        "collation_name": "C",
+                    }
+                ),
+            ),
+        }
+    )
+    collision = ordinary.model_copy(
+        update={"namespace": namespace, "name": protected_name + ".region"}
+    )
+    descriptor = before.safety.preservation[0]
+    identities = [
+        relation(name, namespace)
+        for name in (protected_name, protected_name + ".region")
+    ]
+    catalog = build_postgres_catalog(
+        **before.model_dump(
+            exclude={"fingerprint", "captured_at", "namespace", "tables", "safety"}
+        ),
+        namespace=namespace,
+        tables=(orders, collision),
+        safety=before.safety.model_copy(
+            update={
+                "preservation": tuple(
+                    descriptor.model_copy(update={"identity": identity})
+                    for identity in identities
+                )
+            }
+        ),
+        captured_at=before.captured_at,
+    )
+    imported = import_postgres_catalog(catalog)
+    assert imported.summary.issues[0].identity == identities[0]
+    assert imported.summary.issues[0].protected_scope == [identities[0]]
+    desired = imported.content.model_copy(deep=True)
+    desired.tables = [item for item in desired.tables if item.name != protected_name]
+    compatibility = migration_compatibility(catalog, imported.content, desired)
+    assert not compatibility.operation_safe
+    after = build_postgres_catalog(
+        **catalog.model_dump(
+            exclude={"fingerprint", "captured_at", "tables", "safety"}
+        ),
+        tables=(collision,),
+        safety=catalog.safety.model_copy(
+            update={"preservation": (catalog.safety.preservation[1],)}
+        ),
+        captured_at=catalog.captured_at,
+    )
+    assert not preservation_matches(catalog, after, compatibility)
+
+
+def test_legacy_issue_display_label_cannot_create_identity_authority():
+    from schemii.schemii.designs.importer import _structured_issues
+    from schemii.schemii.workspaces.models import WorkspaceImportIssue
+
+    issue = WorkspaceImportIssue(
+        category="column",
+        object_name="public.ordinary.id",
+        reason="Legacy issue has no source identity",
+    )
+    result = _structured_issues(editable_catalog(), [issue])[0]
+    assert result.identity is None and not result.dependency_complete
+    assert any("identity is unavailable" in reason for reason in result.unknown_reasons)
+
+
+def test_cte_and_nested_query_bindings_keep_strict_namespace_qualification():
+    from schemii.common.postgres.models import PostgresView
+    from schemii.schemii.migrations.planner import view_definitions_equivalent
+
+    before = editable_catalog()
+    qualified = "WITH ordinary AS (SELECT 2 AS id) SELECT id FROM public.ordinary"
+    shadowed = "WITH ordinary AS (SELECT 2 AS id) SELECT id FROM ordinary"
+    assert not view_definitions_equivalent("public", qualified, shadowed, before)
+    assert not view_definitions_equivalent(
+        "public",
+        "SELECT id FROM ordinary WHERE EXISTS (WITH ordinary AS (SELECT 2 AS id) SELECT id FROM public.ordinary)",
+        "SELECT id FROM ordinary WHERE EXISTS (WITH ordinary AS (SELECT 2 AS id) SELECT id FROM ordinary)",
+        before,
+    )
+    view = PostgresView(
+        namespace="public",
+        name="shown",
+        columns=before.tables[0].columns,
+        query_definition=qualified,
+    )
+    descriptor = before.safety.preservation[0].model_copy(
+        update={"identity": relation("shown"), "relation_kind": "v"}
+    )
+    catalog = build_postgres_catalog(
+        **before.model_dump(exclude={"fingerprint", "captured_at", "views", "safety"}),
+        views=(view,),
+        safety=before.safety.model_copy(
+            update={"preservation": (*before.safety.preservation, descriptor)}
+        ),
+        captured_at=before.captured_at,
+    )
+    live = import_postgres_catalog(catalog).content
+    desired = live.model_copy(deep=True)
+    desired.views[0].definition = shadowed
+    steps, blockers = compile_migration_steps("public", live, desired, catalog=catalog)
+    assert len(steps) == 1 and not blockers and "CREATE OR REPLACE VIEW" in steps[0].sql
+    assert relation("shown") in migration_compatibility(catalog, live, desired).impact
+
+
+def identity_sequence_catalog(
+    *, owner_proof=True, identity=True, edge=True, table_owner="author"
+):
+    from schemii.common.postgres.models import PostgresIdentitySequenceOwner
+
+    before = editable_catalog()
+    table = before.tables[0].model_copy(
+        update={
+            "name": "orders",
+            "columns": (
+                before.tables[0]
+                .columns[0]
+                .model_copy(update={"identity": "by_default" if identity else None}),
+            ),
+        }
+    )
+    descriptor = before.safety.preservation[0].model_copy(
+        update={"identity": relation("orders"), "owner": table_owner}
+    )
+    sequence = descriptor.model_copy(
+        update={
+            "identity": relation("orders_id_seq"),
+            "relation_kind": "S",
+            "owner": "author",
+            "access_method": None,
+            "identity_sequence_owner": PostgresIdentitySequenceOwner(
+                table=relation("orders"),
+                column="id",
+                ordinal=1,
+                table_owner=table_owner,
+                dependency_kind="i",
+            )
+            if owner_proof
+            else None,
+        }
+    )
+    return build_postgres_catalog(
+        **before.model_dump(exclude={"fingerprint", "captured_at", "tables", "safety"}),
+        tables=(table,),
+        safety=before.safety.model_copy(
+            update={
+                "preservation": (descriptor, sequence),
+                "dependencies": (
+                    PostgresDependency(
+                        source=sequence.identity, target=descriptor.identity, kind="i"
+                    ),
+                )
+                if edge
+                else (),
+            }
+        ),
+        captured_at=before.captured_at,
+    )
+
+
+def test_exact_identity_sequence_machinery_does_not_quarantine_supported_create_or_edit():
+    from schemii.schemii.designs.models import DesignColumn, DesignTable
+
+    after = identity_sequence_catalog()
+    before = build_postgres_catalog(
+        **after.model_dump(exclude={"fingerprint", "captured_at", "tables", "safety"}),
+        tables=(),
+        safety=after.safety.model_copy(update={"preservation": (), "dependencies": ()}),
+        captured_at=after.captured_at,
+    )
+    live = import_postgres_catalog(before).content
+    desired = live.model_copy(deep=True)
+    desired.tables = [
+        DesignTable(
+            id="table_" + "a" * 32,
+            name="orders",
+            columns=[
+                DesignColumn(
+                    id="column_" + "b" * 32,
+                    name="id",
+                    data_type="bigint",
+                    nullable=False,
+                    identity="by_default",
+                )
+            ],
+        )
+    ]
+    steps, blockers = compile_migration_steps("public", live, desired, catalog=before)
+    assert (
+        len(steps) == 1
+        and "GENERATED BY DEFAULT AS IDENTITY" in steps[0].sql
+        and not blockers
+    )
+    assert migration_compatibility(before, live, desired).operation_safe
+    assert import_postgres_catalog(after).summary.complete
+    assert migration_compatibility(after, live, desired).operation_safe
+    current = import_postgres_catalog(after).content
+    edited = current.model_copy(deep=True)
+    edited.tables[0].columns.append(
+        DesignColumn(id="column_" + "c" * 32, name="added", data_type="text")
+    )
+    assert migration_compatibility(after, current, edited).operation_safe
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"owner_proof": False},
+        {"identity": False},
+        {"table_owner": "other_owner"},
+    ],
+)
+def test_standalone_unknown_or_mismatched_sequence_ownership_stays_protected(options):
+    catalog = identity_sequence_catalog(**options)
+    imported = import_postgres_catalog(catalog)
+    assert not imported.summary.complete
+    assert any(
+        issue.identity == relation("orders_id_seq") for issue in imported.summary.issues
+    )
+    desired = imported.content.model_copy(deep=True)
+    desired.tables = []
+    assert not migration_compatibility(
+        catalog, imported.content, desired
+    ).operation_safe
+
+
+def test_materialized_column_grants_bind_drift_block_replacement_but_allow_refresh():
+    from schemii.common.postgres.models import PostgresColumnGrant
+    from schemii.schemii.migrations.planner import (
+        materialized_maintenance,
+        materialized_preservation_matches,
+    )
+
+    before = materialized_catalog()
+    old = before.safety.preservation[0]
+    grant = PostgresColumnGrant(
+        column="value",
+        ordinal=1,
+        grantor="author",
+        grantee="column_reader",
+        privilege="SELECT",
+        grantable=True,
+    )
+    catalog = build_postgres_catalog(
+        **before.model_dump(exclude={"fingerprint", "captured_at", "safety"}),
+        safety=before.safety.model_copy(
+            update={"preservation": (old.model_copy(update={"column_acl": (grant,)}),)}
+        ),
+        captured_at=before.captured_at,
+    )
+    view = import_postgres_catalog(catalog).content.views[0]
+    report, _ = materialized_maintenance(catalog, view, "replace")
+    assert not report.eligible and any(
+        "Column-level" in reason for reason in report.blocking_reasons
+    )
+    refresh, _ = materialized_maintenance(catalog, view, "refresh")
+    assert refresh.eligible
+    assert catalog.fingerprint != before.fingerprint
+    after = build_postgres_catalog(
+        **catalog.model_dump(
+            exclude={"fingerprint", "captured_at", "materialized_views", "safety"}
+        ),
+        materialized_views=(
+            catalog.materialized_views[0].model_copy(update={"populated": True}),
+        ),
+        safety=catalog.safety.model_copy(update={"preservation": (old,)}),
+        captured_at=catalog.captured_at,
+    )
+    assert not materialized_preservation_matches(catalog, after, [refresh])
+
+
+def test_missing_internal_identity_edge_cannot_claim_complete_evidence():
+    with pytest.raises(ValueError, match="exact internal dependency"):
+        identity_sequence_catalog(edge=False)
+
+
+def test_quoted_routine_overloads_keep_exact_source_identity_signatures():
+    from schemii.common.postgres.models import PostgresFunction
+
+    before = editable_catalog()
+    namespace = 'Sales.eu "quoted"'
+    routines = tuple(
+        PostgresFunction(
+            namespace=namespace,
+            name="parse.fn",
+            kind="function",
+            identity_arguments=signature,
+            arguments=signature,
+            return_type="integer",
+            language="sql",
+            definition="SELECT 1",
+        )
+        for signature in ("value integer", "value text")
+    )
+    catalog = build_postgres_catalog(
+        **before.model_dump(
+            exclude={
+                "fingerprint",
+                "captured_at",
+                "namespace",
+                "functions",
+                "tables",
+                "safety",
+            }
+        ),
+        namespace=namespace,
+        functions=routines,
+        tables=(),
+        safety=before.safety.model_copy(
+            update={
+                "preservation": (),
+                "dependency_complete": False,
+                "unknown_reasons": ("Routine bodies are unproven",),
+            }
+        ),
+        captured_at=before.captured_at,
+    )
+    issues = import_postgres_catalog(catalog).summary.issues
+    assert len(issues) == 2
+    assert {issue.identity for issue in issues} == {
+        PostgresObjectIdentity(
+            kind="routine", namespace=namespace, name="parse.fn", signature=signature
+        )
+        for signature in ("value integer", "value text")
+    }

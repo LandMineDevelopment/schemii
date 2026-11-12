@@ -421,7 +421,21 @@ SAFETY_OBJECTS_QUERY = """
       'acl',COALESCE((SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),
          'grantee',CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END,
          'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantee,a.privilege_type,a.grantor)
-         FROM aclexplode(COALESCE(c.relacl,acldefault('r',c.relowner))) a),'[]'::jsonb),
+         FROM aclexplode(COALESCE(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S'::"char" ELSE 'r'::"char" END,c.relowner))) a),'[]'::jsonb),
+      'column_acl',COALESCE((SELECT jsonb_agg(jsonb_build_object('column',att.attname,'ordinal',att.attnum,
+         'grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END,
+         'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY att.attnum,a.grantee,a.privilege_type,a.grantor)
+         FROM pg_attribute att CROSS JOIN LATERAL aclexplode(att.attacl) a
+         WHERE att.attrelid=c.oid AND att.attnum>0 AND NOT att.attisdropped),'[]'::jsonb),
+      'identity_sequence_owner',(SELECT jsonb_build_object('table',jsonb_build_object('kind','relation','namespace',owner_ns.nspname,'name',owner_table.relname),
+         'column',owner_column.attname,'ordinal',owner_column.attnum,'table_owner',pg_get_userbyid(owner_table.relowner),'dependency_kind',d.deptype::text)
+         FROM pg_depend d JOIN pg_class owner_table ON owner_table.oid=d.refobjid
+         JOIN pg_namespace owner_ns ON owner_ns.oid=owner_table.relnamespace
+         JOIN pg_attribute owner_column ON owner_column.attrelid=owner_table.oid AND owner_column.attnum=d.refobjsubid
+         WHERE c.relkind='S' AND d.classid='pg_class'::regclass AND d.objid=c.oid AND d.objsubid=0
+           AND d.refclassid='pg_class'::regclass AND d.deptype='i' AND owner_column.attidentity IN ('a','d')
+           AND NOT owner_column.attisdropped AND owner_table.relkind IN ('r','p') AND owner_table.relowner=c.relowner
+           AND (SELECT count(*) FROM pg_depend internal WHERE internal.classid='pg_class'::regclass AND internal.objid=c.oid AND internal.deptype='i')=1),
       'reloptions',to_jsonb(COALESCE(c.reloptions,ARRAY[]::text[])),
       'tablespace',ts.spcname,'access_method',am.amname,
       'partition_bound',pg_get_expr(c.relpartbound,c.oid,true),

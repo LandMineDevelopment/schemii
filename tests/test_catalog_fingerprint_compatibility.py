@@ -153,3 +153,30 @@ def test_frozen_catalog_loads_through_persisted_baseline_and_plan_authority_read
     assert (
         plan.plan.compatibility is None and plan.authority.live_catalog.safety is None
     )
+
+
+EVIDENCE_V1_JSON = '{"fingerprint_version":2,"safety":{"version":1,"dependencies":[{"source":{"kind":"relation","namespace":"public","name":"saved_idx","signature":""},"target":{"kind":"relation","namespace":"public","name":"Saved \\"totals\\"","signature":""},"kind":"a"}],"preservation":[{"identity":{"kind":"relation","namespace":"public","name":"Saved \\"totals\\"","signature":""},"relation_kind":"m","owner":"author","actor":"author","acl":[{"grantor":"author","grantee":"reader","privilege":"SELECT","grantable":true}],"reloptions":[],"tablespace":null,"access_method":"heap","partition_bound":null,"partition_parents":[],"indexes":[{"name":"saved_idx","table":"Saved \\"totals\\"","definition":"CREATE INDEX saved_idx ON public.\\"Saved \\"\\"totals\\"\\"\\" (value)","method":"btree","unique":false,"valid":true,"predicate":null}],"default_grantees":["default_reader"],"properties":"{\\"persistence\\": \\"p\\", \\"row_security\\": false, \\"force_row_security\\": false, \\"replica_identity\\": \\"d\\"}"}],"dependency_complete":true,"unknown_reasons":[]},"database":"analytics","namespace":"public","server_version":"17.2","server_version_num":170002,"server_timezone":"UTC","types":[],"tables":[],"relationships":[],"functions":[],"views":[],"materialized_views":[{"namespace":"public","name":"Saved \\"totals\\"","columns":[{"name":"value","ordinal":1,"data_type":"integer","nullable":true,"default_expression":null,"identity":null,"generated":null,"collation_schema":null,"collation_name":null}],"query_definition":"SELECT 1 AS value","populated":false}],"captured_at":"2026-01-01T00:00:00Z","fingerprint":"42dd85e7232d333139d959eb479bdf045b568897f5a1e4a8a60e941023028414"}'
+
+
+def test_frozen_first_evidence_format_reads_unchanged_without_column_privilege_authority():
+    from schemii.schemii.designs.importer import import_postgres_catalog
+    from schemii.schemii.migrations.planner import materialized_maintenance
+
+    catalog = PostgresCatalog.model_validate_json(EVIDENCE_V1_JSON)
+    assert (
+        catalog.fingerprint
+        == "42dd85e7232d333139d959eb479bdf045b568897f5a1e4a8a60e941023028414"
+    )
+    assert compute_catalog_fingerprint(catalog) == catalog.fingerprint
+    assert (
+        catalog.safety.version == 1
+        and catalog.safety.preservation[0].column_acl is None
+    )
+    report, _ = materialized_maintenance(
+        catalog, import_postgres_catalog(catalog).content.views[0], "replace"
+    )
+    assert not report.eligible
+    value = json.loads(EVIDENCE_V1_JSON)
+    value["safety"]["preservation"][0]["column_acl"] = []
+    with pytest.raises(ValueError, match="historical evidence"):
+        PostgresCatalog.model_validate_json(json.dumps(value))

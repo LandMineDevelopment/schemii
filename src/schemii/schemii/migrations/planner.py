@@ -1776,13 +1776,11 @@ def view_definitions_equivalent(
                             node.fields = (ast.String(sval=qualifier), node.fields[0])
 
                 Bind()(statement)
+                # Only this proven root RangeVar may lose its default schema.
+                # Nested/CTE/join scopes retain strict parsed qualification.
+                if table.schemaname == namespace:
+                    table.schemaname = None
 
-        class Namespace(Visitor):
-            def visit_RangeVar(self, ancestors: Any, node: ast.RangeVar) -> None:
-                if node.schemaname == namespace:
-                    node.schemaname = None
-
-        Namespace()(statement)
         return RawStream()(statement).strip().rstrip(";")
 
     try:
@@ -1831,6 +1829,14 @@ def materialized_maintenance(
         if descriptor.owner != descriptor.actor:
             reasons.append("Maintenance requires the recorded current owner identity")
         if operation == "replace":
+            if descriptor.column_acl is None:
+                reasons.append(
+                    "Column privilege evidence is unavailable; replacement cannot prove preservation"
+                )
+            elif descriptor.column_acl:
+                reasons.append(
+                    "Column-level privileges cannot be replayed losslessly; use refresh or retain this definition"
+                )
             try:
                 relations = [
                     {
