@@ -95,7 +95,11 @@ def pivot_selection(tile, selection):
 
 
 def raw_inputs(catalog, model, tile, query, original, *, detail_fields=()):
-    """Preserve the parent participation/grain while projecting raw semantic values."""
+    """Project raw semantic inputs plus distinct axis/correlation aliases.
+
+    Raw and axis maps share an alias only when the axis has no transformation;
+    raw measure values keep their meaning when a calendar axis is bucketed.
+    """
     fields = []
     for field in [*query.explore.fields, *detail_fields]:
         if (field.table, field.column) not in {
@@ -118,22 +122,29 @@ def raw_inputs(catalog, model, tile, query, original, *, detail_fields=()):
         _scope_outer_nodes=original["outerNodes"],
     )
     statement = parse_one(plan["sql"], read="postgres")
-    references = {}
+    references, axis_references = {}, {}
     outputs = []
     for index, (field, output) in enumerate(zip(fields, statement.expressions)):
         alias = f"input_{index + 1}"
         expression = output.this if isinstance(output, exp.Alias) else output
+        key = (field.table, field.column)
+        # A calendar axis and a measure may refer to the same semantic field.
+        # Preserve its raw measure input; only the axis/correlation projection
+        # is bucketed. Deduplicating source fields must not merge these roles.
+        outputs.append(expression.copy().as_(alias, quoted=True))
+        references[key] = axis_references[key] = alias
         time = getattr(tile, "time_analysis", None)
-        if time and (field.table, field.column) == (time.table, time.column):
-            expression = bucket_expression(
-                expression,
+        if time and key == (time.table, time.column):
+            axis_alias = f"bucket_{index + 1}"
+            bucket = bucket_expression(
+                expression.copy(),
                 time,
                 source_type(catalog, model.definition, field.table, field.column),
             )
-        outputs.append(expression.as_(alias, quoted=True))
-        references[(field.table, field.column)] = alias
+            outputs.append(bucket.as_(axis_alias, quoted=True))
+            axis_references[key] = axis_alias
     statement.set("expressions", outputs)
-    return plan, statement.sql(dialect="postgres"), references
+    return plan, statement.sql(dialect="postgres"), references, axis_references
 
 
 def compile_pivot(
@@ -145,7 +156,7 @@ def compile_pivot(
         len(tile.row_dimensions),
         len(tile.column_dimensions),
     )
-    _, raw, inputs = raw_inputs(catalog, model, tile, query, original)
+    _, raw, inputs, axis_inputs = raw_inputs(catalog, model, tile, query, original)
 
     def q(name):
         return '"' + name.replace('"', '""') + '"'
@@ -161,7 +172,9 @@ def compile_pivot(
         return f"{left} IS NOT DISTINCT FROM {right}"
 
     correlation = " AND ".join(
-        equality(f"cell.{q(alias)}", f"raw.{q(inputs[(field.table, field.column)])}")
+        equality(
+            f"cell.{q(alias)}", f"raw.{q(axis_inputs[(field.table, field.column)])}"
+        )
         for alias, field in zip(axes, dimensions)
     )
     ctes = [
@@ -216,7 +229,8 @@ def compile_pivot(
             relation, grouping = "pivot_displayed data", ""
         else:
             axis_values = [
-                f"data.{q(inputs[(field.table, field.column)])}" for field in dimensions
+                f"data.{q(axis_inputs[(field.table, field.column)])}"
+                for field in dimensions
             ]
             expressions = [
                 axis_values[i] if i in retained else "NULL" for i in range(d)

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pivotMatrix, pivotSelection, renderPivot } from '../../src/schemii/schemer/web/pivot.js';
-import { pivotDefaults, tileErrors } from '../../src/schemii/schemer/web/dashboard-state.js';
+import { pivotDefaults, tileErrors, tileAggregateChoices } from '../../src/schemii/schemer/web/dashboard-state.js';
 
 const field = (column, aggregate = 'none') => ({ table: 'facts', column, aggregate });
 const tile = (changes = {}) => ({ id: 'pivot', title: 'Sales', kind: 'pivot', dimensions: [],
@@ -103,4 +103,22 @@ test('pivot validation blocks implicit summary lifting and calendar windows whil
   assert.ok(tileErrors(tile({ measures: [field('amount')] })).some(error => /explicit aggregation/.test(error)));
   assert.ok(tileErrors(tile({ columnDimensions: [field('region')] })).some(error => /one pivot axis/.test(error)));
   assert.deepEqual(tileErrors({ ...tile(), kind: 'aggregate', dimensions: [field('region')], rowDimensions: [], columnDimensions: [] }), []);
+});
+
+test('pivot summary aggregation policy uses exposed semantic output types and retains ordinary summary values', () => {
+  for (const [type, allowed, denied] of [
+    ['numeric(12,2)', ['count', 'count_distinct', 'sum', 'avg', 'min', 'max'], []],
+    ['date', ['count', 'count_distinct', 'min', 'max'], ['sum', 'avg']],
+    ['text', ['count', 'count_distinct', 'min', 'max'], ['sum', 'avg']],
+    ['boolean', ['count', 'count_distinct'], ['sum', 'avg', 'min', 'max']],
+    ['json', ['count'], ['count_distinct', 'sum', 'avg', 'min', 'max']],
+  ]) {
+    const draft = { nodes: [{ id: 'facts', table: 'physical' }, { id: 'summary', table: 'physical', derivation: { kind: 'aggregate', source: 'facts', groupBy: ['id'], outputs: [{ id: 'value', operation: 'max', column: 'value' }] } }] };
+    const catalog = { tables: [{ name: 'physical', columns: [{ name: 'id', dataType: 'integer' }, { name: 'value', dataType: type }] }] };
+    const measure = { table: 'summary', column: 'value' };
+    const choices = tileAggregateChoices(tile(), draft, catalog, measure).map(([value]) => value);
+    for (const value of allowed) assert.ok(choices.includes(value), `${type} missing ${value}`);
+    for (const value of ['none', ...denied]) assert.ok(!choices.includes(value), `${type} offered ${value}`);
+    assert.deepEqual(tileAggregateChoices({ kind: 'aggregate' }, draft, catalog, measure), [['none', 'Summary value']]);
+  }
 });
