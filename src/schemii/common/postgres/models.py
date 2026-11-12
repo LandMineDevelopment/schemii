@@ -236,8 +236,32 @@ class PostgresDependency(_PostgresModel):
 class PostgresGrant(_PostgresModel):
     grantor: PostgresIdentifier
     grantee: PostgresIdentifier
-    privilege: Literal["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN"]
+    privilege: Literal[
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "TRUNCATE",
+        "REFERENCES",
+        "TRIGGER",
+        "MAINTAIN",
+        "USAGE",
+    ]
     grantable: bool
+
+
+class PostgresColumnGrant(PostgresGrant):
+    privilege: Literal["SELECT", "INSERT", "UPDATE", "REFERENCES"]
+    column: PostgresIdentifier
+    ordinal: Annotated[int, Field(ge=1, le=1600)]
+
+
+class PostgresIdentitySequenceOwner(_PostgresModel):
+    table: PostgresObjectIdentity
+    column: PostgresIdentifier
+    ordinal: Annotated[int, Field(ge=1, le=1600)]
+    table_owner: PostgresIdentifier
+    dependency_kind: Literal["i"]
 
 
 class PostgresPreservation(_PostgresModel):
@@ -246,6 +270,11 @@ class PostgresPreservation(_PostgresModel):
     owner: PostgresIdentifier
     actor: PostgresIdentifier
     acl: tuple[PostgresGrant, ...]
+    # None means historical evidence did not inspect column privileges.
+    column_acl: (
+        Annotated[tuple[PostgresColumnGrant, ...], Field(max_length=160_000)] | None
+    ) = None
+    identity_sequence_owner: PostgresIdentitySequenceOwner | None = None
     reloptions: tuple[CatalogText, ...]
     tablespace: PostgresIdentifier | None
     access_method: PostgresIdentifier | None
@@ -257,7 +286,7 @@ class PostgresPreservation(_PostgresModel):
 
 
 class PostgresSafetyEvidence(_PostgresModel):
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 1
     dependencies: tuple[PostgresDependency, ...]
     preservation: tuple[PostgresPreservation, ...]
     dependency_complete: bool
@@ -266,7 +295,7 @@ class PostgresSafetyEvidence(_PostgresModel):
     @field_validator("version", mode="before")
     @classmethod
     def strict_evidence_version(cls, value: Any) -> int:
-        if type(value) is not int or value != 1:
+        if type(value) is not int or value not in {1, 2}:
             raise ValueError("unknown catalog evidence version")
         return value
 
@@ -274,13 +303,43 @@ class PostgresSafetyEvidence(_PostgresModel):
     def honest_completeness(self) -> "PostgresSafetyEvidence":
         if self.dependency_complete == bool(self.unknown_reasons):
             raise ValueError("dependency completeness must agree with unknown reasons")
+        if self.version == 1 and any(
+            item.column_acl is not None or item.identity_sequence_owner is not None
+            for item in self.preservation
+        ):
+            raise ValueError(
+                "historical evidence cannot acquire new preservation authority"
+            )
+        if self.version == 2 and any(
+            item.column_acl is None for item in self.preservation
+        ):
+            raise ValueError(
+                "current evidence must inspect column privilege presence or absence"
+            )
+        if self.version == 2 and self.dependency_complete:
+            for item in self.preservation:
+                owner = item.identity_sequence_owner
+                if owner is not None and (
+                    item.relation_kind != "S"
+                    or not any(
+                        edge.source == item.identity
+                        and edge.target == owner.table
+                        and edge.kind == "i"
+                        for edge in self.dependencies
+                    )
+                ):
+                    raise ValueError(
+                        "complete identity ownership evidence requires the exact internal dependency"
+                    )
         identities = [item.identity for item in self.preservation]
         if len(identities) != len(set(identities)):
             raise ValueError("preservation identities must be unique")
         return self
 
 
-def dependency_closure(evidence: PostgresSafetyEvidence, seeds: set[PostgresObjectIdentity]) -> set[PostgresObjectIdentity]:
+def dependency_closure(
+    evidence: PostgresSafetyEvidence, seeds: set[PostgresObjectIdentity]
+) -> set[PostgresObjectIdentity]:
     """Conservative connected closure, including incoming/cross-namespace edges."""
     result = set(seeds)
     while True:
@@ -332,9 +391,27 @@ _V1_PROJECTION = {"database": True, "namespace": True, "server_version": True, "
 def _catalog_digest(catalog: Any) -> str:
     # Version1 is the frozen historical projection. Evidence is an explicit
     # new version; defaulted future fields must never reinterpret old authority.
-    payload = (catalog.model_dump(mode="json", include=_V1_PROJECTION)
-        if catalog.fingerprint_version == 1 else
-        catalog.model_dump(mode="json", exclude={"captured_at", "fingerprint"}))
+    if catalog.fingerprint_version == 1:
+        payload = catalog.model_dump(mode="json", include=_V1_PROJECTION)
+    elif catalog.safety.version == 1:
+        # Preserve the first explicit evidence format byte-for-byte. Its missing
+        # column ACL/identity-owner fields never prove their absence.
+        payload = catalog.model_dump(
+            mode="json",
+            exclude={
+                "captured_at": True,
+                "fingerprint": True,
+                "safety": {
+                    "preservation": {
+                        "__all__": {"column_acl", "identity_sequence_owner"}
+                    }
+                },
+            },
+        )
+    else:
+        payload = catalog.model_dump(
+            mode="json", exclude={"captured_at", "fingerprint"}
+        )
     canonical = json.dumps(
         payload,
         ensure_ascii=False,
