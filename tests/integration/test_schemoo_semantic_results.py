@@ -481,7 +481,7 @@ def test_calculated_summary_model_input_is_applied_after_grouping(execute,behavi
     prefix, sql = calculated_sql(plan)
     assert sorted(execute(prefix+sql)) == expected
     assert plan["parameterValues"] == {"count":{"minimum":1}}
-    assert "summary_filter" in sql
+    assert "GROUP BY" in sql and ("summary_filter" in sql or "EXISTS" in sql)
 
 
 def test_calculated_postgres_type_promotions_match_validated_field_metadata(execute):

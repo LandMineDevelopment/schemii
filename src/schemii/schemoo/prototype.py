@@ -740,7 +740,7 @@ def _plan_preview(validated: _ValidatedPreview) -> _PreviewPlan:
             root,
             *scope_participation.preserved_required_nodes,
             *(node for node, _ in derived.field_closure(model, [
-                *((field["table"], field["column"]) for field in validated.participation_fields),
+                *((field["table"], field["column"]) for field in [*validated.fields, *validated.participation_fields]),
                 *derived.condition_references(validated.row_filters),
                 *derived.condition_references([item for node in scope_participation.preserved_required_nodes for item in scope_participation.source_filters.get(node, [])]),
             ])),
@@ -777,7 +777,7 @@ class _PreviewCompiler:
         self.expression_path = []
         self.aggregate_relations = {}
         self.aggregate_plans = []
-        references = [(field["table"], field["column"]) for field in self.validated.participation_fields]
+        references = [(field["table"], field["column"]) for field in [*self.validated.fields, *self.validated.participation_fields]]
         references += derived.condition_references(self.validated.row_filters)
         references += derived.condition_references([item for _, conditions in self.plan.existence for item in conditions])
         references += derived.condition_references([item for conditions in self.plan.source_filters.values() for item in conditions])

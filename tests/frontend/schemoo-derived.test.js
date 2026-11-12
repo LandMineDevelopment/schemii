@@ -111,3 +111,13 @@ test("row conditions may use another calculation at the same mapped owner grain"
   draft.nodes.push({id:"history",table:"people"});
   assert.deepEqual([...conditionSources(draft,draft.nodes[1].derivation,{})].sort(),["calc","other","people"]);
 });
+
+test("removing a calculation used only as a second operand preserves its dependent draft",()=>{
+  const {draft,catalog}=fixture();
+  draft.nodes.push({id:"downstream",table:"people",derivation:{kind:"row",source:"people",outputs:[
+    {id:"value",operation:"multiply",column:"salary",operandNodeId:"calc",operand:"total"}]}});
+  const before=structuredClone(draft);
+  assert.throws(()=>removeModelNode(draft,"calc"),/rebind.*depend/);
+  assert.deepEqual(draft,before);
+  assert.equal(nodeColumns(draft,catalog,draft.nodes.at(-1))[0].dataType,"numeric");
+});

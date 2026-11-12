@@ -86,7 +86,7 @@ export function removeAlias(draft, id) {
 export function removeModelNode(draft, id) {
   const node = (draft.nodes || []).find(candidate => candidate.id === id);
   if (!node) throw new Error("This model object no longer exists.");
-  if (draft.nodes.some(n => n.derivation && (n.derivation.source === id || n.derivation.connection?.target === id || n.derivation.outputs.some(o => o.nodeId === id || o.conditions?.some(c => c.table === id))))) {
+  if (draft.nodes.some(n => n.derivation && (n.derivation.source === id || n.derivation.connection?.target === id || n.derivation.outputs.some(o => o.nodeId === id || o.operandNodeId === id || o.conditions?.some(c => c.table === id))))) {
     throw new Error("Remove or rebind the calculated sources that depend on this object first.");
   }
   const impact = aliasImpact(draft, id);
