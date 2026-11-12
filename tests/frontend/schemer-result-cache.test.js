@@ -300,3 +300,49 @@ test('main reservations honor per-cache ceilings and leave excess root capacity 
   assert.ok(budget.take(['drill']));
   assert.equal(views.get('second').rows, 10000);
 });
+
+test('displayed attachment deep-freezes rows and execution filters without retaining a stream or plan', async () => {
+  const { freezeDisplayedResult } = cacheModule;
+  const budget = new CacheBudget(), cache = new ResultCache({ budget, start: async emit => {
+    emit(startFrame); emit({ type: 'rows', columns: [{ name: 'json', dataType: 'jsonb' }], rows: [[{ nested: ['original'] }]] }); emit(complete);
+  } });
+  await cache.loadMore();
+  const context = { dashboardId: 'dashboard', dashboardRevision: 1, tileId: 'tile', modelId: 'model', modelRevision: 1,
+    pane: 'main', drillSelection: null, selections: { region: { active: true, values: { name: 'applied' } } } };
+  const frozen = freezeDisplayedResult(cache.snapshot(), context);
+  cache.rows[0][0].nested[0] = 'later'; context.selections.region.values.name = 'unapplied'; cache.dispose();
+  assert.deepEqual(frozen.rows, [[{ nested: ['original'] }]]);
+  assert.equal(frozen.selections.region.values.name, 'applied');
+  assert.equal(frozen.snapshotAt, startFrame.snapshotAt);
+  assert.equal(Object.isFrozen(frozen.rows[0][0].nested), true);
+  assert.equal('plan' in frozen, false); assert.equal('controller' in frozen, false);
+  assert.equal(budget.rows, 0); assert.equal(budget.bytes, 0);
+});
+
+test('displayed attachment independently bounds rows and bytes and labels all truncation layers', () => {
+  const { freezeDisplayedResult } = cacheModule;
+  const result = { snapshotAt: startFrame.snapshotAt, columns: [{ name: 'value' }], rows: Array.from({ length: 200 }, (_, i) => [i]),
+    cachedRows: 10000, loading: true, limitReached: true, visualTruncated: true };
+  const frozen = freezeDisplayedResult(result, { pane: 'main' });
+  assert.equal(frozen.rows.length, 100);
+  assert.equal(frozen.cachedRows, 10000); assert.equal(frozen.displayedRows, 200);
+  for (const flag of ['partial', 'cacheTruncated', 'chartTruncated', 'clientSampleTruncated']) assert.equal(frozen[flag], true);
+  const bytes = freezeDisplayedResult({ ...result, rows: [['x'.repeat(1000)]] }, { pane: 'main' }, { maxBytes: 450 });
+  assert.equal(bytes.rows.length, 0); assert.equal(bytes.clientSampleTruncated, true);
+  assert.ok(new TextEncoder().encode(JSON.stringify(bytes)).length <= 450);
+  assert.throws(() => freezeDisplayedResult({ ...result, columns: [{ name: 'x'.repeat(1000) }] }, {}, { maxBytes: 100 }), /metadata exceeds/);
+});
+
+test('displayed visualization captures the selected time metric and independent chart mark truncation', async () => {
+  const { displayedVisualization } = await import('../../src/schemii/schemer/web/visualizations.js');
+  const tile = { kind: 'line', dimensions: [{ table: 'events', column: 'month' }], measures: [{ table: 'events', column: 'amount' }], timeAnalysis: { comparison: 'previous_period', runningTotal: true } };
+  const result = { snapshotAt: startFrame.snapshotAt, columns: ['month', 'current', 'previous', 'change', 'percent', 'running'].map(name => ({ name })),
+    rows: Array.from({ length: 2200 }, (_, i) => [`month ${i}`, 100, 50, 50, 100, 500]), cachedRows: 2200 };
+  const displayed = displayedVisualization({ dataset: { timeMetric: 'percent' } }, tile, result);
+  assert.equal(displayed.metric, 'percent'); assert.equal(displayed.visualTruncated, true);
+  assert.equal(displayed.rows.length, 2000); assert.equal(displayed.cachedRows, 2200);
+  assert.deepEqual(displayed.columns.map(column => column.name), ['month', 'percent']);
+  assert.deepEqual(displayed.rows[0], ['month 0', 100]);
+  const frozen = cacheModule.freezeDisplayedResult(displayed, { pane: 'main' });
+  assert.equal(frozen.metric, 'percent'); assert.equal(frozen.chartTruncated, true); assert.equal(frozen.clientSampleTruncated, true);
+});

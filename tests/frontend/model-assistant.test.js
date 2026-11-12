@@ -273,3 +273,25 @@ for (const failure of [false, true]) {
     assert.equal(model.value, "openai\u0000fixture-model");
   });
 }
+
+test('displayed handoff sends a typed attachment separately from text and preserves the composer draft', async t => {
+  const f = await fixture(t);
+  f.edit('Keep my ordinary next question');
+  const packet = Object.freeze({ dashboardId: 'A', rows: [['private-displayed-207']], snapshotAt: '2026-11-11T12:00:00Z' });
+  await f.assistant.explainDisplayed(packet);
+  const sent = f.requests.find(request => request.path.endsWith('/messages'));
+  assert.deepEqual(sent.body.displayedResult, packet);
+  assert.equal(sent.body.acknowledgedProviderId, 'openai');
+  assert.ok(!sent.body.text.includes('private-displayed-207'));
+  assert.equal(f.input.value, 'Keep my ordinary next question');
+});
+
+test('displayed handoff cannot attach to a replacement subject while first chat creation is pending', async t => {
+  const create = deferred();
+  const f = await fixture(t, { existing: id => id === 'B', create: () => create.promise });
+  const pending = f.assistant.explainDisplayed({ dashboardId: 'A', rows: [['private-displayed-207']] });
+  const rejected = assert.rejects(pending, /conversation or provider changed/);
+  await until(() => f.requests.some(request => request.method === 'POST' && request.path.endsWith('/chats')));
+  await f.switchTo('B'); create.resolve(conversation('A')); await rejected;
+  assert.equal(f.requests.filter(request => request.path.endsWith('/messages')).length, 0);
+});

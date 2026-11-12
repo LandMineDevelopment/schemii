@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from functools import reduce
+import hashlib
+import json
 from operator import or_
 import secrets
 from types import SimpleNamespace
 from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter, create_model
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError, create_model
 
 from schemii.common.ai.tool_schema import provider_schema
 from schemii.common.api.errors import ApiProblem
@@ -22,6 +24,7 @@ from .tile_queries import tile_plan
 SUBJECT_KEY = "dashboardId"
 SUBJECT_LABEL = "dashboard"
 READ_ACTION = "get_dashboard"
+DISPLAYED_ACTION = "explain_displayed_result"
 TOOL_NAME = "schemer_actions"
 REPLAY_ACTIONS = {"execute_tile", "plan_tile", "drill_tile", "parameter_values"}
 
@@ -59,6 +62,9 @@ specific saved tile, use its returned bounded sample, cite the tile and sampling
 limits, and avoid claiming totals from a partial sample. Rows and row-derived
 answers are temporary and must not be stored as durable chat history. A new run
 reads current data; it cannot recover an expired historical result.
+Explain displayed result is a separate user attachment permission, not an action
+tool. Ask the user to attach the displayed result with its button; never substitute
+an execution or silently rerun a query for an attachment.
 """
 
 
@@ -68,6 +74,8 @@ def _descriptor(label, path, method, *, group="Dashboards", mutates=False, rows=
             "destructive": False}
 
 ACTIONS = {
+    DISPLAYED_ACTION: _descriptor("Explain displayed result", "/ai/chats/{chat_id}/messages", "POST", group="Results", rows=True,
+        description="Share a bounded client-supplied copy of the displayed result for explanation. Never runs a source query."),
     "list_dashboards": _descriptor("List available dashboards", "/dashboards", "GET",
         description="List dashboard IDs and names currently available to this user."),
     "get_dashboard": _descriptor("Read dashboard", "/dashboards/{dashboard_id}", "GET",
@@ -108,6 +116,95 @@ class DrillSelection(Contract):
 
 class DrillTile(Tile):
     selection: DrillSelection
+
+class DisplayedColumn(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    name: str = Field(max_length=256)
+    type: str = Field(default="unknown", max_length=256)
+
+
+class DisplayedResult(BaseModel):
+    """Client evidence, never a query plan or a source authorization."""
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    dashboardId: str = Field(pattern=r"^dashboard_[0-9a-f]{32}$")
+    dashboardRevision: int = Field(ge=1)
+    modelId: str = Field(pattern=r"^model_[0-9a-f]{32}$")
+    modelRevision: int = Field(ge=1)
+    tileId: str = Field(min_length=1, max_length=100)
+    snapshotAt: str = Field(min_length=1, max_length=64)
+    pane: Literal["main", "drill"]
+    metric: Literal["values", "change", "percent", "running"] = "values"
+    barGroupIndex: int = Field(default=0, ge=0, le=63)
+    selections: dict[str, ScopeSelection] = Field(default_factory=dict, max_length=20)
+    drillSelection: DrillSelection | None = None
+    columns: list[DisplayedColumn] = Field(max_length=128)
+    rows: list[list[JsonValue]] = Field(max_length=10000)
+    cachedRows: int = Field(ge=0, le=10000)
+    displayedRows: int = Field(ge=0, le=10000)
+    partial: bool
+    cacheTruncated: bool
+    chartTruncated: bool
+    clientSampleTruncated: bool
+
+
+def validate_displayed_result(value):
+    # Pydantic's default request errors include the invalid input. Do not reflect
+    # row values or filter parameters into an error/validation response.
+    try:
+        result = DisplayedResult.model_validate(value)
+        if (result.displayedRows > result.cachedRows or len(result.rows) > result.displayedRows
+                or any(len(row) != len(result.columns) for row in result.rows)
+                or (result.pane == "drill") != (result.drillSelection is not None)):
+            raise ValueError("Invalid displayed result shape")
+        return result
+    except (ValidationError, ValueError, TypeError):
+        raise ApiProblem(422, "ai_displayed_result_invalid", "The displayed attachment is invalid. Attach the result again.") from None
+
+
+def displayed_binding(services, owner, dashboard_id, request, packet):
+    """Current metadata only: no catalog, query planning, connection or cursor."""
+    auth = getattr(request.app.state, "auth", None)
+    token = getattr(request, "cookies", {}).get("schemii_session")
+    if auth is not None and auth.enabled:
+        user = auth.resolve(token)
+        if (not user or user.get("id") != owner or user.get("disabled")
+                or "schemer:access" not in auth.capabilities(owner)):
+            raise ApiProblem(403, "ai_displayed_access_changed", "Sign in again and attach the displayed result again.")
+    bundle = authorize(services, owner, dashboard_id, request)
+    dashboard = bundle.dashboard
+    model = bundle.services.models.get(owner, dashboard.model_id)
+    tile = next((item for item in dashboard.tiles if item.id == packet["tileId"]), None)
+    if (packet["dashboardId"] != dashboard_id or dashboard.revision != packet["dashboardRevision"]
+            or packet["modelId"] != dashboard.model_id or packet["modelRevision"] != dashboard.model_revision
+            or model.revision != dashboard.model_revision or tile is None):
+        raise ApiProblem(409, "ai_displayed_result_stale", "The dashboard, model or tile changed. Attach a current displayed result.")
+    if packet["pane"] == "drill" and not bundle.permissions["drill"]:
+        raise ApiProblem(403, "ai_displayed_drill_forbidden", "Your report access no longer permits detail rows.")
+    if not bundle.permissions["edit"]:
+        for scope_id in set(packet["selections"]) - set(dashboard.optional_filters):
+            saved = dashboard.selections.get(scope_id)
+            if saved is None or packet["selections"][scope_id] != _json(saved):
+                raise ApiProblem(403, "ai_displayed_filter_forbidden", "The displayed filter context is no longer available.")
+    profile = bundle.services.connections.get(owner, model.connection_id)
+    access = getattr(bundle.services, "report_access", None)
+    identity = {"owner": owner, "dashboard": dashboard.id, "dashboardRevision": dashboard.revision,
+        "model": model.id, "modelRevision": model.revision,
+        "modelSource": [model.connection_owner_id, model.connection_id, model.database, model.namespace],
+        "source": [getattr(profile, name, None) for name in
+            ("owner_id", "id", "revision", "host", "port", "database", "username", "ownership")],
+        "grant": getattr(access, "grant", None), "permissions": bundle.permissions,
+        "session": hashlib.sha256(str(token).encode()).hexdigest()}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def capture_displayed(services, owner, dashboard_id, request, value):
+    from schemii.common.ai.results import bounded_page
+
+    packet = validate_displayed_result(value).model_dump(mode="json", by_alias=True)
+    binding = displayed_binding(services, owner, dashboard_id, request, packet)
+    packet = bounded_page(services, packet)
+    packet["sampling"]["notice"] = "Client-supplied, unverified displayed evidence; sampled rows are not database totals."
+    return packet, binding
 
 class ParameterValues(Contract):
     scope_id: str = Field(min_length=1, max_length=200)

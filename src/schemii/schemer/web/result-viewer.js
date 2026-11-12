@@ -1,7 +1,7 @@
 import { scrollPosition, restoreScroll, createResultGrid, appendStreamStatus } from './scroll-results.js';
 import { element } from '#common/dom.js';
 import { createIconButton, downloadContent } from '#common/ui.js';
-import { renderVisualization } from './visualizations.js';
+import { renderVisualization, displayedVisualization } from './visualizations.js';
 import { csvContent } from './report-state.js';
 function icon(name, label, callback) { const button = createIconButton({ icon: name, label, className: 'ui-button' }); button.onclick = callback; return button; }
 function requestTime(value) {
@@ -40,7 +40,7 @@ function gridInteractions(host, result) {
   });
   viewport.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.matches('td:not(.drill-mark)')) { event.preventDefault(); event.target.click(); } });
 }
-export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh, canExport = true, canDrill = true, canViewSql = true }) {
+export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh, onExplain, canExport = true, canDrill = true, canViewSql = true }) {
   const dialog = element('dialog', { className: 'expanded-dialog', attrs: { 'aria-label': tile.title } });
   const chartPane = element('section', { className: 'expanded-chart-pane' });
   const chartBody = element('div', { className: 'expanded-chart-body' });
@@ -112,8 +112,14 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
     footer(detailFooter, detailCache);
   }
   if (canViewSql) chartActions.append(icon('sql', 'Show tile SQL', () => { if (cache.plan) openSql(cache.plan, `${tile.title} · SQL`); }));
+  if (onExplain) chartActions.append(icon('assistant', 'Explain displayed result', () => {
+    void onExplain(cache, displayedVisualization(chartBody, tile, cache.snapshot())); dialog.close();
+  }));
   chartActions.append( icon('refresh', 'Refresh tile', () => { dialog.close(); onRefresh(); }), icon('close', 'Close expanded tile', () => dialog.close()));
   if (canViewSql) detailActions.append(icon('sql', 'Show detail SQL', () => { if (detailCache?.plan) openSql(detailCache.plan, 'Detail rows · SQL'); }));
+  if (onExplain) detailActions.append(icon('assistant', 'Explain displayed detail rows', () => {
+    if (detailCache) { void onExplain(detailCache, detailCache.snapshot()); dialog.close(); }
+  }));
   detailActions.append(icon('refresh', 'Refresh detail rows', () => { if (detailSelection) selectDrill(detailSelection, { refresh: true }); }), icon('close', 'Close detail rows', () => { releaseDrill(); detailPane.hidden = true; pane('chart'); }));
   chartPane.append(element('header', { className: 'expanded-pane-header' }, [element('div', {}, [chartTitle, chartStatus]), chartActions]), chartBody, chartFooter);
   detailPane.append(element('header', { className: 'expanded-pane-header' }, [element('div', {}, [detailTitle, chips, detailStatus, detailFreshness, detailTiming]), detailActions]), detailBody, detailFooter);

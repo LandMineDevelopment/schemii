@@ -22,6 +22,18 @@ function actionable(node, text, callback) {
   node.onclick = event => { event.stopPropagation(); callback(); };
   node.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); callback(); } };
 }
+export function displayedVisualization(host, tile, result) {
+  const allowed = ['values', ...(tile.timeAnalysis?.comparison && tile.timeAnalysis.comparison !== 'none' ? ['change', 'percent'] : []), ...(tile.timeAnalysis?.runningTotal ? ['running'] : [])];
+  const metric = allowed.includes(host.dataset.timeMetric) ? host.dataset.timeMetric : 'values';
+  const series = timeSeries(tile, metric);
+  const selected = tile.kind === 'donut' ? series.slice(0, 1) : series;
+  const preview = chartPreview({ ...tile, measures: selected }, result);
+  if (!result.columns.length) return { ...preview, metric };
+  if (['detail', 'aggregate'].includes(tile.kind)) return { ...preview, metric: 'values' };
+  const indices = tile.kind === 'kpi' ? [0] : [...tile.dimensions.map((_, index) => index), ...selected.map(item => item.column)];
+  return { ...preview, metric, cachedRows: result.rows.length, barGroupIndex: Number(host.dataset.barGroupIndex) || 0,
+    columns: indices.map(index => result.columns[index]), rows: preview.rows.map(row => indices.map(index => row[index])) };
+}
 export function renderVisualization(host, tile, result, { onDrill, compact = false, modelId } = {}) {
   const fullResult = result;
   const options = [['values', 'Period values'], ...(tile.timeAnalysis && tile.timeAnalysis.comparison !== 'none' ? [['change', 'Absolute change'], ['percent', 'Percentage change']] : []), ...(tile.timeAnalysis?.runningTotal ? [['running', 'Running totals']] : [])];

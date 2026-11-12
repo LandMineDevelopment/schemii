@@ -13,8 +13,8 @@ import { renderParameterValues } from '#model/filter-controls.js';
 import { newTile, dashboardUpdate, TILE_TYPES } from './dashboard-state.js';
 import { modelUpgradeDraft, modelUpgradeIssues, repairUpgradeIssue } from './model-upgrade.js';
 import { appliedFilterSummary } from './filter-summary.js';
-import { ResultCache, DashboardResultGroup, CacheBudget, DrillCacheRegistry, readResultStream } from './result-cache.js';
-import { renderVisualization } from './visualizations.js';
+import { ResultCache, DashboardResultGroup, CacheBudget, DrillCacheRegistry, readResultStream, freezeDisplayedResult } from './result-cache.js';
+import { renderVisualization, displayedVisualization } from './visualizations.js';
 import { openTileEditor } from './tile-editor.js';
 import { openExpanded, openSql } from './result-viewer.js';
 
@@ -47,6 +47,7 @@ const assistant = createProductAssistant({
   emptyDescription: 'Ask about saved tiles and report results, or describe a dashboard change. Available actions follow your dashboard access.',
   examplePrompts: ['Explain this dashboard and its tiles.', 'What do the results in this dashboard show?', 'Suggest a useful new tile for this dashboard.'],
   resultOperations: ['execute_tile', 'drill_tile', 'parameter_values'],
+  resultActionLabel: 'Ask about current results',
   resultPrompt: ({ payload }) => payload.operation === 'parameter_values'
     ? `Look up current values for exposed filter ${payload.action?.args?.scopeId || 'this filter'} and explain the choices. The values may have changed since the earlier lookup.`
     : `Rerun tile ${payload.action?.args?.tileId || 'the saved tile'} on this dashboard and explain its current results. The data may have changed since the earlier run.`,
@@ -111,6 +112,9 @@ function getStream(tile, selection = null, { refresh = false } = {}) {
         scheduledCards.add(card); requestAnimationFrame(() => { scheduledCards.delete(card); if (card.isConnected) renderTile(card, tile); });
       }
     } });
+    cache.displayContext = JSON.parse(JSON.stringify({ dashboardId: origin.id, dashboardRevision: origin.revision,
+      modelId: origin.modelId, modelRevision: origin.modelRevision, tileId: tile.id,
+      selections: origin.selections, pane: selected ? 'drill' : 'main', drillSelection: selected }));
     if (permissions.export) cache.download = () => {
       if (dashboard?.id !== origin.id) { message('Reopen this dashboard before downloading its results.'); return; }
       const form = document.createElement('form'); form.method = 'POST'; form.action = `${API}/${origin.id}/tiles/${encodeURIComponent(tile.id)}/export`; form.target = '_blank';
@@ -211,6 +215,7 @@ function tileUrl(tile, suffix) { return `${API}/${dashboard.id}/tiles/${encodeUR
 
 function renderTile(card, tile) {
   const state = tileStates.get(tile.id), cache = streams.get(tile.id)?.main, body = card.querySelector('.tile-body'), status = card.querySelector('.tile-status');
+  const explain = card.querySelector('[data-explain-displayed]'); if (explain) explain.disabled = !cache?.snapshotAt;
   if (state?.loading) { body.replaceChildren(element('p', { className: 'empty-state', text: 'Loading…' })); status.textContent = 'Running…'; }
   else if (state?.error) {
     body.replaceChildren(element('p', { className: 'tile-error', text: state.error }));
@@ -240,7 +245,12 @@ function renderTiles() {
       const button = element('button', { type: 'button', text: label }); button.disabled = disabled; button.onclick = event => { event.stopPropagation(); menu.open = false; void callback(); }; contents.append(button);
     }
     menu.append(trigger, contents); actions.append(menu); actions.hidden = !permissions.edit;
-    card.append(element('header', { className: 'tile-header' }, [element('div', {}, [element('h2', { text: tile.title }), element('small', { text: TILE_TYPES.find(([type]) => type === tile.kind)?.[1] })]), actions]), element('div', { className: 'tile-body' }), element('footer', { className: 'tile-footer' }, [element('span', { className: 'tile-status', attrs: { role: 'status' } }), element('span', { className: 'expand-hint', text: 'Click to expand' })]));
+    const explain = icon('assistant', `Explain displayed result for ${tile.title}`, () => {
+      const cache = streams.get(tile.id)?.main;
+      if (cache) void explainDisplayed(cache, displayedVisualization(card.querySelector('.tile-body'), tile, cache.snapshot()));
+    });
+    explain.dataset.explainDisplayed = '';
+    card.append(element('header', { className: 'tile-header' }, [element('div', {}, [element('h2', { text: tile.title }), element('small', { text: TILE_TYPES.find(([type]) => type === tile.kind)?.[1] })]), actions]), element('div', { className: 'tile-body' }), element('footer', { className: 'tile-footer' }, [element('span', { className: 'tile-status', attrs: { role: 'status' } }), explain, element('span', { className: 'expand-hint', text: 'Click to expand' })]));
     card.onclick = event => { if (!event.target.closest('button,summary,details')) expand(tile); };
     card.onkeydown = event => { if (event.target === card && ['Enter', ' '].includes(event.key)) { event.preventDefault(); expand(tile); } };
     $('tile-grid').append(card); renderTile(card, tile);
@@ -276,7 +286,16 @@ async function runAll() {
 }
 function expand(tile) {
   if (!readyToRun()) return;
-  openExpanded({ tile, modelId: dashboard.modelId, canExport: permissions.export, canDrill: permissions.drill, canViewSql: permissions.edit, cache: getStream(tile), createDrillCache: (selection, options) => getStream(tile, selection, options), onRefresh: () => void runTile(tile) });
+  openExpanded({ tile, modelId: dashboard.modelId, canExport: permissions.export, canDrill: permissions.drill, canViewSql: permissions.edit, cache: getStream(tile), createDrillCache: (selection, options) => getStream(tile, selection, options), onRefresh: () => void runTile(tile), onExplain: explainDisplayed });
+}
+
+async function explainDisplayed(cache, result) {
+  const version = epoch;
+  try {
+    if (cache.displayContext?.dashboardId !== dashboard?.id || cache.displayContext.dashboardRevision !== dashboard.revision) throw new Error('The dashboard changed. Refresh and attach a current displayed result.');
+    const frozen = freezeDisplayedResult(result, cache.displayContext);
+    await assistant.explainDisplayed(frozen);
+  } catch (error) { if (version === epoch) message(error.message); }
 }
 
 async function showTileSql(tile) {

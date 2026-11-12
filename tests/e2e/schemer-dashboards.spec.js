@@ -887,3 +887,83 @@ test('later KPI renders while an earlier detail stream remains pending', async (
   await expect(page.locator('[data-tile-id="detail"] .tile-body')).toContainText('Arrived later');
   expect(errors).toEqual([]);
 });
+
+async function displayedAssistant(page) {
+  const state = { attachments: [], providerCalls: 0 };
+  let chat = { id: 'chat_displayed_fixture', dashboardId, revision: 1, status: 'idle',
+    providerId: 'openai', aiModelId: 'fixture-model', title: 'Displayed explanation', modes: { explain_displayed_result: 'ask' }, messages: [], activity: [] };
+  await page.route('**/api/v1/ai/status*', route => route.fulfill({ json: { healthy: true, providers: [
+    { id: 'openai', name: 'OpenAI', authenticated: true, available: true, models: [{ id: 'fixture-model', name: 'Fixture model', status: 'active' }] },
+  ] } }));
+  await page.route('**/api/v1/schemer/ai/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    let response = chat;
+    if (path.endsWith('/settings')) response = { providerId: 'openai', aiModelId: 'fixture-model', modes: { explain_displayed_result: 'ask' },
+      actions: [{ id: 'explain_displayed_result', label: 'Explain displayed result', group: 'Results', readsRows: true }] };
+    else if (path.endsWith('/chats')) response = { chats: [chat] };
+    else if (path.endsWith('/messages') && route.request().method() === 'POST') {
+      state.attachments.push(route.request().postDataJSON());
+      chat = { ...chat, revision: chat.revision + 1, status: 'waiting_approval', pending: {
+        id: `approval_${'d'.repeat(32)}`, kind: 'displayed_result',
+        summary: 'Share the attached displayed sample? This will not query the source.',
+        actions: [{ operation: 'explain_displayed_result', args: {} }],
+      } };
+      response = chat;
+    } else if (path.endsWith('/approval') && route.request().method() === 'POST') {
+      state.providerCalls++;
+      chat = { ...chat, revision: chat.revision + 1, status: 'idle', pending: null,
+        messages: [{ id: 'displayed-answer', role: 'assistant', transient: true, text: 'These unverified displayed rows are a bounded sample, not database totals.' }] };
+      response = chat;
+    }
+    return route.fulfill({ json: response });
+  });
+  return state;
+}
+
+test('explain displayed result freezes current report rows and applied filters without another source request', async ({ page }) => {
+  const { requests, errors } = await mock(page, { manyBars: true });
+  const ai = await displayedAssistant(page);
+  await page.goto('/schemer');
+  const tile = page.locator('.analytics-tile');
+  await expect(tile.locator('.tile-status')).toContainText('500 groups');
+  const sourceRequests = requests.length;
+  await tile.getByRole('button', { name: 'Explain displayed result for Positions by org', exact: true }).click();
+  await expect.poll(() => ai.attachments.length).toBe(1);
+  const attachment = ai.attachments[0];
+  expect(attachment).toMatchObject({ acknowledgedProviderId: 'openai', displayedResult: {
+    dashboardId, dashboardRevision: 1, modelId, modelRevision: 1, tileId: 'positions', pane: 'main',
+    snapshotAt: '2026-09-20T12:00:00Z', cachedRows: 500, displayedRows: 500, clientSampleTruncated: true,
+    selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } },
+  } });
+  expect(attachment.displayedResult.rows).toHaveLength(100);
+  expect(attachment.text).not.toContain('Organization 1');
+  await expect(page.getByRole('button', { name: 'Approve batch', exact: true })).toBeVisible();
+  expect(ai.providerCalls).toBe(0);
+  expect(requests).toHaveLength(sourceRequests);
+  await page.getByRole('button', { name: 'Approve batch', exact: true }).click();
+  await expect(page.locator('.model-ai-messages')).toContainText('not database totals');
+  await expect(page.locator('.model-ai-messages')).toContainText('Temporary · not saved');
+  expect(ai.providerCalls).toBe(1); expect(requests).toHaveLength(sourceRequests);
+  expect(errors).toEqual([]);
+});
+
+test('explain displayed detail rows captures the selected drill snapshot and never refreshes it', async ({ page }) => {
+  const { requests, errors } = await mock(page);
+  const ai = await displayedAssistant(page);
+  await page.goto('/schemer');
+  const tile = page.locator('.analytics-tile'); await expect(tile).toContainText('2 groups');
+  await tile.getByRole('heading', { name: 'Positions by org' }).click();
+  const expanded = page.getByRole('dialog', { name: 'Positions by org', exact: true });
+  await expanded.getByRole('button', { name: 'HQ: 3. View records', exact: true }).click();
+  await expect(expanded.locator('.drill-body')).toContainText('Casey');
+  const sourceRequests = requests.length;
+  await expanded.getByRole('button', { name: 'Explain displayed detail rows', exact: true }).click();
+  await expect(expanded).toHaveCount(0);
+  await expect.poll(() => ai.attachments.length).toBe(1);
+  expect(ai.attachments[0].displayedResult).toMatchObject({ pane: 'drill', metric: 'values',
+    rows: [[1, 'Alex'], [2, 'Blake'], [3, 'Casey']],
+    drillSelection: { dimensions: [{ table: 'person', column: 'org', value: 'HQ' }], measureIndex: 0 },
+    snapshotAt: '2026-09-20T12:00:00Z', cachedRows: 3, displayedRows: 3 });
+  expect(requests).toHaveLength(sourceRequests); expect(ai.providerCalls).toBe(0);
+  expect(errors).toEqual([]);
+});

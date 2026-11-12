@@ -1,8 +1,9 @@
 """Schemer dashboard chats on the shared product conversation lifecycle."""
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Literal
 from schemii.common.metadata.models import Principal, get_current_principal
+from .ai_tools import DisplayedResult, validate_displayed_result
 
 router = APIRouter(prefix="/api/v1/schemer/ai", tags=["schemer-ai"])
 Mode = Literal["disabled", "ask", "automatic"]
@@ -29,6 +30,13 @@ class Message(BaseModel):
     text: str = Field(min_length=1)
     expectedRevision: int = Field(ge=1)
     acknowledgeProviderDataPolicy: bool = False
+    acknowledgedProviderId: str | None = Field(default=None, max_length=128)
+    displayedResult: DisplayedResult | None = None
+
+    @field_validator("displayedResult", mode="before")
+    @classmethod
+    def private_displayed_validation(cls, value):
+        return None if value is None else validate_displayed_result(value)
 
 class Approval(BaseModel):
     model_config = ConfigDict(extra="forbid")

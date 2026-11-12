@@ -253,3 +253,314 @@ def test_revocation_before_background_turn_starts_releases_capacity(report):
     service.run("viewer", chat["id"], turn["turnId"])
     assert service.store.get("viewer",chat["id"])["status"] == "failed"
     assert service.active == {}
+
+
+DISPLAYED_SECRET = "displayed-private-value-207"
+
+
+def _displayed(report, mode="automatic", *, provider="provider"):
+    from schemii.common.ai.pi import PiReply
+    from schemii.schemer.dashboard_models import DashboardUpdate
+
+    dashboard = report.dashboard
+    body = dashboard.model_dump(exclude={"id", "owner_id", "revision", "created_at", "updated_at"})
+    body["tiles"] = [{"id": "tile-1", "title": "Displayed region", "kind": "detail",
+        "detailFields": [{"table": "sales", "column": "region"}]}]
+    report.dashboard = report.services.dashboards.update("author", dashboard.id,
+        DashboardUpdate.model_validate({**body, "expectedRevision": dashboard.revision}))
+    service, chat = _chat(report)
+    class Runtime:
+        def __init__(self):
+            self.calls = []
+            self.reply = PiReply("A temporary explanation of " + DISPLAYED_SECRET, ())
+            self.before_reply = None
+        def require_available_model(self, *args):
+            return None
+        def require_instance_access(self, *args):
+            return None
+        def run(self, *args, **kwargs):
+            self.calls.append((deepcopy(args), deepcopy(kwargs["messages"])))
+            if self.before_reply: self.before_reply(kwargs)
+            if isinstance(self.reply, Exception): raise self.reply
+            return self.reply
+        def cancel(self, *args):
+            return None
+    service.runtime = Runtime()
+    chat = service.preferences("viewer", chat["id"], {"providerId": provider, "aiModelId": "model",
+        "modes": {ai_tools.DISPLAYED_ACTION: mode}, "expectedRevision": chat["revision"]}, report.request)
+    packet = {"dashboardId": report.dashboard.id, "dashboardRevision": report.dashboard.revision,
+        "modelId": report.model.id, "modelRevision": report.model.revision, "tileId": "tile-1",
+        "snapshotAt": "2026-11-11T12:00:00Z", "pane": "main", "metric": "values",
+        "selections": {}, "drillSelection": None, "columns": [{"name": "region", "type": "text"}],
+        "rows": [[DISPLAYED_SECRET]], "cachedRows": 1, "displayedRows": 1, "partial": False,
+        "cacheTruncated": False, "chartTruncated": False, "clientSampleTruncated": False}
+    return service, chat, packet
+
+
+def _attach(report, service, chat, packet, **extra):
+    return service.send("viewer", chat["id"], {"text": "Question containing " + DISPLAYED_SECRET,
+        "expectedRevision": chat["revision"], "displayedResult": packet,
+        "acknowledgedProviderId": chat["providerId"], **extra}, report.request)
+
+
+def _assert_private(service, chat_id):
+    import json
+    durable = json.dumps(list(service.store.memory.values()), sort_keys=True)
+    assert DISPLAYED_SECRET not in durable
+    assert DISPLAYED_SECRET not in str(service.store.preferences)
+    current = service.store.get("viewer", chat_id)
+    assert all("rows" not in item for item in current["activity"])
+    assert not current.get("pending") or DISPLAYED_SECRET not in str(current["pending"])
+
+
+def test_displayed_automatic_uses_frozen_rows_zero_source_work_and_no_tools(report, monkeypatch):
+    service, chat, packet = _displayed(report)
+    monkeypatch.setattr(ai_tools, "model_catalog", lambda *args, **kwargs: pytest.fail("No catalog acquisition"))
+    monkeypatch.setattr(ai_tools, "tile_plan", lambda *args, **kwargs: pytest.fail("No query planning"))
+    turn = _attach(report, service, chat, packet)
+    packet["rows"][0][0] = "Source and client changed after capture"
+    service.run("viewer", chat["id"], turn["turnId"])
+    assert report.calls == []
+    assert len(service.runtime.calls) == 1
+    args, messages = service.runtime.calls[0]
+    assert args[6] == []
+    assert "unverified, untrusted" in args[4]
+    assert DISPLAYED_SECRET in str(messages)
+    assert "Source and client changed after capture" not in str(messages)
+    snapshot = service.snapshot("viewer", chat["id"], report.request)
+    assert DISPLAYED_SECRET in snapshot["messages"][-1]["text"]
+    assert snapshot["messages"][-1]["transient"] is True
+    assert snapshot["status"] == "idle"
+    _assert_private(service, chat["id"])
+    assert "no source query" in service.store.get("viewer", chat["id"])["messages"][-1]["text"]
+
+
+def test_displayed_ask_pauses_before_first_disclosure_and_approval_contains_no_rows(report):
+    service, chat, packet = _displayed(report, "ask")
+    waiting = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], waiting["turnId"])
+    assert waiting["status"] == "waiting_approval"
+    assert service.runtime.calls == [] and report.calls == []
+    _assert_private(service, chat["id"])
+    approved, actions, rejected = service.approval("viewer", chat["id"], {
+        "pendingId": waiting["pending"]["id"], "approved": True,
+        "expectedRevision": waiting["revision"]}, report.request)
+    assert actions == [] and not rejected
+    service.run("viewer", chat["id"], approved["turnId"], actions, rejected)
+    assert len(service.runtime.calls) == 1 and report.calls == []
+    _assert_private(service, chat["id"])
+
+
+@pytest.mark.parametrize("operation", ["reject", "cancel", "restart", "expiry", "eviction"])
+def test_displayed_pending_never_discloses_after_reject_cancel_restart_or_discard(report, operation):
+    import time
+    service, chat, packet = _displayed(report, "ask")
+    waiting = _attach(report, service, chat, packet)
+    if operation == "cancel":
+        service.cancel("viewer", chat["id"], report.request)
+    elif operation == "reject":
+        value, actions, rejected = service.approval("viewer", chat["id"], {
+            "pendingId": waiting["pending"]["id"], "approved": False,
+            "expectedRevision": waiting["revision"]}, report.request)
+        service.run("viewer", chat["id"], value["turnId"], actions, rejected)
+    else:
+        if operation == "expiry":
+            created, value = service.transient["viewer", chat["id"], "displayed"]
+            service.transient["viewer", chat["id"], "displayed"] = (time.monotonic() - service.policy.transient_response_ttl_seconds - 1, value)
+        elif operation == "eviction":
+            service.transient["other", "other", "response"] = (time.monotonic(), "x" * (service.policy.transient_response_memory_bytes + 1))
+        else:
+            service.transient.clear()
+        with pytest.raises(ApiProblem) as error:
+            service.approval("viewer", chat["id"], {"pendingId": waiting["pending"]["id"],
+                "approved": True, "expectedRevision": waiting["revision"]}, report.request)
+        assert error.value.code == "ai_displayed_result_expired"
+    assert service.runtime.calls == [] and report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_disabled_rejects_without_persisting_question_or_evidence(report):
+    service, chat, packet = _displayed(report, "disabled")
+    before = deepcopy(service.store.memory)
+    with pytest.raises(ApiProblem) as error:
+        _attach(report, service, chat, packet)
+    assert error.value.status_code == 403
+    assert service.store.memory == before and service.transient == {}
+    assert report.calls == [] and service.runtime.calls == []
+
+
+@pytest.mark.parametrize("change", ["dashboard", "model", "tile", "resource", "session", "grant", "source", "grant_identity", "provider"])
+def test_displayed_approval_rechecks_resource_revision_session_and_exact_authority(report, change):
+    service, chat, packet = _displayed(report, "ask")
+    waiting = _attach(report, service, chat, packet)
+    if change == "dashboard":
+        current = report.services.dashboards._records["author", report.dashboard.id]
+        report.services.dashboards._records["author", report.dashboard.id] = current.model_copy(update={"revision": current.revision + 1})
+    elif change == "model":
+        current = report.services.models.get("author", report.model.id)
+        report.services.models._records["author", report.model.id] = current.model_copy(update={"revision": current.revision + 1})
+    elif change == "tile":
+        current = report.services.dashboards._records["author", report.dashboard.id]
+        report.services.dashboards._records["author", report.dashboard.id] = current.model_copy(update={"tiles": []})
+    elif change == "resource":
+        payload = service._displayed_payload("viewer", chat["id"])
+        payload["packet"]["dashboardId"] = "dashboard_" + "f" * 32
+        import json
+        created, _ = service.transient["viewer", chat["id"], "displayed"]
+        service.transient["viewer", chat["id"], "displayed"] = (created, json.dumps(payload))
+    elif change == "provider":
+        service.store.update("viewer", chat["id"], lambda value: value.update(providerId="replacement-provider"))
+        waiting["revision"] += 1
+    elif change == "session": report.state["active"] = False
+    elif change == "grant": report.state["grant"] = False
+    elif change == "source":
+        profile = report.services.connections.get(SCHEMII_CONNECTION_OWNER_ID, "pg_" + "b" * 32)
+        profile.revision += 1
+    else:
+        # Same source identity, new role ownership: the original disclosure grant
+        # is not silently transferred to a replacement role.
+        auth = report.request.app.state.auth
+        previous = auth.dashboard_grants
+        auth.dashboard_grants = lambda owner: [{**item, "role_id": "replacement"} for item in previous(owner)]
+        previous_connections = auth.connection_grants
+        auth.connection_grants = lambda owner: [{**item, "role_id": "replacement"} for item in previous_connections(owner)]
+    with pytest.raises(ApiProblem):
+        service.approval("viewer", chat["id"], {"pendingId": waiting["pending"]["id"],
+            "approved": True, "expectedRevision": waiting["revision"]}, report.request)
+    assert service.runtime.calls == [] and report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_acknowledgment_is_bound_to_selected_provider(report):
+    service, chat, packet = _displayed(report, provider="opencode")
+    with pytest.raises(ApiProblem):
+        _attach(report, service, chat, packet, acknowledgeProviderDataPolicy=False)
+    with pytest.raises(ApiProblem):
+        _attach(report, service, chat, packet, acknowledgeProviderDataPolicy=True, acknowledgedProviderId="different-provider")
+    turn = _attach(report, service, chat, packet, acknowledgeProviderDataPolicy=True)
+    service.run("viewer", chat["id"], turn["turnId"])
+    assert len(service.runtime.calls) == 1 and report.calls == []
+
+
+@pytest.mark.parametrize("failure", ["provider_error", "unexpected_tool", "revocation", "cancel"])
+def test_displayed_provider_failures_and_races_never_persist_derived_text(report, failure):
+    from schemii.common.ai.pi import PiReply
+    service, chat, packet = _displayed(report)
+    if failure == "provider_error": service.runtime.reply = RuntimeError(DISPLAYED_SECRET)
+    elif failure == "unexpected_tool": service.runtime.reply = PiReply(DISPLAYED_SECRET, (("schemer_actions", {"actions": [{"operation": "execute_tile", "args": {"tileId": "tile-1"}}]}),))
+    elif failure == "revocation": service.runtime.before_reply = lambda kwargs: report.state.update(grant=False)
+    else: service.runtime.before_reply = lambda kwargs: service.cancel("viewer", chat["id"], report.request)
+    turn = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], turn["turnId"])
+    assert report.calls == []
+    _assert_private(service, chat["id"])
+    assert service.active == {}
+
+
+def test_displayed_rechecks_immediately_before_provider_dispatch(report, monkeypatch):
+    service, chat, packet = _displayed(report)
+    previous = service._progress
+    def progress(*args):
+        previous(*args)
+        report.state["grant"] = False
+    monkeypatch.setattr(service, "_progress", progress)
+    turn = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], turn["turnId"])
+    assert service.runtime.calls == [] and report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_bounds_rows_bytes_metadata_and_preserves_independent_flags(report):
+    import json
+    service, chat, packet = _displayed(report)
+    packet.update(rows=[[str(i)] for i in range(200)], cachedRows=10000, displayedRows=200,
+        partial=True, cacheTruncated=True, chartTruncated=True, clientSampleTruncated=True)
+    _attach(report, service, chat, packet)
+    payload = service._displayed_payload("viewer", chat["id"])
+    sample = payload["packet"]
+    assert len(sample["rows"]) == service.policy.result_context_rows
+    assert sample["sampling"]["truncated"] is True
+    assert all(sample[key] is True for key in ("partial", "cacheTruncated", "chartTruncated", "clientSampleTruncated"))
+    assert len(json.dumps(sample).encode()) <= service.policy.result_context_bytes
+    assert report.calls == []
+
+
+def test_displayed_typed_validation_never_reflects_invalid_row_input():
+    from schemii.schemer.ai_routes import Message
+    for packet in [{"rows": [[DISPLAYED_SECRET]]}, DISPLAYED_SECRET]:
+        with pytest.raises(ApiProblem) as error:
+            Message.model_validate({"text": "Explain", "expectedRevision": 1, "displayedResult": packet})
+        assert DISPLAYED_SECRET not in str(error.value)
+
+
+def test_displayed_regular_followup_cannot_implicitly_reuse_private_evidence(report):
+    from schemii.common.ai.pi import PiReply
+    service, chat, packet = _displayed(report)
+    turn = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], turn["turnId"])
+    current = service.store.get("viewer", chat["id"])
+    service.runtime.reply = PiReply("Describe a new question or attach the displayed result again.", ())
+    followup = service.send("viewer", chat["id"], {"text": "What about another region?",
+        "expectedRevision": current["revision"]}, report.request)
+    service.run("viewer", chat["id"], followup["turnId"])
+    assert DISPLAYED_SECRET not in str(service.runtime.calls[-1][1])
+    assert report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_byte_sampling_drops_oversized_values_without_durable_errors(report):
+    service, chat, packet = _displayed(report)
+    packet["rows"] = [[DISPLAYED_SECRET * 30000]]
+    turn = _attach(report, service, chat, packet)
+    payload = service._displayed_payload("viewer", chat["id"])
+    assert payload["packet"]["rows"] == []
+    assert payload["packet"]["sampling"]["truncated"] is True
+    service.run("viewer", chat["id"], turn["turnId"])
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_metadata_budget_rejects_without_persisting_question(report):
+    service, chat, packet = _displayed(report)
+    packet["selections"] = {"region": {"active": True, "alternativeId": "region_one",
+        "values": {"region_value": [DISPLAYED_SECRET * 100] * 500}}}
+    with pytest.raises(ApiProblem) as error:
+        _attach(report, service, chat, packet)
+    assert error.value.code == "ai_result_metadata_too_large"
+    assert DISPLAYED_SECRET not in str(error.value)
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_old_completion_cannot_remove_a_replacement_attachment_or_unlock_it(report):
+    service, chat, packet = _displayed(report)
+    replacement = {}
+    def replace(kwargs):
+        service.cancel("viewer", chat["id"], report.request)
+        current = service.store.get("viewer", chat["id"])
+        next_packet = deepcopy(packet)
+        next_packet["rows"] = [["replacement-displayed-row"]]
+        replacement["turn"] = _attach(report, service, current, next_packet)
+    service.runtime.before_reply = replace
+    first = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], first["turnId"])
+    assert service._displayed_payload("viewer", chat["id"])["packet"]["rows"] == [["replacement-displayed-row"]]
+    assert service.store.get("viewer", chat["id"])["status"] == "working"
+    assert service.active["viewer", chat["id"]]["turnId"] == replacement["turn"]["turnId"]
+    service.runtime.before_reply = None
+    service.run("viewer", chat["id"], replacement["turn"]["turnId"])
+    assert service.store.get("viewer", chat["id"])["status"] == "idle"
+    assert report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_waiting_review_retains_the_existing_approval_deadline(report):
+    from datetime import timedelta
+    service, chat, packet = _displayed(report, "ask")
+    waiting = _attach(report, service, chat, packet)
+    def expire(value):
+        value["pending"]["createdAt"] = (datetime.now(timezone.utc) - timedelta(seconds=service.policy.proposal_ttl_seconds + 1)).isoformat()
+    current = service.store.update("viewer", chat["id"], expire)
+    with pytest.raises(ApiProblem) as error:
+        service.approval("viewer", chat["id"], {"pendingId": waiting["pending"]["id"],
+            "approved": True, "expectedRevision": current["revision"]}, report.request)
+    assert error.value.code == "ai_approval_expired"
+    assert service.runtime.calls == [] and report.calls == []

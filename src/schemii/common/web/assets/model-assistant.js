@@ -29,7 +29,7 @@ function dialog(title) {
 export function createProductAssistant({
   trigger, getSubjectId, onSubjectChanged, api, productLabel, subjectLabel,
   subjectKey, subjectQueryKey, revisionKey, title, emptyTitle, emptyDescription,
-  examplePrompts, resultOperations = [], resultPrompt, getAvailableActions, permissionScopeNote,
+  examplePrompts, resultOperations = [], resultPrompt, resultActionLabel = "Ask about this result", getAvailableActions, permissionScopeNote,
   allowEmptySubject = false,
 }) {
   let chat = null, settings = null, runtime = null, available = [], pollTimer;
@@ -199,7 +199,7 @@ export function createProductAssistant({
         card.append(details("Result summary", result));
         if (["succeeded", "completed"].includes(payload.status || activity.status)) { const download = assistantDownloadLink(result); if (download) card.append(download); }
       }
-      if (resultOperations.includes(operation) && ["succeeded", "completed"].includes(payload.status || activity.status)) card.append(button("Ask about this result", () => {
+      if (resultOperations.includes(operation) && ["succeeded", "completed"].includes(payload.status || activity.status)) card.append(button(resultActionLabel, () => {
         const executionId = payload.executionId || payload.action?.args?.executionId;
         input.value = resultPrompt?.({ activity, payload, title, executionId }) || `Explain the result of ${title} (action ${activity.id}${executionId ? `, execution ${executionId}` : ""}). Use its result tools; if expired, rerun the saved read and tell me the data may have changed.`;
         input.focus(); controls();
@@ -438,6 +438,34 @@ export function createProductAssistant({
   window.addEventListener("beforeunload", () => { clearTimeout(pollTimer); providerConnections.dispose(); clearInterval(elapsedTimer); });
   return {
     open,
+    async explainDisplayed(displayedResult) {
+      const id = subject();
+      if (displayedResult.dashboardId !== id) throw new Error('Reopen this dashboard before attaching its displayed result.');
+      const opening = open(), openingGeneration = generation;
+      await opening;
+      if (generation !== openingGeneration || subject() !== id || busy || active(chat)) throw new Error('The conversation changed or is busy. Attach the displayed result again.');
+      const choice = selected();
+      if (!choice) throw new Error('Connect and choose an AI model before explaining displayed rows.');
+      const providerId = chat?.providerId || choice.providerId;
+      const acknowledgment = providerId === 'opencode';
+      const provider = runtime?.providers?.find(item => item.id === providerId);
+      if (acknowledgment && !confirm(`${provider?.privacy || provider?.privacyNotice || 'This provider may use prompts and responses for training.'}\n\nShare this displayed sample with this provider?`)) return;
+      const ticket = ++generation;
+      busy = true; controls();
+      try {
+        const target = chat || await newChat(ticket, id);
+        if (!target || !ownsContext(ticket, id) || chat?.id !== target.id || target.providerId !== providerId) throw new Error('The conversation or provider changed. Attach the displayed result again.');
+        const next = await requestJson(`${api}/chats/${encodeURIComponent(target.id)}/messages`, { method: 'POST', body: {
+          text: 'Explain this displayed result, its selected metric and its sample limitations.',
+          expectedRevision: target.revision, displayedResult, acknowledgedProviderId: providerId,
+          acknowledgeProviderDataPolicy: acknowledgment,
+        } });
+        if (ownsContext(ticket, id) && chat?.id === target.id) {
+          await accept(next);
+          tell('Attached a temporary, client-supplied displayed sample. It is unverified and does not query the source. AI sampling limits also apply.');
+        }
+      } finally { if (ownsContext(ticket, id)) { busy = false; render(); } }
+    },
     async subjectChanged() {
       if (contextId === getSubjectId()) return;
       providerConnections.scopeChanged();
