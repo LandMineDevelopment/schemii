@@ -3488,12 +3488,16 @@ function applyDesignHistoryMutation(mutation, { cue = true, render = true } = {}
   if (cue) showDesignChanges(beforeContent, mutation.design.content);
 }
 
-async function applyDesignHistoryPreview(delta) {
+async function applyDesignHistoryPreview(delta, { isCurrent = () => true, mutation = null } = {}) {
   const beforeContent = state.design.content;
-  const afterContent = applyJsonDelta(state.design.content, delta);
+  const afterContent = mutation?.design.content || applyJsonDelta(state.design.content, delta);
   const targets = designChangeTargets(beforeContent, afterContent);
   const prepared = await prepareDesignChangeTransition(targets, { reveal: true });
-  const design = {
+  if (!isCurrent()) {
+    changeTransitions.restore(prepared);
+    return { presentation: null };
+  }
+  const design = mutation?.design || {
     ...state.design,
     content: afterContent,
   };
@@ -3505,6 +3509,10 @@ async function applyDesignHistoryPreview(delta) {
   const focusedView = revealTarget?.scope === "views"
     ? focusChangedViewState(revealTarget)
     : null;
+  // History can restore a view whose prior analysis has been evicted. Assemble
+  // its detail before replacing the mounted surface, just as a cache hit would.
+  if (focusedView) await syncViewAnalysisSelection();
+  if (!isCurrent()) return { presentation: null };
   cancelColumnAuthoring();
   renderCatalogSurfaces();
   renderCatalogState();
@@ -3554,6 +3562,10 @@ async function executeDesignHistoryMoveConfirmed(direction) {
   try {
     const result = await performDesignHistoryMove({
       state, direction, operation,
+      // View analysis uses server-side source columns, including wildcard
+      // expansion. Do not analyze an optimistic design against the old server.
+      deferPreview: Boolean(state.design.content.views?.length
+        || applyJsonDelta(state.design.content, state.designHistory?.[direction]?.delta || []).views?.length),
       applyPreview: applyDesignHistoryPreview,
       requestMove: (move, ...args) => api[move === "undo" ? "undoDesign" : "redoDesign"](...args),
       applyMutation: applyDesignHistoryMutation,

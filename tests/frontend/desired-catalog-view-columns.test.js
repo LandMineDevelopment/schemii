@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
+import { applyJsonDelta } from "../../src/schemii/common/web/assets/json-delta.js";
 
 import { viewAnalysisContextSignature } from "../../src/schemii/schemii/web/assets/design-change.js";
 import { designToCatalog } from "../../src/schemii/schemii/web/assets/design.js";
@@ -154,6 +155,56 @@ function appHarness(load, design = fixture()) {
 function row(harness, id) { return harness.container.children.find(node => node.dataset.changeObjectId === id); }
 function summary(harness, id) { return row(harness, id).children[0].children[0].children[1].textContent; }
 function storyOutputs(harness) { return harness.stories.at(-1).analysis?.outputs; }
+
+function historyPreviewHarness() {
+  const analysis = deferred();
+  const state = { design: fixture(), designLayout: {} };
+  const events = [];
+  const previewSource = appSource.slice(
+    appSource.indexOf("async function applyDesignHistoryPreview("),
+    appSource.indexOf("function historyDraftBlocked("),
+  );
+  const preview = runInNewContext(`${previewSource}\napplyDesignHistoryPreview`, {
+    state, applyJsonDelta,
+    designChangeTargets: () => [{ scope: "views", objectId: "view_totals" }],
+    prepareDesignChangeTransition: async () => ({}),
+    changeTransitions: { restore: () => events.push("restore") },
+    designPositions: () => ({}),
+    commitWorkspaceState: patch => Object.assign(state, patch),
+    designChangeRevealTarget: targets => targets[0],
+    focusChangedViewState: () => ({ designId: "view_totals" }),
+    syncViewAnalysisSelection: () => analysis.promise,
+    cancelColumnAuthoring: () => {},
+    renderCatalogSurfaces: () => events.push("surface"),
+    renderCatalogState: () => {},
+    designChangePresentation: () => ({}),
+    completeDesignChangeTransition: () => events.push("transition"),
+    syncWorkspaceNavigation: () => events.push("navigation"),
+    window: { requestAnimationFrame: () => {} },
+  });
+  return { analysis, events, preview };
+}
+
+test("history restores an evicted view as one assembled analysis surface", async () => {
+  const harness = historyPreviewHarness();
+  const pending = harness.preview([]);
+  await flush();
+  assert.deepEqual(harness.events, [], "pending analysis must preserve the mounted surface");
+  harness.analysis.resolve({ status: "ready" });
+  await pending;
+  assert.deepEqual(harness.events, ["surface", "transition", "navigation"]);
+});
+
+test("navigation during restored-view analysis cannot reveal the old history surface", async () => {
+  const harness = historyPreviewHarness();
+  let current = true;
+  const pending = harness.preview([], { isCurrent: () => current });
+  await flush();
+  current = false;
+  harness.analysis.resolve({ status: "ready" });
+  await pending;
+  assert.deepEqual(harness.events, []);
+});
 
 test("ordinary and materialized browser summaries use the inspector's shared output analysis", async () => {
   const requests = new Map();
