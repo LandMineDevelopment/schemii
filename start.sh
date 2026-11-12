@@ -33,7 +33,8 @@ ensure_docker_access() {
 
 # Exact-container diagnostics do not enter stack configuration or lifecycle
 # preflight. Reported ownership labels are opaque metadata, never paths to open.
-if [[ "${1-}" == --inspect-runtime ]]; then
+if [[ "${1-}" == --inspect-runtime || "${1-}" == --stop-retired-runtime ]]; then
+  runtime_action="$1"
   shift
   (( $# >= 1 && $# <= 8 )) || { printf 'Schemii runtime inspection requires 1 through 8 distinct full lowercase container IDs\n' >&2; exit 2; }
   declare -A runtime_inspection_seen=()
@@ -44,10 +45,14 @@ if [[ "${1-}" == --inspect-runtime ]]; then
   done
   command -v python3 >/dev/null 2>&1 || fail "Python 3 is required for runtime inspection"
   ensure_docker_access
-  exec python3 - "$@" <<'PY'
+  exec python3 - "$runtime_action" "$ROOT_DIR" "$@" <<'PY'
+from contextlib import ExitStack
+import fcntl
 import json
 import os
+from pathlib import Path
 import select
+import stat
 import subprocess
 import sys
 import time
@@ -58,6 +63,7 @@ FIELDS = ("id", "name", "status", "exitCode", "restartCount", "restartPolicy",
           "composeWorkingDirectory", "composeConfigFiles")
 LABELS = FIELDS[7:]
 MAX_RECORD_BYTES = 16_384
+MODE, ROOT, *IDENTIFIERS = sys.argv[1:]
 
 
 def unique_object(pairs):
@@ -70,26 +76,8 @@ def unique_object(pairs):
 
 
 def inspect(identifier):
-    process = None
     try:
-        process = subprocess.Popen(
-            ["docker", "container", "inspect", "--format", TEMPLATE, identifier],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        )
-        raw = bytearray()
-        deadline = time.monotonic() + 10
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:
-                raise ValueError()
-            chunk = os.read(process.stdout.fileno(), MAX_RECORD_BYTES + 1 - len(raw))
-            if not chunk:
-                break
-            raw.extend(chunk)
-            if len(raw) > MAX_RECORD_BYTES:
-                raise ValueError()
-        if process.wait(timeout=max(0.01, deadline - time.monotonic())) != 0:
-            raise ValueError()
+        raw = bounded_command(["docker", "container", "inspect", "--format", TEMPLATE, identifier])
         value = json.loads(raw, object_pairs_hook=unique_object)
         if type(value) is not dict or set(value) != set(FIELDS) or value["id"] != identifier:
             raise ValueError()
@@ -115,16 +103,131 @@ def inspect(identifier):
         # CLI stderr and parser exceptions can contain secrets or target data.
         sys.stderr.write(f"Schemii runtime inspection failed for container {identifier}\n")
         raise SystemExit(1) from None
+
+
+def bounded_command(arguments, *, timeout=10, limit=MAX_RECORD_BYTES):
+    """Capture only bounded output, including failed or wedged CLI attempts."""
+    process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        raw = bytearray()
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:
+                raise ValueError()
+            chunk = os.read(process.stdout.fileno(), limit + 1 - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > limit:
+                raise ValueError()
+        if process.wait(timeout=max(0.01, deadline - time.monotonic())) != 0:
+            raise ValueError()
+        return raw.decode("utf-8")
     finally:
-        if process is not None:
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-            process.stdout.close()
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdout.close()
 
 
-records = [inspect(identifier) for identifier in sys.argv[1:]]
-sys.stdout.write("\n".join(records) + "\n")
+def lease(stack, common, filename, variable, descriptor):
+    path = common / filename
+    inherited = os.environ.get(variable)
+    if inherited is not None:
+        if inherited != str(descriptor):
+            raise ValueError()
+        info = path.lstat()
+        current = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
+            raise ValueError()
+        stream = stack.enter_context(os.fdopen(os.dup(descriptor), "a"))
+    else:
+        stream = stack.enter_context(os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), "a"))
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError()
+    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def retired_identity(record, primary):
+    service = record["composeService"]
+    configs = ",".join(str(primary / name) for name in (
+        "compose.yaml", "compose.postgres.yaml", "compose.ai.yaml",
+        "compose.schemer.yaml", "compose.schemer.ai.yaml", "compose.tailnet.yaml",
+    ))
+    return (
+        record["composeProject"] == "schemii"
+        and service in {"schemii", "schemer"}
+        and record["name"] == f"/schemii-{service}-1"
+        and record["composeWorkingDirectory"] == str(primary)
+        and record["composeConfigFiles"] == configs
+        and record["restartPolicy"] == "on-failure"
+        and record["restartRetryLimit"] == 0
+    )
+
+
+def eligible(record, primary):
+    return (retired_identity(record, primary) and record["status"] == "restarting"
+            and record["exitCode"] == 1 and record["restartCount"] > 0)
+
+
+def stop_retired():
+    # Only Git-derived paths are opened. Container labels remain opaque values.
+    common = Path(bounded_command(["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"]).strip())
+    if not common.is_absolute() or not common.is_dir():
+        raise ValueError()
+    listed = bounded_command(["git", f"--git-dir={common}", "worktree", "list", "--porcelain", "-z"])
+    first = listed.split("\0", 1)[0]
+    if not first.startswith("worktree "):
+        raise ValueError()
+    primary = Path(first[len("worktree "):])
+    if not primary.is_absolute() or not primary.is_dir() or primary.resolve() != primary:
+        raise ValueError()
+    with ExitStack() as stack:
+        if os.environ.get("SCHEMII_QA_LEASE_MODE", "exclusive") != "exclusive":
+            raise ValueError()
+        lease(stack, common, "qa-startup.lock", "SCHEMII_QA_GATE_FD", 4)
+        lease(stack, common, "qa-deployment.lock", "SCHEMII_QA_LEASE_FD", 3)
+        records = [json.loads(inspect(identifier)) for identifier in IDENTIFIERS]
+        if not all(eligible(record, primary) for record in records):
+            raise ValueError()
+        stopped = []
+        for index, identifier in enumerate(IDENTIFIERS):
+            stage = "revalidation"
+            try:
+                current = json.loads(inspect(identifier))
+                if not eligible(current, primary):
+                    raise ValueError()
+                stage = "stop-unconfirmed"
+                output = bounded_command(["docker", "container", "stop", "--time", "10", identifier], timeout=15, limit=256)
+                if output.strip() != identifier:
+                    raise ValueError()
+                stage = "post-stop-unconfirmed"
+                after = json.loads(inspect(identifier))
+                if not retired_identity(after, primary) or after["status"] != "exited":
+                    raise ValueError()
+                stopped.append(identifier)
+            except (Exception, SystemExit):
+                sys.stdout.write(json.dumps({"outcome": "incomplete", "stopped": stopped,
+                    "unconfirmed": identifier, "stage": stage,
+                    "unattempted": IDENTIFIERS[index + 1:]}, separators=(",", ":")) + "\n")
+                sys.stderr.write("Schemii retired runtime stop incomplete; inspect the reported exact IDs before another action\n")
+                return 1
+        sys.stdout.write(json.dumps({"outcome": "stopped", "stopped": stopped}, separators=(",", ":")) + "\n")
+        return 0
+
+
+if MODE == "--inspect-runtime":
+    records = [inspect(identifier) for identifier in IDENTIFIERS]
+    sys.stdout.write("\n".join(records) + "\n")
+else:
+    try:
+        outcome = stop_retired()
+    except (Exception, SystemExit):
+        sys.stderr.write("Schemii retired runtime stop refused before mutation: ownership, state or exclusive deployment lease could not be verified\n")
+        outcome = 1
+    raise SystemExit(outcome)
 PY
 fi
 
@@ -152,7 +255,7 @@ SCHEMII_RUNTIME_RECEIPT="${SCHEMII_RUNTIME_RECEIPT-}"
 SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
-  printf 'Usage: %s [--inspect-runtime ID [ID ...] | --demo | --prepare-testing | --reset-testing SPACE | --check-testing-reset SPACE | --verify-testing [SPACE] | --prepare-testing-writable ACCOUNT | --reset-testing-writable ACCOUNT | --verify-testing-writable ACCOUNT | --backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
+  printf 'Usage: %s [--inspect-runtime ID [ID ...] | --stop-retired-runtime ID [ID ...] | --demo | --prepare-testing | --reset-testing SPACE | --check-testing-reset SPACE | --verify-testing [SPACE] | --prepare-testing-writable ACCOUNT | --reset-testing-writable ACCOUNT | --verify-testing-writable ACCOUNT | --backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
 }
 
 list_demo_scenarios() {

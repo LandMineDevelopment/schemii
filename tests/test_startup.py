@@ -1053,3 +1053,440 @@ def test_runtime_inspection_runtime_access_failure_is_sanitized_without_side_eff
     assert _filesystem_snapshot(protected) == before
     if commands.exists():
         assert [json.loads(line) for line in commands.read_text().splitlines()] == [["docker", "info"]]
+
+
+LEGACY_COMPOSE_FILES = (
+    "compose.yaml",
+    "compose.postgres.yaml",
+    "compose.ai.yaml",
+    "compose.schemer.yaml",
+    "compose.schemer.ai.yaml",
+    "compose.tailnet.yaml",
+)
+
+
+def _retired_stop_fixture(tmp_path):
+    worktree, environment, commands, protected, _ = _runtime_inspection_fixture(
+        tmp_path
+    )
+    # Inspect-only intentionally bypasses this invalid descriptor. Stop requires
+    # a genuine exclusive lease, so begin with no inherited lease assertion.
+    environment.pop("SCHEMII_QA_LEASE_FD")
+    primary = tmp_path / "primary checkout"
+    primary.mkdir()
+    common = primary / ".git"
+    common.mkdir()
+    state = tmp_path / "runtime-state.json"
+    state.write_text("{}")
+    plans = tmp_path / "runtime-plans.json"
+    records = {}
+    for identifier, service in ((RUNTIME_ID, "schemii"), (RUNTIME_OTHER_ID, "schemer")):
+        records[identifier] = {
+            "record": _runtime_record(
+                identifier,
+                name=f"/schemii-{service}-1",
+                composeProject="schemii",
+                composeService=service,
+                composeWorkingDirectory=str(primary),
+                composeConfigFiles=",".join(
+                    str(primary / name) for name in LEGACY_COMPOSE_FILES
+                ),
+            )
+        }
+    plans.write_text(json.dumps(records))
+    environment.update(
+        FAKE_PRIMARY=str(primary),
+        FAKE_COMMON=str(common),
+        FAKE_STOP_PLANS=str(plans),
+        FAKE_STOP_STATE=str(state),
+    )
+    binary = Path(environment["PATH"])
+    (binary / "git").write_text(
+        f"#!{sys.executable}\n"
+        "import json,os,sys\n"
+        "from pathlib import Path\n"
+        "args=sys.argv[1:]\n"
+        "with Path(os.environ['COMMAND_LOG']).open('a') as log: log.write(json.dumps(['git',*args])+'\\n')\n"
+        "if args==['-C',str(Path(sys.argv[0]).parent.parent/\"runtime checkout ' dollar$ semicolon;\"),'rev-parse','--path-format=absolute','--git-common-dir']:\n"
+        " print(os.environ['FAKE_COMMON'])\n"
+        "elif args==['--git-dir='+os.environ['FAKE_COMMON'],'worktree','list','--porcelain','-z']:\n"
+        " sys.stdout.write('worktree '+os.environ['FAKE_PRIMARY']+'\\0HEAD '+'0'*40+'\\0\\0')\n"
+        "else: sys.exit(95)\n"
+    )
+    (binary / "docker").write_text(
+        f"#!{sys.executable}\n"
+        "import fcntl,json,os,re,sys,time\n"
+        "from pathlib import Path\n"
+        "args=sys.argv[1:]\n"
+        "with Path(os.environ['COMMAND_LOG']).open('a') as log: log.write(json.dumps(['docker',*args])+'\\n')\n"
+        "if args==['info']:\n"
+        " print('PRIVATE_INFO_SECRET',file=sys.stderr)\n"
+        " sys.exit(1 if os.environ.get('FAKE_STALE_GROUP') and not os.environ.get('FAKE_GROUP_REFRESHED') else 0)\n"
+        "for name in ['qa-startup.lock','qa-deployment.lock']:\n"
+        " with (Path(os.environ['FAKE_COMMON'])/name).open('a') as lock:\n"
+        "  try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)\n"
+        "  except BlockingIOError: pass\n"
+        "  else: print('PRIVATE_MISSING_LEASE',file=sys.stderr);sys.exit(96)\n"
+        "plans=json.loads(Path(os.environ['FAKE_STOP_PLANS']).read_text())\n"
+        "state_path=Path(os.environ['FAKE_STOP_STATE']);state=json.loads(state_path.read_text())\n"
+        f"template={RUNTIME_INSPECT_TEMPLATE!r}\n"
+        "if len(args)==5 and args[:3]==['container','inspect','--format'] and args[3]==template and re.fullmatch('[0-9a-f]{64}',args[4]):\n"
+        " identifier=args[4];plan=plans[identifier];seen=state.setdefault(identifier,{'inspects':0,'stopped':False})\n"
+        " if seen['stopped']: record=plan.get('after',{**plan['record'],'status':'exited','exitCode':137})\n"
+        " else: record=plan.get('sequence',[plan['record']])[min(seen['inspects'],len(plan.get('sequence',[plan['record']]))-1)]\n"
+        " seen['inspects']+=1;state_path.write_text(json.dumps(state))\n"
+        " print(json.dumps(record));sys.exit(0)\n"
+        "if len(args)==5 and args[:4]==['container','stop','--time','10'] and re.fullmatch('[0-9a-f]{64}',args[4]):\n"
+        " identifier=args[4];plan=plans[identifier]\n"
+        " print('PRIVATE_STOP_ERROR_SECRET',file=sys.stderr)\n"
+        " if plan.get('stop_error'): print('PRIVATE_STOP_STDOUT_SECRET');sys.exit(1)\n"
+        " state[identifier]['stopped']=True;state_path.write_text(json.dumps(state))\n"
+        " if plan.get('timeout'): time.sleep(30)\n"
+        " print(plan.get('stop_stdout',identifier));sys.exit(0)\n"
+        "print('PRIVATE_FORBIDDEN_RUNTIME_COMMAND',file=sys.stderr);sys.exit(97)\n"
+    )
+    return worktree, environment, commands, protected, primary, common, plans, state
+
+
+def _run_retired_stop(worktree, environment, identifiers=None, **kwargs):
+    return subprocess.run(
+        [
+            str(worktree / "start.sh"),
+            "--stop-retired-runtime",
+            *(
+                identifiers
+                if identifiers is not None
+                else [RUNTIME_ID, RUNTIME_OTHER_ID]
+            ),
+        ],
+        cwd=worktree,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=25,
+        check=False,
+        **kwargs,
+    )
+
+
+def _stop_events(commands):
+    return (
+        [
+            event
+            for event in map(json.loads, commands.read_text().splitlines())
+            if event[:3] == ["docker", "container", "stop"]
+        ]
+        if commands.exists()
+        else []
+    )
+
+
+@pytest.mark.parametrize(
+    "identifiers",
+    [
+        [],
+        [RUNTIME_ID, RUNTIME_ID],
+        ["a" * 63],
+        ["A" * 64],
+        ["schemii-schemii-1"],
+        ["--help"],
+        [";touch injected"],
+        [f"{i:064x}" for i in range(9)],
+    ],
+)
+def test_retired_stop_validates_all_ids_before_program_or_runtime_access(
+    tmp_path, identifiers
+):
+    worktree, environment, commands, protected, *_ = _retired_stop_fixture(tmp_path)
+    before = _filesystem_snapshot(protected)
+    result = _run_retired_stop(worktree, environment, identifiers)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert not commands.exists()
+    assert _filesystem_snapshot(protected) == before
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"composeProject": "schemii-test"},
+        {"composeProject": "foreign"},
+        {"composeService": "postgres"},
+        {"name": "/schemii-schemer-2"},
+        {"composeWorkingDirectory": "/untrusted/foreign"},
+        {"composeWorkingDirectory": None},
+        {"composeConfigFiles": "/untrusted/compose.yaml"},
+        {"composeConfigFiles": None},
+        {"restartPolicy": "always"},
+        {"restartRetryLimit": 1},
+        {"status": "running"},
+        {"status": "exited"},
+        {"status": "dead"},
+        {"exitCode": 0},
+        {"exitCode": 2},
+        {"restartCount": 0},
+        {"id": "c3" * 32},
+    ],
+)
+def test_retired_stop_rejects_entire_batch_before_stopping_any_ineligible_container(
+    tmp_path, changes
+):
+    worktree, environment, commands, protected, primary, common, plans, _ = (
+        _retired_stop_fixture(tmp_path)
+    )
+    data = json.loads(plans.read_text())
+    data[RUNTIME_OTHER_ID]["record"].update(changes)
+    plans.write_text(json.dumps(data))
+    before = _filesystem_snapshot(protected)
+    result = _run_retired_stop(worktree, environment)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert _stop_events(commands) == []
+    assert "PRIVATE_" not in result.stderr
+    assert _filesystem_snapshot(protected) == before
+    assert sorted(p.name for p in primary.iterdir()) == [".git"]
+    assert sorted(p.name for p in common.iterdir()) == [
+        "qa-deployment.lock",
+        "qa-startup.lock",
+    ]
+
+
+def test_retired_stop_batch_holds_both_canonical_locks_and_preserves_stopped_containers(
+    tmp_path,
+):
+    worktree, environment, commands, protected, primary, common, _, state = (
+        _retired_stop_fixture(tmp_path)
+    )
+    before = _filesystem_snapshot(protected)
+    result = _run_retired_stop(worktree, environment)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "outcome": "stopped",
+        "stopped": [RUNTIME_ID, RUNTIME_OTHER_ID],
+    }
+    events = list(map(json.loads, commands.read_text().splitlines()))
+    runtime = [event for event in events if event[0] == "docker"]
+    assert [event[1:3] for event in runtime] == [
+        ["info"],
+        *[["container", "inspect"]] * 3,
+        ["container", "stop"],
+        ["container", "inspect"],
+        ["container", "inspect"],
+        ["container", "stop"],
+        ["container", "inspect"],
+    ]
+    assert _stop_events(commands) == [
+        ["docker", "container", "stop", "--time", "10", identifier]
+        for identifier in [RUNTIME_ID, RUNTIME_OTHER_ID]
+    ]
+    assert all(item["stopped"] for item in json.loads(state.read_text()).values())
+    assert _filesystem_snapshot(protected) == before
+    assert sorted(p.name for p in worktree.iterdir()) == ["start.sh"]
+    assert sorted(p.name for p in primary.iterdir()) == [".git"]
+    assert sorted(p.name for p in common.iterdir()) == [
+        "qa-deployment.lock",
+        "qa-startup.lock",
+    ]
+    assert "PRIVATE_" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "lockname,shared",
+    [
+        ("qa-startup.lock", False),
+        ("qa-deployment.lock", False),
+        ("qa-deployment.lock", True),
+    ],
+)
+def test_retired_stop_refuses_active_launch_or_qa_lease_without_inspection(
+    tmp_path, lockname, shared
+):
+    worktree, environment, commands, _, _, common, _, _ = _retired_stop_fixture(
+        tmp_path
+    )
+    with (common / lockname).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        result = _run_retired_stop(worktree, environment)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert _stop_events(commands) == []
+    events = list(map(json.loads, commands.read_text().splitlines()))
+    assert [event for event in events if event[0] == "docker"] == [["docker", "info"]]
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("SCHEMII_QA_LEASE_MODE", "shared"),
+        ("SCHEMII_QA_LEASE_FD", "9"),
+        ("SCHEMII_QA_GATE_FD", "9"),
+    ],
+)
+def test_retired_stop_rejects_invalid_or_shared_inherited_lease(tmp_path, name, value):
+    worktree, environment, commands, *_ = _retired_stop_fixture(tmp_path)
+    environment[name] = value
+    result = _run_retired_stop(worktree, environment)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert _stop_events(commands) == []
+
+
+def test_retired_stop_rejects_symlinked_lock_without_following_it(tmp_path):
+    worktree, environment, commands, protected, _, common, _, _ = _retired_stop_fixture(
+        tmp_path
+    )
+    target = protected / "lock-must-not-open"
+    (common / "qa-startup.lock").symlink_to(target)
+    before = _filesystem_snapshot(protected)
+    result = _run_retired_stop(worktree, environment)
+    assert result.returncode == 1
+    assert _stop_events(commands) == []
+    assert _filesystem_snapshot(protected) == before
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "revalidation",
+        "stop-error",
+        "post-status",
+        "post-dead",
+        "post-owner",
+        "post-invalid",
+        "stop-output",
+        "stop-oversize",
+        "timeout",
+    ],
+)
+def test_retired_stop_partial_failure_reports_confirmed_and_unconfirmed_ids(
+    tmp_path, stage
+):
+    worktree, environment, commands, protected, _, _, plans, _ = _retired_stop_fixture(
+        tmp_path
+    )
+    data = json.loads(plans.read_text())
+    plan = data[RUNTIME_OTHER_ID]
+    expected_stage = "post-stop-unconfirmed"
+    if stage == "revalidation":
+        plan["sequence"] = [
+            plan["record"],
+            {**plan["record"], "composeProject": "foreign"},
+        ]
+        expected_stage = "revalidation"
+    elif stage == "stop-error":
+        plan["stop_error"] = True
+        expected_stage = "stop-unconfirmed"
+    elif stage == "stop-output":
+        plan["stop_stdout"] = "PRIVATE_UNTRUSTED_STOP_REPLY"
+        expected_stage = "stop-unconfirmed"
+    elif stage == "stop-oversize":
+        plan["stop_stdout"] = "PRIVATE_OVERSIZE_REPLY" * 100
+        expected_stage = "stop-unconfirmed"
+    elif stage == "timeout":
+        plan["timeout"] = True
+        expected_stage = "stop-unconfirmed"
+    elif stage == "post-invalid":
+        plan["after"] = {}
+    elif stage == "post-dead":
+        plan["after"] = {**plan["record"], "status": "dead"}
+    else:
+        plan["after"] = {
+            **plan["record"],
+            "status": "running" if stage == "post-status" else "exited",
+            "composeProject": "foreign" if stage == "post-owner" else "schemii",
+        }
+    plans.write_text(json.dumps(data))
+    before = _filesystem_snapshot(protected)
+    result = _run_retired_stop(worktree, environment)
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {
+        "outcome": "incomplete",
+        "stopped": [RUNTIME_ID],
+        "unconfirmed": RUNTIME_OTHER_ID,
+        "stage": expected_stage,
+        "unattempted": [],
+    }
+    assert "PRIVATE_" not in result.stdout + result.stderr
+    assert len(_stop_events(commands)) == (1 if stage == "revalidation" else 2)
+    assert _filesystem_snapshot(protected) == before
+
+
+def test_retired_stop_reports_remaining_ids_after_first_failure(tmp_path):
+    worktree, environment, commands, _, _, _, plans, _ = _retired_stop_fixture(tmp_path)
+    data = json.loads(plans.read_text())
+    data[RUNTIME_ID]["stop_error"] = True
+    plans.write_text(json.dumps(data))
+    result = _run_retired_stop(worktree, environment)
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {
+        "outcome": "incomplete",
+        "stopped": [],
+        "unconfirmed": RUNTIME_ID,
+        "stage": "stop-unconfirmed",
+        "unattempted": [RUNTIME_OTHER_ID],
+    }
+    assert len(_stop_events(commands)) == 1
+
+
+def test_retired_stop_stale_group_reexec_preserves_mode_and_exact_ids(tmp_path):
+    worktree, environment, commands, _, _, _, _, _ = _retired_stop_fixture(tmp_path)
+    binary = Path(environment["PATH"])
+    (binary / "id").write_text(
+        '#!/bin/bash\ncase "$*" in\n-nG) printf "users\\n" ;;\n-un) printf "fixture\\n" ;;\n"-nG fixture") printf "users docker\\n" ;;\n*) exit 95 ;;\nesac\n'
+    )
+    (binary / "newgrp").write_text(
+        f'#!{sys.executable}\nimport os,sys\nassert sys.argv[1:3]==["docker","-c"]\nos.execve("/bin/bash",["bash","-c",sys.argv[3]],{{**os.environ,"FAKE_GROUP_REFRESHED":"1"}})\n'
+    )
+    environment["FAKE_STALE_GROUP"] = "1"
+    result = _run_retired_stop(worktree, environment)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "outcome": "stopped",
+        "stopped": [RUNTIME_ID, RUNTIME_OTHER_ID],
+    }
+    assert (
+        result.stderr
+        == "Refreshing this process with the account's Docker group membership...\n"
+    )
+    events = list(map(json.loads, commands.read_text().splitlines()))
+    assert events[:2] == [["docker", "info"], ["docker", "info"]]
+    assert len(_stop_events(commands)) == 2
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_retired_stop_checks_genuine_inherited_exclusive_descriptors(tmp_path, valid):
+    worktree, environment, commands, _, _, common, _, _ = _retired_stop_fixture(
+        tmp_path
+    )
+    driver = tmp_path / "inherited-driver.py"
+    driver.write_text(
+        "import fcntl,os,sys\n"
+        "from pathlib import Path\n"
+        "common=Path(os.environ['FAKE_COMMON'])\n"
+        f"gate=os.open(common/'qa-startup.lock',os.O_CREAT|os.O_WRONLY,0o600)\n"
+        f"lease=os.open(common/{'qa-deployment.lock' if valid else 'foreign.lock'!r},os.O_CREAT|os.O_WRONLY,0o600)\n"
+        "fcntl.flock(gate,fcntl.LOCK_EX);fcntl.flock(lease,fcntl.LOCK_EX)\n"
+        "gate_copy=os.dup(gate);lease_copy=os.dup(lease)\n"
+        "os.dup2(gate_copy,4);os.dup2(lease_copy,3)\n"
+        "os.set_inheritable(3,True);os.set_inheritable(4,True)\n"
+        "environment={**os.environ,'SCHEMII_QA_GATE_FD':'4','SCHEMII_QA_LEASE_FD':'3','SCHEMII_QA_LEASE_MODE':'exclusive'}\n"
+        f"os.execve({str(worktree / 'start.sh')!r},[{str(worktree / 'start.sh')!r},'--stop-retired-runtime',{RUNTIME_ID!r},{RUNTIME_OTHER_ID!r}],environment)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, str(driver)],
+        cwd=worktree,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if valid:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["stopped"] == [RUNTIME_ID, RUNTIME_OTHER_ID]
+        assert len(_stop_events(commands)) == 2
+    else:
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert _stop_events(commands) == []
