@@ -120,6 +120,10 @@ try {
       recovery: actor.workspace ? { username: actor.username, workspaceId: actor.workspace.id, consoleId: `con_${'0'.repeat(32)}`,
         workspaceRevision: actor.workspace.revision, settingsRevision: actor.settings.revision } : null };
     await writeJSON(join(dir, 'ownership-private.json'), ownership);
+    const observerCredentials = join(dir, 'observer-credentials-private.json');
+    await writeJSON(observerCredentials, { accounts: { [fixture.admin.username]: { password: fixture.admin.password } } });
+    run.observer = { runtimeReceiptFile: fixture.osRuntimeReceiptFile, credentialsFile: observerCredentials,
+      account: fixture.admin.username, ownershipConfig: join(dir, 'ownership-private.json'), output: config.observerFile };
     await sampleSource(ownership.sourceConfig, ownership.sourceOutput);
     run.deployment = { fixtureOnly: true, profile: fixture.profile, instrumentation: fixture.instrumentation, stockCapacityEligible: false };
   } else {

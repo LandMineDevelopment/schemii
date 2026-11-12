@@ -96,9 +96,14 @@ accepts no borrowed credential file or retained-account list in disposable mode:
 Preparation returns a run directory. Before `run`, the coordinator starts the
 independent collector using a verified launcher **host PID/cgroup runtime receipt**,
 the fixture administrator credentials, and that run's generated
-`ownership-private.json`. The holder's `startup-effective-configuration` receipt
+`ownership-private.json`. The generated private manifest's `observer` object supplies
+the exact paths/account: authority's `osRuntimeReceiptFile`, the run's converted
+`observer-credentials-private.json`, ownership config and declared output. Use those
+with `node testing/load/observer.mjs --runtime-receipt FILE --credentials-file FILE
+--account NAME --ownership-config FILE --output FILE`. The holder's `startup-effective-configuration` receipt
 is a separate contract and cannot substitute for the host observation receipt.
-Missing host observation/attach source certification blocks qualified smoke;
+The fixture OS export and init/API process consumer are authored; live host
+observation/attach source certification is still required before qualified smoke;
 `--allow-unobserved` can only support explicitly unqualified smoke protocol work.
 
 The controller runs in one dedicated process group and uses incremental Node only.

@@ -188,7 +188,7 @@ headroom remain unknown. Active
 recovery now requires a fresh authenticated read, exact SELECT terminal, captured
 backend and independently observed release. Workload/cardinality provisioners and
 weighted mix are authored with deterministic controls. Live qualification,
-compatible held-fixture host observation export, independent cleanup/review and
+live held-fixture host observation/attachment qualification, independent cleanup/review and
 the actual campaign remain pending. The hard report guard remains
 `capacityEligible: false`. Preserve normal
 end-user grants, exclude SQL/row/credential/owner labels from public metrics, and

@@ -64,6 +64,23 @@ test('one verified API plus container init retains all resource accounting; unkn
   const bound = { ...f.container, initProcess: { pid: 99, birthTick: '100', namespacePid: 1 }, apiProcess: { pid: 100, birthTick: '999', namespacePid: 2 } };
   assert.equal((await sampleContainer(bound, f)).status, 'unavailable');
 });
+test('integrated fixture argv and PID birth bindings qualify init plus exactly one API through the real sampler', async t => {
+  const f = await fixture(t), args = ['pressure_app:observed_application', '--factory', '--app-dir', '/qualification', '--host', '0.0.0.0', '--port', '8000', '--workers', '1', '--no-access-log'];
+  await writeFile(join(f.procRoot, '100/cmdline'), ['/sbin/docker-init', '--', 'uvicorn', ...args, ''].join('\0'));
+  await mkdir(join(f.procRoot, '101')); const fields = Array(22).fill('0'); fields[0] = 'S'; fields[19] = '1001';
+  await writeFile(join(f.procRoot, '101/stat'), `101 (api) ${fields.join(' ')}\n`);
+  await writeFile(join(f.procRoot, '101/status'), 'VmRSS:\t40 kB\nNSpid:\t101\t7\nThreads:\t2\n');
+  await writeFile(join(f.procRoot, '101/cmdline'), ['uvicorn', ...args, ''].join('\0'));
+  await writeFile(join(f.procRoot, '101/cgroup'), '0::/owned.scope\n'); await writeFile(join(f.cgroupRoot, 'owned.scope/cgroup.procs'), '100\n101\n');
+  const bound = { ...f.container, initProcess: { pid: 100, birthTick: '999', namespacePid: 1 }, apiProcess: { pid: 101, birthTick: '1001', namespacePid: 7 } };
+  const sampled = await sampleContainer(bound, f); assert.equal(sampled.status, 'available'); assert.equal(sampled.rssBytes, 122880);
+  assert.deepEqual(sampled.processes.map(value => value.role), ['container_init', 'api']);
+  const now = Date.now(), output = combineObservation(receipt, { schemii: sampled }, { ...internal(now), processPid: 7 }, { now });
+  assert.equal(output.apiProcesses, 1); assert.equal(output.appRssBytes, 122880);
+  assert.equal((await sampleContainer({ ...bound, apiProcess: { ...bound.apiProcess, birthTick: 'replacement' } }, f)).status, 'unavailable');
+  await writeFile(join(f.procRoot, '101/cmdline'), ['uvicorn', ...args, '--workers', '2', ''].join('\0'));
+  assert.equal((await sampleContainer(bound, f)).status, 'unavailable');
+});
 test('busy cursor, wrong endpoint and stale internal observations never manufacture gauges', async t => {
   const f = await fixture(t), app = await sampleContainer(f.container, f), now = Date.now(), value = internal(now);
   delete value.sources.console.counts.nativeCursors;
