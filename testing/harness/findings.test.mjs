@@ -51,3 +51,14 @@ test('report distinguishes initial failure latest execution coverage remediation
   assert.match(html,/collected 3; observed 3; skipped 1/);
   assert.match(html,/finding-original/);assert.match(html,/Actual review &lt;reference&gt;/);
 });
+
+test('report exposes literal shared attempts partial gaps and separate independent review',()=>{
+  const html=reportHTML({id:'qa-shared',status:'running',lanes:[{id:'lane-1',scenarios:[{id:'case-a',title:'A',functional:'passed',visual:'passed',attempts:[{id:'checkpoint-a',scenarioAttempt:'attempt-a',functional:'passed',visual:'passed'}]},{id:'case-b',title:'B',functional:'not-run',visual:'not-run'}],
+    captures:[{path:'lane-1/shared.png',coverage:{sha256:'digest'}}],coverageGroups:[{status:'active',completed:['case-a'],coverage:{sha256:'digest',declaration:{id:'group-1',session:'session-1',declaredAt:'before-image',source:'source',url:'/?workspace=owned',viewport:{width:1280,height:800},activity:{epoch:7},members:[{scenario:'case-a',attempt:'attempt-a'},{scenario:'case-b',attempt:'attempt-b'}]}}}]}],reviews:[{targetLane:'lane-1',scenario:'case-a',attempt:'checkpoint-a',verdict:'accepted'}]});
+  assert.match(html,/Declared same-state capture coverage/);
+  assert.match(html,/case-a · scenario attempt attempt-a · function passed, visual passed · independent review accepted/);
+  assert.match(html,/case-b · scenario attempt attempt-b · function not-run, visual not-run · independent review pending/);
+  assert.match(html,/Active; remaining cases still require checkpoints/);
+  assert.match(html,/browser activity epoch: 7/);
+  assert.match(html,/lane-1\/shared.png/);
+});

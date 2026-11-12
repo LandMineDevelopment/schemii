@@ -9,7 +9,7 @@ import { workspaceNavigationHref } from '../../src/schemii/schemii/web/assets/wo
 import { recordWorkerExit, recordWorkerBrowserClosure } from './leases.mjs';
 import { writeJSON } from './store.mjs';
 import { sourceIdentity } from './deployment.mjs';
-import { bindNative, readNativeSession, processIdentity, nativeBrowserProcesses, closeNativeReceipt, releaseNativeTransport, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, recoverNativeLane, recordCheckpoint, importVerification, importRemediation, acceptance } from './native.mjs';
+import { bindNative, assertNativeConnection, readNativeSession, processIdentity, nativeBrowserProcesses, closeNativeReceipt, releaseNativeTransport, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, recoverNativeLane, recordCheckpoint, importVerification, importRemediation, acceptance, activeScenario, endCoverage } from './native.mjs';
 
 const fingerprint = 'a'.repeat(64);
 function fixture() {
@@ -649,4 +649,107 @@ print(json.dumps({'path':str(receipt),'base':base,'later':later}))
   const timing=join(new URL('.',`file://${created.path}`).pathname,original.commands[0].timing_evidence);
   await writeFile(timing,'invented truncated original');
   assert.throws(()=>importVerification(run,created.path,{root:directory,note:'Changed actual-origin negative control'}),/rejected/);
+});
+
+function sharedFixture() {
+  const f=fixture();
+  f.lane.native={sessionId:'session-current',activity:{schema:1,epoch:7,pending:0}};
+  f.lane.scenarios.push({...structuredClone(f.scenario),id:'case-second'});
+  const ids=f.lane.scenarios.map(item=>item.id);
+  const state=beginScenario(f.run,f.lane,ids[0],{coverage:ids});
+  const capture={...assertCaptureState(f.run,f.lane,{url:f.lane.url,viewport:f.scenario.viewport}),kind:'image',path:'lane-1/shared.png',sha256:'b'.repeat(64),nativeSession:f.lane.native.sessionId};
+  f.lane.captures.push(capture);
+  return {...f,ids,state,capture};
+}
+test('shared native image serves only predeclared attempts with per-case checkpoint and independent review',()=>{
+  const f=sharedFixture(), {run,lane,reviewer,capture,ids}=f;
+  const observation={tool:'view_image',invocation:'view_image shared PNG',note:'Each declared check is visible in this frame.',coverage:ids};
+  inspectionReceipt(capture,lane.agent,observation);
+  const memberAttempt=activeScenario(lane,ids[1]).id;
+  assert.notEqual(memberAttempt,f.state.id);
+  assert.equal(currentCapture(run,lane,capture.path,{scenario:ids[1],inspection:true}),capture);
+  recordCheckpoint(run,lane,lane.scenarios[0],{functional:'passed',visual:'passed',note:'Case one expected and actual.'},[capture.path]);
+  assert.throws(()=>recordCheckpoint(run,lane,lane.scenarios[0],{functional:'passed',visual:'passed',note:'Duplicate'},[capture.path]),/uncompleted/);
+  assert.throws(()=>beginScenario(run,lane,ids[0]),/partial group/);
+  assert.equal(acceptance(run).reasons.some(reason=>reason.includes('partial shared')),true);
+  recordCheckpoint(run,lane,lane.scenarios[1],{functional:'passed',visual:'passed',note:'Case two separate expected and actual.'},[capture.path]);
+  assert.equal(lane.currentScenario,null);
+  assert.equal(lane.scenarios[1].attempts[0].scenarioAttempt,memberAttempt);
+  assert.equal(lane.coverageGroups[0].status,'completed');
+  inspectionReceipt(capture,reviewer.agent,{...observation,coverage:[ids[0]]});
+  recordReview(run,reviewer,lane,ids[0],{verdict:'accepted',note:'Independently inspected first case.'});
+  assert.throws(()=>recordReview(run,reviewer,lane,ids[1],{verdict:'accepted',note:'Not inspected'}),/inspect/);
+  inspectionReceipt(capture,reviewer.agent,{...observation,coverage:[ids[1]]});
+  recordReview(run,reviewer,lane,ids[1],{verdict:'accepted',note:'Independently inspected second case.'});
+  assert.equal(run.reviews.length,2);assert.notEqual(run.reviews[0].attempt,run.reviews[1].attempt);
+});
+test('shared context rejects actual action epochs in-flight actions stale source generation agent resource and viewport',()=>{
+  for(const mutate of [
+    f=>f.lane.native.activity.epoch++,f=>f.lane.native.activity.pending++,f=>f.lane.native.sessionId='another-session',
+    f=>f.run.deployment.identity.fingerprint='c'.repeat(64),f=>f.lane.generation++,f=>f.lane.agent='another-agent',
+    f=>f.lane.resources.workspace='peer',f=>f.lane.scenarios[1].viewport.width++,f=>f.lane.scenarios[1].product='schemoo',
+    f=>f.lane.scenarios[1].url='/account',
+  ]) {
+    const f=sharedFixture();mutate(f);
+    assert.throws(()=>currentCapture(f.run,f.lane,f.capture.path,{scenario:f.ids[1]}));
+  }
+  const f=sharedFixture();
+  assert.throws(()=>assertCaptureState(f.run,f.lane,{url:f.lane.url+'&table=other',viewport:f.scenario.viewport}),/route\/state/);
+  assert.throws(()=>currentCapture(f.run,f.lane,f.capture.path,{scenario:'unassigned'}),/current scenario/);
+  f.capture.coverage.declaration.members[1].attempt='replacement';
+  assert.throws(()=>currentCapture(f.run,f.lane,f.capture.path,{scenario:f.ids[1]}));
+});
+test('partial group must explicitly end and retains completed attempts without promoting remaining cases',()=>{
+  const f=sharedFixture();
+  recordCheckpoint(f.run,f.lane,f.scenario,{functional:'blocked',visual:'blocked',note:'Original blocked observation'},[]);
+  assert.throws(()=>endCoverage(f.lane,''),/reason/);
+  // Invalid end does not consume the active group.
+  const ended=endCoverage(f.lane,'A new action is needed for the remaining case.');
+  assert.equal(ended.status,'abandoned');assert.deepEqual(ended.completed,[f.ids[0]]);
+  assert.equal(f.lane.scenarios[1].functional,'not-run');
+  const next=beginScenario(f.run,f.lane,f.ids[1]);
+  assert.notEqual(next.id,f.state.coverage.declaration.members[1].attempt);
+  assert.throws(()=>currentCapture(f.run,f.lane,f.capture.path),/current scenario/);
+});
+test('shared begin refuses unknown unassigned mismatched denied or old-native-session coverage',()=>{
+  for(const request of [{coverage:['roundtrip-schemii-desktop','unknown']},{coverage:['roundtrip-schemii-desktop',{}]},{coverage:['roundtrip-schemii-desktop','roundtrip-schemii-desktop']}]) {
+    const f=fixture();assert.throws(()=>beginScenario(f.run,f.lane,f.scenario.id,request));
+  }
+  const f=fixture();f.lane.scenarios.push({...structuredClone(f.scenario),id:'case-second'});
+  assert.throws(()=>beginScenario(f.run,f.lane,f.scenario.id,{coverage:f.lane.scenarios.map(s=>s.id)}),/activity-aware/);
+  f.lane.native={sessionId:'session-1',activity:{schema:1,epoch:0,pending:0}};f.lane.deniedProducts=['schemii'];
+  assert.throws(()=>beginScenario(f.run,f.lane,f.scenario.id,{coverage:f.lane.scenarios.map(s=>s.id),expectedState:'denied'}),/Denied-state/);
+});
+
+test('real native metadata and imported PNG bind exact declared state and monotonic activity',async t=>{
+  const f=fixture(), fs=await sessionFixture(t), metadataPath=join(fs.session,'session.json');
+  const metadata=JSON.parse(await readFile(metadataPath));metadata.activity={schema:1,epoch:11,pending:0};
+  await writeFile(metadataPath,JSON.stringify(metadata));
+  await bindNative(f.run,f.lane,fs.session,fs.browserRoot);
+  f.lane.scenarios.push({...structuredClone(f.scenario),id:'case-second'});
+  f.lane.url=`/?workspace=ws_${'6'.repeat(32)}`;f.lane.resources={workspace:`ws_${'6'.repeat(32)}`};
+  const ids=f.lane.scenarios.map(s=>s.id), stateURL=f.lane.url+'&tableId=table-1&table=owned';
+  beginScenario(f.run,f.lane,ids[0],{coverage:ids,stateURL},new Date(Date.now()-1000).toISOString());
+  const file=join(fs.session,'output','shared.png');await writeFile(file,png());
+  const options={runDir:join(fs.directory,'qa-shared'),browserRoot:fs.browserRoot,url:stateURL,viewport:f.scenario.viewport};
+  const capture=await importNativeFile(f.run,f.lane,file,options);
+  assert.equal(capture.coverage.declaration.url,new URL(stateURL,f.run.baseURL).href);
+  assert.equal(capture.coverage.declaration.activity.epoch,11);
+  inspectionReceipt(capture,f.lane.agent,{tool:'native-inline-image',invocation:'actual image delivery',note:'Both literal checks assessed in this frame.',coverage:ids});
+  assert.equal(currentCapture(f.run,f.lane,capture.path,{scenario:ids[1],inspection:true}),capture);
+  metadata.activity.epoch=12;await writeFile(metadataPath,JSON.stringify(metadata));
+  await assert.rejects(importNativeFile(f.run,f.lane,file,options),/activity or session changed/);
+  assert.throws(()=>currentCapture(f.run,f.lane,capture.path,{scenario:ids[1]}),/activity or session changed/);
+  metadata.activity.epoch=11;await writeFile(metadataPath,JSON.stringify(metadata));
+  await assert.rejects(assertNativeConnection(f.lane,fs.browserRoot),/cannot reset/);
+});
+test('isolated adapter shares only declared idle state and cannot reuse after a failed action epoch',()=>{
+  const f=fixture();f.run.browser='isolated';
+  f.lane.scenarios.push({...structuredClone(f.scenario),id:'case-second'});
+  beginScenario(f.run,f.lane,f.scenario.id,{coverage:f.lane.scenarios.map(s=>s.id)});
+  const capture={...assertCaptureState(f.run,f.lane,{url:f.lane.url,viewport:f.scenario.viewport}),kind:'image',path:'lane-1/shared.png',sha256:'d'.repeat(64)};
+  f.lane.captures.push(capture);
+  assert.equal(currentCapture(f.run,f.lane,capture.path,{scenario:'case-second'}),capture);
+  f.lane.browserActivity={schema:1,epoch:1,pending:0};
+  assert.throws(()=>currentCapture(f.run,f.lane,capture.path,{scenario:'case-second'}),/activity or session changed/);
 });

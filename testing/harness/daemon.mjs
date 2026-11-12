@@ -8,7 +8,7 @@ import { BrowserFleet } from './browser.mjs';
 import { assertScenarioPrerequisite, readinessChecks } from './prerequisites.mjs';
 import { assertLaneReadyToClaim, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
 import { startDeployment, sourceIdentity } from './deployment.mjs';
-import { nativeMode, recoverNativeLane, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordCheckpoint, acceptance } from './native.mjs';
+import { nativeMode, recoverNativeLane, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordCheckpoint, acceptance, activeScenario, endCoverage, captureSupports } from './native.mjs';
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
 
 process.umask(0o077);
@@ -134,7 +134,7 @@ function brief(l) {
     browser:nativeMode(run)?'native thread-owned schemii_browser; CLI is an ownership/evidence ledger':'one independent Chromium process/context; use test.sh action exclusively',role:l.role||'tester',credentialFile:l.credentialFile,recovery:{pendingOnly:true,completed:l.scenarios.filter(s=>!pendingScenarios(l).includes(s)).map(s=>({id:s.id,functional:s.functional,visual:s.visual,note:s.note})),instructions:'Inspect saved state of any uncertain prior write before proceeding; never replay completed scenarios.'},viewports:l.viewports,scenarios:pendingScenarios(l),
     writeAuthorization:l.writeAuthorization,
     boundaries:l.writeAuthorization?.enabled ? 'Only the exact assigned disposable resources and listed operations may be edited. Retained resources remain read-only.' : 'Read-only app walkthrough. Do not save, create, delete or change account settings.',
-    instructions:nativeMode(run)?'Bind the actual claimed generation to the session directory returned by your own native browser before login. Read only your assigned private login file; sign in visibly using ordinary schemii_browser tools. Record native-auth with fresh /account screenshot and signed-in identity snapshot invocation. Never use harness action or shared preview tabs. Begin each scenario before native captures. Import selected output before expiry, inspect fresh images and record receipts. Reconcile uncertain saved writes before replay. Sign out, call browser_close, then finish; thread completion does not close transport.': 'Never sign into another account, use global T3 tabs, call app APIs, or rebuild/reset the stack. Use your session file for every browser action. Record scenario outcomes and evidence before finish. If a write outcome is uncertain, inspect saved state before repeating. Record structured draft findings with owned screenshot evidence as they arise.',
+    instructions:nativeMode(run)?'Bind the actual claimed generation to the session directory returned by your own native browser before login. Read only your assigned private login file; sign in visibly using ordinary schemii_browser tools. Record native-auth with fresh /account screenshot and signed-in identity snapshot invocation. Never use harness action or shared preview tabs. Begin each scenario before native captures. Optional begin args coverage declares 2–4 literal same-state case IDs before one capture; inspect must explicitly name its covered cases, and checkpoint/review each case separately. Any browser action invalidates that group; coverage-end explicitly abandons a partial group. Import selected output before expiry, inspect fresh images and record receipts. Reconcile uncertain saved writes before replay. Sign out, call browser_close, then finish; thread completion does not close transport.': 'Never sign into another account, use global T3 tabs, call app APIs, or rebuild/reset the stack. Use your session file for every browser action. Record scenario outcomes and evidence before finish. If a write outcome is uncertain, inspect saved state before repeating. Record structured draft findings with owned screenshot evidence as they arise.',
     commands:{action:`${root}/test.sh action --session-file SESSION_FILE --kind snapshot`,checkpoint:`${root}/test.sh checkpoint --session-file SESSION_FILE --scenario SCENARIO --functional passed --visual passed --note DESCRIPTION --evidence RELATIVE_PATH`,finding:`${root}/test.sh finding --session-file SESSION_FILE --scenario SCENARIO --title TITLE --severity medium --steps STEPS --expected EXPECTED --actual ACTUAL --evidence SCREENSHOT`,finish:`${root}/test.sh finish --session-file SESSION_FILE`}};
 }
 async function ownedEvidence(paths,l){
@@ -166,9 +166,16 @@ async function workerRequest(req){
       }
       const scenario=l.scenarios.find(s=>s.id===req.scenario);
       if(!scenario)throw new Error('Unknown scenario.');
-      assertScenarioPrerequisite(l,scenario);
+      const declared = req.args?.coverage === undefined ? [scenario.id] : req.args.coverage;
+      if (!Array.isArray(declared) || declared.some(id=>typeof id!=='string')) throw new Error('Coverage must name literal assigned cases.');
+      for (const id of declared) {
+        const member=l.scenarios.find(item=>item.id===id);
+        if(!member)throw new Error('Shared coverage includes an unknown or unassigned case.');
+        assertScenarioPrerequisite(l,member);
+      }
       const state=beginScenario(run,l,req.scenario,req.args);await persist();return state;
     }
+    if(req.command==='coverage-end') { const group=endCoverage(l,req.note);await persist();return group; }
     if(req.command==='capture') {
       if(!nativeMode(run))throw new Error('Use harness screenshot actions for isolated lanes.');
       const capture=await importNativeFile(run,l,req.args?.file,{...req.args,runDir:dir,browserRoot});await persist();return capture;
@@ -185,7 +192,10 @@ async function workerRequest(req){
       const paths=await ownedEvidence([capture.path],target);
       const bytes=await readFile(resolve(dir,paths[0]));
       if(createHash('sha256').update(bytes).digest('hex')!==capture.sha256)throw new Error('Image changed after capture.');
-      if(target===l)currentCapture(run,l,capture.path);
+      if(target===l) {
+        if(nativeMode(run))await assertNativeConnection(l,browserRoot);
+        currentCapture(run,l,capture.path);
+      }
       const receipt=inspectionReceipt(capture,l.agent,{...req.args,note:req.note});await persist();return receipt;
     }
     if(req.command==='inspect-download') {
@@ -209,8 +219,12 @@ async function workerRequest(req){
       if(nativeMode(run))throw new Error('Native lanes use their own schemii_browser connection; legacy action handles cannot drive it.');
       if(req.kind==='upload' && !l.writeAuthorization?.operations?.some(operation=>operation.includes('upload')))
         throw new Error('File upload requires an explicitly assigned writable fixture operation.');
+      const mutating=!['snapshot','screenshot'].includes(req.kind);
+      l.browserActivity ||= {schema:1,epoch:0,pending:0};
+      if(mutating){l.browserActivity.epoch++;l.browserActivity.pending++;}
       try {
         const result=await fleet.action(l.id,req.kind,req.args||{});
+        if(mutating)l.browserActivity.pending--;
         await event(dir,{kind:'action',lane:l.id,agent:l.agent,action:req.kind});
         if(result.screenshot){
           const h=fleet.lanes.get(l.id);
@@ -225,6 +239,7 @@ async function workerRequest(req){
         }
         l.actionCount=(l.actionCount||0)+1;l.lastActionAt=stamp();await persist();return result;
       }catch(error){
+        if(mutating)l.browserActivity.pending=0;
         await event(dir,{kind:'action-failed',lane:l.id,action:req.kind,error:safeError(error)});
         // An expired identity must never become another account's UI session.
         if(/identity|session cookie|origin/i.test(error.message)){l.status='paused';tokens.delete(l.id);l.generation++;}
@@ -235,10 +250,13 @@ async function workerRequest(req){
     if(req.command==='finding') {
       const s=l.scenarios.find(s=>s.id===req.scenario);if(!s)throw new Error('Finding needs an assigned scenario ID.');
       const fields=findingInput(req);
-      if(l.currentScenario?.scenario!==s.id)throw new Error('Finding must belong to the current assigned scenario.');
+      const active=activeScenario(l,s.id);
+      if(!active)throw new Error('Finding must belong to the current assigned scenario or explicitly declared case.');
+      if(nativeMode(run))await assertNativeConnection(l,browserRoot);
       const evidence=await ownedEvidence(req.evidence,l);
-      if(!evidence.length || !evidence.some(path=>(l.captures||[]).some(c=>c.path===path&&c.generation===l.generation&&c.scenario===s.id&&c.scenarioAttempt===l.currentScenario.id&&c.phase==='scenario')))throw new Error('Finding needs at least one screenshot captured by this lane in its current session.');
-      const finding={id:`finding-${randomUUID()}`,lane:l.id,username:l.username,scenario:s.id,agent:l.agent,generation:l.generation,scenarioAttempt:l.currentScenario.id,source:run.deployment.identity.fingerprint,...fields,evidence,verificationStatus:'unverified',at:stamp()};
+      if(l.currentScenario.coverage && evidence.length)currentCapture(run,l,evidence[0],{scenario:s.id});
+      if(!evidence.length || !evidence.some(path=>(l.captures||[]).some(c=>c.path===path&&c.generation===l.generation&&captureSupports(c,s.id,active.id)&&c.phase==='scenario')))throw new Error('Finding needs at least one screenshot captured by this lane in its current session.');
+      const finding={id:`finding-${randomUUID()}`,lane:l.id,username:l.username,scenario:s.id,agent:l.agent,generation:l.generation,scenarioAttempt:active.id,source:run.deployment.identity.fingerprint,...fields,evidence,verificationStatus:'unverified',at:stamp()};
       run.findings ||= [];run.findings.push(finding);
       await event(dir,{kind:'finding',id:finding.id,lane:l.id,scenario:s.id,severity:finding.severity,title:finding.title,evidence});
       await persist();return finding;
@@ -248,15 +266,17 @@ async function workerRequest(req){
       for(const key of ['functional','visual'])if(!['passed','failed','blocked'].includes(req[key]))throw new Error(`${key} needs passed, failed, or blocked.`);
       if(!req.note?.trim())throw new Error('Checkpoint needs expected/actual observations in --note.');
       const evidence=await ownedEvidence(req.evidence,l);
+      if(l.currentScenario?.coverage && nativeMode(run))await assertNativeConnection(l,browserRoot);
       if(req.visual==='passed') {
-        if(l.currentScenario?.scenario!==s.id)throw new Error('Checkpoint needs this scenario current begin/capture.');
-        if(!evidence.some(path=>{try{currentCapture(run,l,path,{inspection:true});return true;}catch{return false;}}))throw new Error('Visual pass requires current scenario/generation/source/viewport/resource screenshot and image inspection receipt.');
+        if(!activeScenario(l,s.id))throw new Error('Checkpoint needs this scenario current begin/capture.');
+        if(!evidence.some(path=>{try{currentCapture(run,l,path,{inspection:true,scenario:s.id});return true;}catch{return false;}}))throw new Error('Visual pass requires current scenario/generation/source/viewport/resource screenshot and image inspection receipt.');
       }
-      if(req.functional==='passed'&&s.downloadOracle&&!l.captures?.some(c=>c.kind==='download'&&c.scenario===s.id&&c.scenarioAttempt===l.currentScenario?.id&&c.contentInspection?.result==='passed'))throw new Error('This scenario requires actual downloaded content inspection before functional pass.');
+      if(req.functional==='passed'&&s.downloadOracle&&!l.captures?.some(c=>c.kind==='download'&&captureSupports(c,s.id,activeScenario(l,s.id)?.id)&&c.contentInspection?.result==='passed'))throw new Error('This scenario requires actual downloaded content inspection before functional pass.');
       recordCheckpoint(run,l,s,req,evidence);
       await event(dir,{kind:'checkpoint',lane:l.id,scenario:s.id,functional:s.functional,visual:s.visual});await persist();return s;
     }
     if(req.command==='finish') {
+      if(l.currentScenario?.coverage)throw new Error('Partial shared coverage must be completed or explicitly coverage-end before finish.');
       if(l.role!=='reviewer'&&l.scenarios.some(s=>s.functional==='not-run'||s.visual==='not-run'))throw new Error('Every scenario needs explicit results; use blocked for unavailable checks.');
       if(nativeMode(run))await closeNativeReceipt(l);
       else await fleet.closeLane(l.id);
@@ -380,7 +400,7 @@ const server=net.createServer(socket=>{
   socket.on('data',chunk=>{
     if(handled)return;input+=chunk;if(input.length>65536){socket.destroy();return;}
     if(!input.includes('\n'))return;handled=true;
-    (async()=>{try{const req=JSON.parse(input.split('\n')[0]);const result=['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','resource-receipt','begin','capture','inspect','inspect-download','review'].includes(req.command)?await workerRequest(req):await controllerRequest(req);socket.end(JSON.stringify({ok:true,result})+'\n');}catch(e){socket.end(JSON.stringify({ok:false,error:safeError(e)})+'\n');}})();
+    (async()=>{try{const req=JSON.parse(input.split('\n')[0]);const result=['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','resource-receipt','begin','coverage-end','capture','inspect','inspect-download','review'].includes(req.command)?await workerRequest(req):await controllerRequest(req);socket.end(JSON.stringify({ok:true,result})+'\n');}catch(e){socket.end(JSON.stringify({ok:false,error:safeError(e)})+'\n');}})();
   });
 });
 await new Promise((res,rej)=>{server.once('error',rej);server.listen(control.socket,res);});await chmod(control.socket,0o600);

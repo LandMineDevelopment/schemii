@@ -318,6 +318,24 @@ class LifecycleTests(ArtifactFixture):
         self.sweep({})
         self.assertFalse(session.path.exists())
 
+    def test_activity_metadata_preserves_live_peer_and_owned_orphan_cleanup(self):
+        session = self.running_session()
+        browser._update_metadata(
+            session, activity={"schema": 1, "epoch": 13, "pending": 2}
+        )
+        self.sweep({500001: 100})
+        self.assertTrue(session.path.exists())
+        self.sweep({})
+        self.assertFalse(session.path.exists())
+
+    def test_unknown_activity_metadata_never_authorizes_orphan_cleanup(self):
+        session = self.running_session()
+        browser._update_metadata(
+            session, activity={"schema": 1, "epoch": -1, "pending": 0}
+        )
+        self.sweep({})
+        self.assertTrue((session.path / "output" / "report.csv").exists())
+
     def test_reused_pid_with_different_birth_tick_is_swept(self):
         session = self.running_session()
         self.sweep({500001: 101, 500002: 201})
@@ -1492,6 +1510,131 @@ class RelayFrameTests(unittest.TestCase):
         relay = browser.Relay(backend, incoming, outgoing)
         self.addCleanup(relay.selector.close)
         return relay, reader
+
+    def test_activity_fences_admission_failures_inflight_and_readonly_tools(self):
+        relay, _ = self.make_relay()
+        relay.backend.process = mock.Mock()
+        publications = []
+        relay.publish_activity = lambda: publications.append(
+            (relay.activity_epoch, len(relay.activity_pending))
+        )
+
+        def call(identity, name, arguments=None):
+            message = {
+                "jsonrpc": "2.0",
+                "id": identity,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments or {}},
+            }
+            relay.client(message, relay.encoded(message))
+
+        for index, name in enumerate(
+            (
+                "browser_take_screenshot",
+                "browser_snapshot",
+                "browser_console_messages",
+                "browser_network_requests",
+            )
+        ):
+            call(index, name)
+            relay.server({"id": index, "result": {}}, b"{}\n")
+        call(4, "browser_tabs", {"action": "list"})
+        relay.server({"id": 4, "result": {}}, b"{}\n")
+        self.assertEqual(relay.activity_epoch, 0)
+        call(5, "browser_click", {"element": "credential-secret"})
+        self.assertEqual(publications[-1], (1, 1))
+        relay.server({"id": 5, "error": {"code": -1}}, b"{}\n")
+        self.assertEqual(publications[-1], (1, 0))
+        call(5, "browser_unknown_future_tool")
+        call(6, "browser_tabs", {"action": "select", "index": 0})
+        self.assertEqual(publications[-1], (3, 2))
+        self.assertNotIn("credential-secret", str(publications))
+        relay.server({"id": 5, "result": {"isError": True}}, b"{}\n")
+        self.assertEqual(publications[-1], (3, 1))
+
+    def test_activity_deferred_replay_cancel_and_close_never_reset_epoch(self):
+        relay, _ = self.make_relay()
+        relay.publish_activity = mock.Mock()
+        request = {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {"name": "browser_fill_form", "arguments": {}},
+        }
+        relay.client(request, relay.encoded(request))
+        self.assertEqual(relay.activity_epoch, 1)
+        self.assertEqual(len(relay.activity_pending), 1)
+        relay.backend.process = mock.Mock()
+        relay.progress()
+        self.assertEqual(relay.activity_epoch, 1)
+        relay.server({"id": 8, "result": {}}, b"{}\n")
+        self.assertEqual(len(relay.activity_pending), 0)
+        relay.backend.process = None
+        relay.client(request, relay.encoded(request))
+        cancellation = {"method": "notifications/cancelled", "params": {"requestId": 8}}
+        relay.client(cancellation, relay.encoded(cancellation))
+        self.assertEqual(relay.activity_epoch, 2)
+        self.assertEqual(len(relay.activity_pending), 0)
+        relay.backend.process = mock.Mock()
+        close = {"id": 9, "method": "tools/call", "params": {"name": "browser_close"}}
+        relay.client(close, relay.encoded(close))
+        self.assertEqual(relay.activity_epoch, 3)
+        relay.client(
+            {"method": "notifications/cancelled", "params": {"requestId": 9}}, b"{}\n"
+        )
+        relay.to_backend.clear()
+        relay.progress()
+        self.assertEqual(len(relay.activity_pending), 0)
+        self.assertEqual(relay.activity_epoch, 3)
+
+    def test_activity_inflight_cancel_remains_pending_and_notifications_cannot_bypass(
+        self,
+    ):
+        relay, _ = self.make_relay()
+        relay.backend.process = mock.Mock()
+        message = {
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "browser_navigate"},
+        }
+        relay.client(message, relay.encoded(message))
+        cancel = {"method": "notifications/cancelled", "params": {"requestId": 1}}
+        relay.client(cancel, relay.encoded(cancel))
+        self.assertEqual(len(relay.activity_pending), 1)
+        self.assertEqual(relay.activity_epoch, 1)
+        relay.server({"id": 1, "error": {"code": -32800}}, b"{}\n")
+        self.assertEqual(len(relay.activity_pending), 0)
+        with self.assertRaisesRegex(browser.ProtocolError, "request identities"):
+            relay.client(
+                {"method": "tools/call", "params": {"name": "browser_click"}}, b"{}\n"
+            )
+
+    def test_activity_metadata_is_bounded_and_contains_only_monotonic_counters(self):
+        relay, _ = self.make_relay()
+        with tempfile.TemporaryDirectory() as directory:
+            session = browser.create_session(Path(directory))
+            relay.backend.session = session
+            relay.activity_epoch = 17
+            relay.publish_activity()
+            data = json.loads((session.path / "session.json").read_text())
+            self.assertEqual(data["activity"], {"schema": 1, "epoch": 17, "pending": 0})
+            self.assertTrue(browser.valid_activity(data["activity"]))
+            for invalid in (
+                {"schema": 1, "epoch": -1, "pending": 0},
+                {"schema": 1, "epoch": True, "pending": 0},
+                {"schema": 1, "epoch": 1, "pending": 257},
+                {"schema": 1, "epoch": 1, "pending": 0, "input": "secret"},
+            ):
+                self.assertFalse(browser.valid_activity(invalid))
+            relay.activity_epoch = 2**53 - 1
+            with self.assertRaisesRegex(browser.ProtocolError, "exhausted"):
+                relay.admit_activity(
+                    {
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": "browser_click"},
+                    }
+                )
 
     def test_private_initialize_ids_avoid_client_collision_and_never_leak(self):
         relay, _ = self.make_relay()
