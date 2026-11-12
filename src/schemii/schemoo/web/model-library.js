@@ -159,7 +159,7 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
       } catch (error) { if (current()) status.textContent = error.message; }
       return false;
     };
-    if (!models.length && onAssistant) {
+    if (!models.length && onAssistant && !sourceContext) {
       const assistant = element("button", { type: "button", className: "ui-button primary", text: "Create with model assistant" });
       assistant.onclick = () => { dialog.close(); onAssistant(); };
       content.append(element("p", { className: "hint", text: "Describe the model you want and let the assistant create it." }), assistant);
@@ -231,7 +231,7 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
       }
       const refresh = createIconButton({ icon: "refresh", label: "Refresh models" });
       refresh.title = "Refresh models";
-      refresh.onclick = () => openModelLibrary(onOpen, { onDeleted, canDelete, sourceContext });
+      refresh.onclick = () => openModelLibrary(onOpen, { onDeleted, canDelete, onAssistant, sourceContext });
       content.append(element("div", { className: "model-list-heading" }, [element("h3", { text: "Your saved models" }), refresh]), list);
     } else content.append(element("p", { className: "hint", text: "No saved models yet. Create one from an existing PostgreSQL connection. This does not change the database." }));
     if (!connections.length) { content.append(element("p", { text: "Add a PostgreSQL connection in Schemii first." }), element("a", { text: "Open Schemii", attrs: { href: "/" } }), status); return; }
