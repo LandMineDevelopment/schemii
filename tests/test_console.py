@@ -947,3 +947,29 @@ def test_forward_only_first_page_is_claimed_before_fetch(fail_first_fetch):
         service.page(owner, workspace["id"], receipt.id, result_id, None)
     assert repeated.value.code == "console_result_gone"
     assert len(calls) == 1
+
+
+def test_exact_sql_numeric_scalar_transport_json_parse_and_cached_full_csv():
+    import csv
+    import io
+    import json
+    import subprocess
+    from decimal import Decimal
+    from schemii.common.postgres.console.execution import json_console_value
+    from schemii.schemer.streaming import _csv_value
+    values = [9007199254740991, 9007199254740993, -9007199254740993, Decimal('12345678901234567890.123456789')]
+    converted = [json_console_value(value, type_oid=1700 if isinstance(value, Decimal) else 20) for value in values]
+    assert converted == [9007199254740991, '9007199254740993', '-9007199254740993', '12345678901234567890.123456789']
+    program = "import {csvContent} from './src/schemii/schemer/web/report-state.js';let text='';for await(const part of process.stdin)text+=part;const rows=JSON.parse(text);process.stdout.write(JSON.stringify({rows,csv:csvContent({columns:rows[0].map((_,i)=>({name:String(i),dataType:'numeric'})),rows})}));"
+    browser = json.loads(subprocess.run(['node', '--input-type=module', '-e', program], input=json.dumps([converted]), text=True, capture_output=True, check=True).stdout)
+    assert browser['rows'][0] == converted
+    assert list(csv.reader(io.StringIO(browser['csv'])))[1] == [str(value) for value in converted]
+    stream = io.StringIO(); csv.writer(stream).writerow([_csv_value(value, "numeric") for value in converted])
+    assert list(csv.reader(io.StringIO(stream.getvalue())))[0] == [str(value) for value in converted]
+    nested = {'value':9007199254740993, 'array':[9007199254740993]}
+    assert json_console_value(nested, type_oid=3802) == nested
+    assert type(json_console_value(9007199254740993, type_oid=3802)) is int
+    assert type(json_console_value(9007199254740993, type_oid=114)) is int
+    assert type(json_console_value(9007199254740993)) is int
+    assert type(json_console_value(9007199254740993, type_oid=99999)) is int
+    assert type(json_console_value(True, type_oid=20)) is bool

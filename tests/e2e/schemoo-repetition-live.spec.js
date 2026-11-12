@@ -139,7 +139,7 @@ test('repetition inspection and optional summary preserve intentional joined rep
       page.once('download', resolve);
       page.context().once('page', popup => popup.once('download', resolve));
     });
-    await expanded.locator('.expanded-chart-pane').getByRole('button', { name: 'Download full results', exact: true }).click();
+    await expanded.locator('.expanded-chart-pane').getByRole('button', { name: 'Download full results · RAW CSV', exact: true }).click();
     const download = await downloaded;
     expect(download.suggestedFilename()).toMatch(/\.csv$/);
     expect(await download.failure()).toBeNull();

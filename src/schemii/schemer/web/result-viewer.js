@@ -1,3 +1,4 @@
+import { createNumberPresentation, decorateNumber } from './number-format.js';
 import { scrollPosition, restoreScroll, createResultGrid, appendStreamStatus } from './scroll-results.js';
 import { element } from '#common/dom.js';
 import { createIconButton, downloadContent } from '#common/ui.js';
@@ -86,7 +87,7 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
     if (canExport) {
       const scope = stream !== cache && (tile.kind==='pivot' || detailSelection?.constituent) ? detailSelection : null;
       const serialized = scope ? JSON.stringify(scope) : '';
-      const cached = icon('download', tile.kind === 'pivot' && stream === cache ? 'Export cached pivot groups with scope as CSV' : 'Export cached rows as CSV', () => {
+      const cached = icon('download', tile.kind === 'pivot' && stream === cache ? 'Export cached pivot groups with scope as RAW CSV' : 'Export cached rows as RAW CSV', () => {
         const scoped = scope?.constituent ? {...data,columns:[...data.columns,...['Calculated measure','Constituent population','Calculation selection'].map(name=>({name}))],rows:data.rows.map(row=>[...row,data.plan?.calculationScope?.label || 'Calculation',data.plan?.calculationScope?.population || scope.constituent.scope,JSON.stringify(data.plan?.calculationScope || scope)])} : scope ? { ...data, columns: [...data.columns, ...['Pivot scope', 'Row grouping depth', 'Column grouping depth', 'Pivot selection'].map(name => ({ name }))],
           rows: data.rows.map(row => [...row, scope.pivot.kind, scope.pivot.rowDepth, scope.pivot.columnDepth, serialized]) } : data;
         downloadContent(csvContent(scoped), 'schemer-cached-rows.csv', 'text/csv;charset=utf-8');
@@ -100,9 +101,9 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
       host.append(cached);
     }
     if (!canExport) return;
-    const download = element('button', { type: 'button', className: 'ui-button', text: tile.kind === 'pivot' && stream === cache ? 'Download full pivot groups' : 'Download full results', attrs: { title: 'Runs the full query against a fresh snapshot. Results may differ from this preview.' } });
+    const download = element('button', { type: 'button', className: 'ui-button', text: tile.kind === 'pivot' && stream === cache ? 'Download full pivot groups · RAW CSV' : 'Download full results · RAW CSV', attrs: { title: 'Runs the full query against a fresh snapshot. Results may differ from this preview.' } });
     download.onclick = () => stream.download?.(); download.disabled = !stream.download; host.append(download);
-    host.append(element('small', { className: 'export-snapshot-note', text: 'Full download uses a fresh snapshot.' }));
+    host.append(element('small', { className: 'export-snapshot-note', text: 'CSV contains RAW values, without display formatting or indicators. Full download uses a fresh snapshot.' }));
   }
   function renderMain() {
     if (!dialog.isConnected) return;
@@ -116,7 +117,8 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
   function renderDetails() {
     if (!dialog.isConnected || !detailCache) return;
     const position = scrollPosition(detailBody), data = detailCache.snapshot();
-    detailBody.replaceChildren(createResultGrid(data)); gridInteractions(detailBody, data); appendStreamStatus(detailBody, data); restoreScroll(detailBody, position);
+    const present=createNumberPresentation({...tile,kind:'detail',dimensions:[],measures:[]},data);
+    detailBody.replaceChildren(createResultGrid(data,(row,index)=>{[...row.querySelectorAll('td')].forEach((cell,column)=>decorateNumber(cell,present(data.rows[index][column],column)));})); gridInteractions(detailBody, data); appendStreamStatus(detailBody, data); restoreScroll(detailBody, position);
     detailStatus.textContent = `Model detail rows · ${data.rows.length} cached${data.plan?.warnings?.some(w => w.includes('repeat') || w.includes('DISTINCT')) ? ' · Related or repeated rows may differ from the measure count' : ''}`;
     detailFreshness.textContent = reusedDrill && data.snapshotAt
       ? 'Earlier cached drill result. Refresh detail rows to query current source data. Results may differ from the report.'

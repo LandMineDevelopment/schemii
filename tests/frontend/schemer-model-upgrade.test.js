@@ -324,3 +324,16 @@ test('upgrade blocks a stale KPI baseline and preserves it until explicit rebind
   draft.tiles[0].kpiComparison.baseline.output={table:'people',column:'id',aggregate:'count',kind:'value'};
   assert.deepEqual(modelUpgradeIssues(draft,model,catalog),[]);
 });
+
+test('atomic upgrade retains removed numeric formatting refs until explicit local rebinding',()=>{
+  const {dashboard,model,catalog,tile}=data();
+  tile.numberFormats=[{output:{...field('id','count'),kind:'value'},style:'currency',currency:'EUR',precision:2,percentScale:'auto',unit:'',rules:[]}];
+  tile.formatLocale='de-DE';const draft=modelUpgradeDraft(dashboard,model);
+  assert.deepEqual(modelUpgradeIssues(draft,model,catalog),[]);
+  draft.tiles[0].measures=[field('name','count')];
+  assert.ok(modelUpgradeIssues(draft,model,catalog).some(issue=>/Number format.*removed, hidden/.test(issue.message)));
+  assert.equal(draft.tiles[0].numberFormats[0].output.column,'id');
+  draft.tiles[0].numberFormats[0].output={...field('name','count'),kind:'value'};
+  assert.deepEqual(modelUpgradeIssues(draft,model,catalog),[]);
+  assert.equal(tile.numberFormats[0].output.column,'id');assert.equal(draft.tiles[0].formatLocale,'de-DE');
+});
