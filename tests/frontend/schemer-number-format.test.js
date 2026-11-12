@@ -163,3 +163,81 @@ test('loading and absent result metadata never creates fake numeric zeroes or cr
   assert.ok(host.textContent.includes('Waiting for the first rows'));
   assert.equal(createNumberPresentation(config)(null,1).text,'NULL');
 });
+
+test('line plot keeps positive monotonic geometry and complete long labels in compact and expanded layouts',()=>{
+  dom();
+  const cases=[['1000','2000'],['-2000','-1000'],['-2000','2000'],['0','0'],['0'],['1000'],['-1000'],['-1e308','1e308']];
+  for(const unit of ['abcdefghijklmnopqrstuvwx','W'.repeat(24),'漢'.repeat(24)]) for(const compact of [true,false]) for(const values of cases) {
+    const config=tile({kind:'line',formatLocale:'en-US',numberFormats:[setting({unit})]}),data=result(values.map((value,index)=>[String(index),value]));
+    const before=JSON.stringify(data.rows),host=new FakeNode('main');renderVisualization(host,config,data,{compact});
+    const chart=host.querySelector('svg'),[, ,width,height]=chart.attributes.viewBox.split(' ').map(Number);
+    const grid=host.querySelectorAll('.chart-gridline').map(node=>Object.fromEntries(['x1','x2','y1','y2'].map(key=>[key,Number(node.attributes[key])])));
+    assert.ok(grid.every(line=>line.x2-line.x1>=160),`${compact}/${values}: positive minimum plot width`);
+    assert.ok(grid[0].y1-grid.at(-1).y1>=150,`${compact}/${values}: positive minimum plot height`);
+    const points=host.querySelectorAll('circle').map(node=>({x:Number(node.attributes.cx),y:Number(node.attributes.cy)}));
+    assert.equal(points.length,values.length);
+    for(const point of points) assert.ok(Number.isFinite(point.x)&&Number.isFinite(point.y)&&point.x>=grid[0].x1&&point.x<=grid[0].x2&&point.y>=grid.at(-1).y1&&point.y<=grid[0].y1);
+    for(let index=1;index<points.length;index++) {
+      assert.ok(points[index].x>points[index-1].x);
+      if(Number(values[index])>Number(values[index-1])) assert.ok(points[index].y<points[index-1].y);
+    }
+    for(const text of host.querySelectorAll('.line-axis-label')) {
+      const spans=text.querySelectorAll('tspan');
+      assert.ok(spans.length>=(compact?2:1),'long unit is wrapped where necessary and retained');
+      assert.ok(spans.map(span=>span.textContent).join('').endsWith(unit));
+      assert.ok(spans.every(span=>Number(span.attributes.x)>0&&Number(span.attributes.x)<width&&Number(span.attributes.y)>0&&Number(span.attributes.y)<height));
+      assert.ok(text.attributes['aria-label'].includes(unit));
+    }
+    assert.equal(host.querySelectorAll('.line-axis-label').length,5);
+    assert.equal(JSON.stringify(data.rows),before);
+  }
+});
+
+test('generated line ticks retain currency locale and precision without treating geometry as exact raw data',()=>{
+  dom();
+  for(const [locale,values] of [['en-US',['1000','2000']],['de-DE',['10000000000000001','20000000000000003']]]) {
+    const config=tile({kind:'line',formatLocale:locale}),data=result(values.map((value,index)=>[String(index),value]));
+    data.columns[1].dataType='bigint';
+    const before=JSON.stringify(data.rows),host=new FakeNode('main');renderVisualization(host,config,data,{compact:false});
+    const ticks=host.querySelectorAll('.line-axis-label');assert.equal(ticks.length,5);
+    for(const tick of ticks) {
+      const text=tick.querySelectorAll('tspan').map(span=>span.textContent).join('');
+      assert.ok(text.includes('€'),text);
+      assert.match(text,locale==='en-US'?/\.\d{2}(?:E|\s|$)/:/,\d{2}(?:E|\s|$)/);
+      assert.match(tick.attributes['aria-label'],/approximate/i);
+    }
+    const rawPresenter=createNumberPresentation(config,data);
+    for(const [index,point] of host.querySelectorAll('circle').entries()) assert.ok(point.textContent.includes(rawPresenter(values[index],1).text));
+    assert.match(rawPresenter(10000000000000000,1).warning,/precision/,'raw unsafe number still rejected');
+    assert.ok(csvContent(data).includes(values[0]));assert.equal(JSON.stringify(data.rows),before);
+  }
+});
+
+test('derived axis API accepts only finite generated numbers and never weakens raw scalar or rule validation',()=>{
+  const rule={operator:'gte',value:'0',label:'High',tone:'positive',symbol:'up'};
+  const present=createNumberPresentation(tile({formatLocale:'en-US',numberFormats:[setting({rules:[rule]})]}),result());
+  assert.match(present(10000000000000000,1).warning,/precision/);
+  const tick=present.axis(10000000000000000,1);
+  assert.equal(tick.text,'€10,000,000,000,000,000.00');assert.match(tick.warning,/Approximate axis tick/);
+  assert.ok(!tick.title.startsWith('Raw:'));assert.equal(tick.indicator,'');assert.equal(tick.tone,'neutral');
+  assert.equal(present('10000000000000001',1).text,'€10,000,000,000,000,001.00 · ▲ High');
+  for(const value of [null,'10000000000000000',NaN,Infinity,-Infinity]) assert.equal(present.axis(value,1).text,'Axis unavailable');
+  const percent=createNumberPresentation(tile({formatLocale:'en-US',numberFormats:[setting({style:'percent',precision:1,percentScale:'whole'})]}),result());
+  assert.equal(percent.axis(25,1).text,'25.0%');
+  assert.match(present.axis(1e100,1).text,/€1\.00E100/);
+});
+
+test('mixed-format line axes disclose raw geometry and keep each original point label',()=>{
+  dom();
+  for(const formats of [[setting(),setting({output:ref('share'),style:'percent',precision:1})],[setting({style:'percent',percentScale:'fraction'}),setting({output:ref('share'),style:'percent',percentScale:'whole'})]]) {
+    const config=tile({kind:'line',formatLocale:'en-US',measures:[field('amount','sum'),field('share','sum')],numberFormats:formats});
+    const data=result([['East','0.25','25'],['West','0.5','50']]);data.columns.push({name:'Share',dataType:'numeric'});
+    const host=new FakeNode('main');renderVisualization(host,config,data,{});
+    assert.match(host.textContent,/Mixed units · axis uses raw-scale coordinates/);
+    const ticks=host.querySelectorAll('.line-axis-label');assert.equal(ticks.length,5);
+    for(const tick of ticks) assert.ok(!/[€%]/.test(tick.querySelectorAll('tspan').map(span=>span.textContent).join('')));
+    const present=createNumberPresentation(config,data);
+    assert.ok(host.querySelectorAll('circle').some(point=>point.textContent.includes(present('0.25',1).text)));
+    assert.ok(host.querySelectorAll('circle').some(point=>point.textContent.includes(present('25',2).text)));
+  }
+});

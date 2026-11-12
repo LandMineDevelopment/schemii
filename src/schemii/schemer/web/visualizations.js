@@ -24,6 +24,21 @@ function actionable(node, text, callback) {
   node.onclick = event => { event.stopPropagation(); callback(); };
   node.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); callback(); } };
 }
+// Conservative SVG text widths keep long allowed units visible without letting
+// a label consume the plot. Existing chart hosts provide horizontal scrolling.
+const axisTextWidth=text=>[...text].reduce((width,char)=>width+(/[MW@%]/.test(char)?11:char.charCodeAt(0)>127?12:7),0);
+function axisLabelLines(text,maximumWidth) {
+  const remaining=[...text],lines=[];
+  while(remaining.length) {
+    let count=0,width=0,lastSpace=0;
+    while(count<remaining.length && width+axisTextWidth(remaining[count])<=maximumWidth) {
+      width+=axisTextWidth(remaining[count]);if(remaining[count]===' ') lastSpace=count+1;count++;
+    }
+    if(count<remaining.length && lastSpace) count=lastSpace;
+    lines.push(remaining.splice(0,Math.max(1,count)).join(''));
+  }
+  return lines;
+}
 export function renderVisualization(host, tile, result, { onDrill, compact = false, modelId } = {}) {
   result={...result,rows:result?.rows || [],columns:result?.columns || []};
   const present=createNumberPresentation(tile,result), format=(value,index)=>present(value,index).text;
@@ -160,18 +175,31 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
     host.append(header, chart); return;
   }
   if (tile.kind === 'line') {
-    const width = compact ? Math.max(360, lines.axis.length * 28) : Math.max(760, lines.axis.length * 40), height = compact ? 270 : 450, pad = Math.min(190,Math.max(compact?48:60,...series.map(item=>present(result.rows[0][item.column],item.column,{suppressRules:true}).text.length*6)));
     const values = result.rows.flatMap(row => series.map(({ column }) => row[column])).filter(numeric).map(Number);
     const scale=values.reduce((max,value)=>Math.max(max,Math.abs(value)),1);
     const low = values.reduce((a,b)=>Math.min(a,b/scale),0),high=values.reduce((a,b)=>Math.max(a,b/scale),1/scale),span=high-low || 1;
+    // A nonzero probe also distinguishes percent fractions from already-whole
+    // outputs. Conditional rules never participate in generated-axis formats.
+    const mixedUnits=new Set(series.map(item=>present.axis(1,item.column).text)).size>1;
+    const ticks=Array.from({length:5},(_,index)=>{
+      const value=(low+span*index/4)*scale,display=present.axis(value,mixedUnits?-1:series[0].column);
+      return {value,display,lines:axisLabelLines(display.text,compact?176:220)};
+    });
+    const labelHeight=Math.max(...ticks.map(tick=>tick.lines.length))*13;
+    const margin={left:Math.max(compact?48:60,...ticks.flatMap(tick=>tick.lines.map(line=>axisTextWidth(line)+16))),right:24,top:Math.max(24,labelHeight/2+8),bottom:Math.max(38,labelHeight/2+24)};
+    const width=Math.max(compact?360:760,lines.axis.length*(compact?28:40),margin.left+margin.right+(compact?180:420));
+    const height=Math.max(compact?270:450,margin.top+margin.bottom+Math.max(150,(labelHeight+8)*4));
+    const plotWidth=width-margin.left-margin.right,plotHeight=height-margin.top-margin.bottom;
     const chart = svg('svg', { viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', class: 'line-chart', role: 'img', 'aria-label': tile.title });
     chart.style.minWidth = `${width}px`;
-    const x = index => pad + index / Math.max(1, lines.axis.length - 1) * (width - pad * 2);
-    const y = n => height - pad - (n/scale - low) / span * (height - pad * 2);
-    for (let i = 0; i <= 4; i++) {
-      const value = (low + span * i / 4)*scale;
-      chart.append(svg('line', { x1: pad, x2: width - pad, y1: y(value), y2: y(value), class: 'chart-gridline' }));
-      const text = svg('text', { x: pad - 8, y: y(value) + 4, 'text-anchor': 'end' }); text.textContent = present(value,series.every(item=>present(0,item.column).description===present(0,series[0].column).description)?series[0].column:-1,{suppressRules:true}).text; chart.append(text);
+    chart.style.minHeight = `${height}px`;
+    const x = index => margin.left + (lines.axis.length===1?0.5:index/(lines.axis.length-1))*plotWidth;
+    const y = n => height-margin.bottom-(n/scale-low)/span*plotHeight;
+    for (const {value,display,lines:labelLines} of ticks) {
+      chart.append(svg('line', { x1: margin.left, x2: width-margin.right, y1: y(value), y2: y(value), class: 'chart-gridline' }));
+      const text=svg('text',{'text-anchor':'end',class:'line-axis-label','aria-label':`${display.text} · ${display.warning}`});
+      labelLines.forEach((line,index)=>{const part=svg('tspan',{x:margin.left-8,y:y(value)+4+(index-(labelLines.length-1)/2)*13});part.textContent=line;text.append(part);});
+      const title=svg('title');title.textContent=display.title;text.append(title);chart.append(text);
     }
     lines.series.forEach(({ column, drill: measureIndex, points, label: name }, seriesIndex) => {
       const path = linePath(points, column, x, y);
@@ -184,8 +212,9 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
         actionable(point, title.textContent, drill(row, measureIndex)); chart.append(point);
       });
     });
-    lines.axis.forEach((value, index) => { if (index % Math.max(1, Math.ceil(lines.axis.length / 6)) !== 0) return; const text = svg('text', { x: x(index), y: height - 17, 'text-anchor': 'middle' }); text.textContent = (tile.formatDimension?.(0,value) ?? label(value)).slice(0,24); chart.append(text); });
-    if(new Set(series.map(item=>present(0,item.column).description)).size>1) host.append(element('p',{className:'hint',text:'Mixed units · axis uses raw-scale coordinates; each series keeps its own formatted labels.'}));
+    lines.axis.forEach((value, index) => { if (index % Math.max(1, Math.ceil(lines.axis.length / 6)) !== 0) return; const text = svg('text', { x: x(index), y: height - 17, 'text-anchor': index===0?'start':index===lines.axis.length-1?'end':'middle' }); text.textContent = (tile.formatDimension?.(0,value) ?? label(value)).slice(0,24); chart.append(text); });
+    if(mixedUnits) host.append(element('p',{className:'hint',text:'Mixed units · axis uses raw-scale coordinates; each series keeps its own formatted labels.'}));
+    if(values.some(value=>Number.isInteger(value)&&!Number.isSafeInteger(value))) host.append(element('p',{className:'hint',text:'Chart coordinates and axis ticks are approximate. Point labels and RAW CSV retain source values.'}));
     host.append(legend, chart); return;
   }
   if (tile.kind === 'donut') {
