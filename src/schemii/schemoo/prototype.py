@@ -709,6 +709,32 @@ def _resolve_scope_participation(
     )
 
 
+def _path_field_dependencies(model, parents, root, references, *, nodes=()):
+    """Include fields read by participating joins without crossing summary stages.
+
+    A downstream grouping/mapping may use an upstream calculated output even
+    when that output is hidden. Its owning relation must project it. Expanding
+    row dependencies can introduce another path, so close over paths and fields
+    together; unrelated summary outputs remain outside this relation stage.
+    """
+    fields = derived.field_closure(model, references)
+    participating = _path_nodes(model, parents, root, {root, *nodes, *(key for key, _ in fields)})
+    while True:
+        join_fields = []
+        for node in parents:
+            if node == root or node not in participating:
+                continue
+            _, edge_id = parents[node]
+            edge = model.edges[edge_id]
+            pairs = edge["columns"] if edge.get("derived") else relationship_columns(edge)
+            join_fields.extend((edge[side], pair[side]) for pair in pairs for side in ("source", "target"))
+        expanded = derived.field_closure(model, [*fields, *join_fields])
+        paths = _path_nodes(model, parents, root, {*participating, *(key for key, _ in expanded)})
+        if expanded == fields and paths == participating:
+            return participating, fields
+        participating, fields = paths, expanded
+
+
 def _plan_preview(validated: _ValidatedPreview) -> _PreviewPlan:
     """Plan relation participation, active scopes, and stable aliases."""
     model, root = validated.model, validated.root
@@ -719,8 +745,7 @@ def _plan_preview(validated: _ValidatedPreview) -> _PreviewPlan:
     for selected in validated.selected_scopes:
         if selected.enabled and selected.scope["kind"] == "required":
             references += derived.condition_references(selected.conditions)
-    participating = {root, *(node for node, _ in derived.field_closure(model, references))}
-    participating = _path_nodes(model, parents, root, participating)
+    participating, _ = _path_field_dependencies(model, parents, root, references)
     active_scope_ids = [
         selected.scope["id"]
         for selected in validated.selected_scopes
@@ -732,19 +757,12 @@ def _plan_preview(validated: _ValidatedPreview) -> _PreviewPlan:
     scope_participation = _resolve_scope_participation(
         validated, participating, active_scope_ids
     )
-    outer = _path_nodes(
-        model,
-        parents,
-        root,
-        {
-            root,
-            *scope_participation.preserved_required_nodes,
-            *(node for node, _ in derived.field_closure(model, [
-                *((field["table"], field["column"]) for field in [*validated.fields, *validated.participation_fields]),
-                *derived.condition_references(validated.row_filters),
-                *derived.condition_references([item for node in scope_participation.preserved_required_nodes for item in scope_participation.source_filters.get(node, [])]),
-            ])),
-        },
+    outer, _ = _path_field_dependencies(
+        model, parents, root,
+        [*((field["table"], field["column"]) for field in [*validated.fields, *validated.participation_fields]),
+         *derived.condition_references(validated.row_filters),
+         *derived.condition_references([item for node in scope_participation.preserved_required_nodes for item in scope_participation.source_filters.get(node, [])])],
+        nodes=scope_participation.preserved_required_nodes,
     )
     aliases = {node: f"t{index}" for index, node in enumerate(node for node in parents if node in outer)}
     for node in outer:
@@ -781,7 +799,8 @@ class _PreviewCompiler:
         references += derived.condition_references(self.validated.row_filters)
         references += derived.condition_references([item for _, conditions in self.plan.existence for item in conditions])
         references += derived.condition_references([item for conditions in self.plan.source_filters.values() for item in conditions])
-        self.required_fields = derived.field_closure(self.model, references)
+        _, self.required_fields = _path_field_dependencies(self.model, plan.parents, self.validated.root, references,
+                                                           nodes=plan.participating | plan.outer)
         self.outer_graph = {node: [] for node in plan.outer}
         for node in plan.parents:
             if node == self.validated.root or node not in plan.outer:
@@ -1076,11 +1095,9 @@ class _PreviewCompiler:
     def compile_existence_predicates(self) -> list[str]:
         where = [self.compile_predicate(item, self.plan.aliases) for item in self.validated.row_filters]
         for index, (mode, items) in enumerate(self.plan.existence):
-            nodes = _path_nodes(
-                self.model,
-                self.plan.parents,
-                self.validated.root,
-                {key for key, _ in derived.field_closure(self.model, derived.condition_references(items))},
+            nodes, _ = _path_field_dependencies(
+                self.model, self.plan.parents, self.validated.root,
+                derived.condition_references(items),
             )
             names = {
                 node: f"e{index}_{position}"

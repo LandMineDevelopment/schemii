@@ -529,3 +529,26 @@ def test_calculated_precision_zoned_timestamp_uses_the_requested_calendar_day(ex
         (2,CAST('2024-01-01 06:30:00+00' AS timestamp(6) with time zone)))
     """ + statement.sql(dialect="postgres")
     assert sorted(execute(sql)) == [[1,date(2023,12,31)],[2,date(2024,1,1)]]
+
+
+@pytest.mark.parametrize("explicit,nullable",[(False,False),(True,False),(False,True)])
+def test_calculated_hidden_composite_association_keys_project_upstream_outputs(execute,explicit,nullable):
+    catalog, query = calculated_fixture()
+    groups = ["person_id","n"]
+    if nullable:
+        groups.append("maybe")
+        query["nodes"][-1]["derivation"]["outputs"].append({"id":"maybe","label":"Maybe","operation":"min","column":"name",
+            "conditions":[{"table":"cert","column":"active","operator":"eq","value":False}]})
+    derivation = {"kind":"aggregate","source":"summary","groupBy":groups,"outputs":[{"id":"again","label":"Again","operation":"sum","column":"n"}]}
+    if explicit:
+        derivation["connection"] = {"target":"summary","columns":[{"source":column,"target":column} for column in groups]}
+    query["nodes"].insert(0,{"id":"nested","table":"cert","label":"Nested","derivation":derivation})
+    query["fields"] = [{"table":"nested","column":"again"}]
+    prefix, sql = calculated_sql(compile_preview(catalog,query))
+    assert sorted(execute(prefix+sql),key=repr) == [[1],[2],[None]]
+    query["fields"].append({"table":"summary","column":"n"})
+    prefix, visible_sql = calculated_sql(compile_preview(catalog,query))
+    assert sorted(execute(prefix+visible_sql),key=repr) == [[1,1],[2,2],[None,0]]
+    from sqlglot import exp, parse_one
+    assert parse_one(sql,read="postgres").find(exp.Distinct) is None
+    assert "SUM(COUNT" not in sql

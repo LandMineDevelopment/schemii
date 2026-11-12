@@ -691,3 +691,68 @@ def test_distinct_dotted_field_tuples_remain_valid_in_backend_metadata_and_sql()
     query["fields"] = [{"table":"people","column":"id"},{"table":"a.b","column":"c"}]
     assert model_field_details(catalog,query,"a.b","c")["dataType"] == "integer"
     assert sorted(execute(compile_preview(catalog,query)["sql"])) == [(1,140),(2,100),(3,40)]
+
+
+def nested_join_key_query(explicit=False,nullable=False):
+    query = source_summary()
+    groups = ["person_id","n"]
+    if nullable:
+        groups.append("maybe")
+        query["nodes"][-1]["derivation"]["outputs"].append({"id":"maybe","label":"Maybe","operation":"min","column":"name",
+            "conditions":[{"table":"cert","column":"active","operator":"gt","value":9}]})
+    definition = {"kind":"aggregate","source":"derived","groupBy":groups,"outputs":[{"id":"again","label":"Again","operation":"sum","column":"n"}]}
+    if explicit:
+        definition["connection"] = {"target":"derived","columns":[{"source":column,"target":column} for column in groups]}
+    query["nodes"].append({"id":"nested","table":"cert","label":"Nested","derivation":definition})
+    query["fields"] = [{"table":"nested","column":"again"}]
+    return query
+
+
+@pytest.mark.parametrize("explicit",[False,True])
+@pytest.mark.parametrize("reverse",[False,True])
+def test_hidden_calculated_composite_join_keys_are_projected_at_their_own_stage(explicit,reverse):
+    query = nested_join_key_query(explicit)
+    if reverse:
+        query["nodes"].reverse()
+        next(node for node in query["nodes"] if node["id"]=="nested")["derivation"]["groupBy"].reverse()
+    plan = compile_preview(CATALOG,query)
+    assert sorted(execute(plan["sql"]),key=repr) == [(1,),(2,),(None,)]
+    assert "assignment" not in plan["sql"] and "STRING_AGG" not in plan["sql"]
+    query["fields"].append({"table":"derived","column":"n"})
+    assert sorted(execute(compile_preview(CATALOG,query)["sql"]),key=repr) == [(1,1),(2,2),(None,0)]
+
+
+def test_hidden_nullable_noncount_join_key_uses_the_existing_implicit_null_safe_mapping():
+    query = nested_join_key_query(nullable=True)
+    plan = compile_preview(CATALOG,query)
+    assert sorted(execute(plan["sql"]),key=repr) == [(1,),(2,),(None,)]
+    assert "IS NOT DISTINCT FROM" in plan["sql"] and "MIN(" in plan["sql"]
+    assert 'COALESCE(t1."maybe"' not in plan["sql"]
+
+
+@pytest.mark.parametrize("mode,expected",[("rows",[(1,)]),("exists",[(1,)]),("not_exists",[(2,),(3,)])])
+def test_hidden_calculated_join_keys_are_available_to_filter_only_correlations(mode,expected):
+    query = nested_join_key_query()
+    query["fields"] = [{"table":"people","column":"id"}]
+    query["reportFilters"] = [{"mode":mode,"conditions":[{"table":"nested","column":"again","operator":"gt","value":1}]}]
+    assert sorted(execute(compile_preview(CATALOG,query)["sql"]),key=repr) == expected
+
+
+@pytest.mark.parametrize("behavior,expected",[("keep_unmatched",[(2,),(None,),(None,)]),("require_matching",[(2,)])])
+def test_hidden_mapping_count_keys_preserve_post_group_scope_qualification(behavior,expected):
+    query = nested_join_key_query()
+    query["scopes"] = [{"id":"enough","kind":"required","rowBehavior":behavior,"alternatives":[{"id":"a","inputs":[{"id":"minimum","type":"integer","defaultValue":1}],
+        "conditions":[{"table":"derived","column":"n","operator":"gt","parameterId":"minimum"}]}]}]
+    plan = compile_preview(CATALOG,query)
+    assert sorted(execute(plan["sql"]),key=repr) == expected
+    assert plan["parameterValues"] == {"enough":{"minimum":1}}
+
+
+def test_hidden_join_keys_do_not_activate_an_unrelated_conditional_scope():
+    query = nested_join_key_query()
+    query["scopes"] = [{"id":"unrelated","kind":"conditional","alternatives":[{"id":"a","inputs":[{"id":"missing","type":"text"}],
+        "conditions":[{"table":"assignment","column":"name","operator":"eq","parameterId":"missing"}]}]}]
+    plan = compile_preview(CATALOG,query)
+    assert sorted(execute(plan["sql"]),key=repr) == [(1,),(2,),(None,)]
+    assert plan["activeScopes"] == [] and plan["parameterValues"] == {}
+    assert "assignment" not in plan["sql"] and "STRING_AGG" not in plan["sql"]
