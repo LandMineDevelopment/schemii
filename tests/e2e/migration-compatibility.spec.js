@@ -56,7 +56,7 @@ test("one-time refresh has a fresh digest and separate acknowledgement, cancel a
   const ack = dialog.getByRole("checkbox", { name: "Acknowledge materialized-view maintenance for this plan", exact: true });
   await ack.check(); await expect(apply).toBeDisabled(); await dialog.getByRole("checkbox", { name: "Include destructive changes", exact: false }).check();
   await expect(ack).not.toBeChecked(); await ack.check(); await expect(apply).toBeEnabled();
-  await apply.click(); await page.locator("#confirm-dialog").getByRole("button", { name: "Cancel", exact: true }).click(); expect(h.executions).toHaveLength(0);
+  await apply.click(); await page.locator("#confirm-dialog footer").getByRole("button", { name: "Cancel", exact: true }).click(); expect(h.executions).toHaveLength(0);
   await apply.click(); await page.locator("#confirm-action").click();
   await expect.poll(() => h.executions.length).toBe(1); expect(h.executions[0]).toEqual({ reviewDigest: "digest_3", confirmDestructive: true, confirmExternalChanges: false, confirmMaterializedMaintenance: true });
   await expect(dialog.getByRole("checkbox", { name: `Refresh ${viewName} once`, exact: true })).not.toBeChecked(); await expect(apply).toBeDisabled();
@@ -68,10 +68,18 @@ test("one-time refresh has a fresh digest and separate acknowledgement, cancel a
 
 test("stale source removes maintenance intent and materialized authoring explains creation-only population", async ({ page, request }) => {
   const h = await mountCompatibility(page, request); await page.locator("#review-migration-button").click(); const dialog = page.locator("#migration-dialog");
-  h.failNextPlan(); await dialog.getByRole("checkbox", { name: `Refresh ${viewName} once`, exact: true }).check();
+  const refreshChoice = dialog.getByRole("checkbox", { name: `Refresh ${viewName} once`, exact: true });
+  const maintenanceAcknowledgement = dialog.getByRole("checkbox", { name: "Acknowledge materialized-view maintenance for this plan", exact: true });
+  await expect(refreshChoice).not.toBeChecked();
+  h.failNextPlan();
+  // Selecting refresh replaces the plan controls; a stale response leaves no checkbox for check()'s post-click verification.
+  await refreshChoice.click();
   await expect(dialog).toContainText("The catalog changed"); await expect(dialog.getByRole("button", { name: "Apply migration", exact: true })).toBeDisabled();
+  expect(h.plans).toHaveLength(2); expect(h.plans[1].refreshMaterializedViewIds).toEqual([candidate.viewId]);
+  await expect(refreshChoice).toHaveCount(0); await expect(maintenanceAcknowledgement).toHaveCount(0); expect(h.executions).toHaveLength(0);
   await dialog.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(dialog.getByRole("checkbox", { name: `Refresh ${viewName} once`, exact: true })).not.toBeChecked(); expect(h.plans.at(-1).refreshMaterializedViewIds).toEqual([]);
+  expect(h.plans).toHaveLength(3); await expect(maintenanceAcknowledgement).toHaveCount(0);
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
   // Use the visible Views layer action, with no save or PostgreSQL write.
   await page.locator('[data-layer="views"]').first().click(); await page.locator("#create-view-button").click();

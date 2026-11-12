@@ -2,16 +2,21 @@ import { randomUUID } from "node:crypto";
 import { expect } from "@playwright/test";
 import { importedDraft } from "../../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft } from "../../../src/schemii/schemoo/web/model-state.js";
+import { browserFixtureOwner, findBrowserFixtureConnection, findBrowserFixtureWorkspace } from "./database-fixtures.js";
 
 // Uses only the existing explicitly provisioned Browser fixture profile. No
 // credentials, direct database transport or user profile is created here.
-export async function ownedSchemooSource(request) {
-  const { workspaces } = await (await request.get("/api/v1/schemii/workspaces")).json();
-  const workspace = workspaces.find(item => item.database === "schemii_test" && item.namespace === "bookstore");
-  expect(workspace, "test-owned bookstore workspace is required").toBeTruthy();
-  const { connections } = await (await request.get("/api/v1/connections")).json();
-  const connection = connections.find(item => item.id === workspace.connectionId && item.name === "Browser fixture: schemii_test" && item.ownership === "user");
+export async function ownedSchemooSource(request, { environment = process.env } = {}) {
+  const ownerId = await browserFixtureOwner(request);
+  const profiles = await request.get("/api/v1/connections"); expect(profiles.ok()).toBeTruthy();
+  const { connections } = await profiles.json();
+  const connection = findBrowserFixtureConnection(connections, {
+    database: "schemii_test", username: environment.SCHEMII_TEST_POSTGRES_USER || "schemii", ownerId,
+  });
   expect(connection, "explicit Browser fixture PostgreSQL profile with schema-write permission is required").toBeTruthy();
+  const spaces = await request.get("/api/v1/schemii/workspaces"); expect(spaces.ok()).toBeTruthy();
+  const workspace = findBrowserFixtureWorkspace((await spaces.json()).workspaces, connection, "bookstore");
+  expect(workspace, "test-owned bookstore workspace bound to the exact Browser fixture profile is required").toBeTruthy();
   const nonce = randomUUID().replaceAll("-", ""), namespace = `source_${nonce}`, marker = `schemii_e2e_source_${nonce}`;
   const settings = await (await request.get("/api/v1/schemii/console/settings")).json();
   const sessions = `/api/v1/schemii/workspaces/${workspace.id}/console/sessions`;

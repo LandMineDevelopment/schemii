@@ -22,15 +22,20 @@ test("reload removes deleted output selections and saves the repaired model", as
   expect(explored.ok(), await explored.text()).toBeTruthy();
   await source.sql(`ALTER TABLE "${source.namespace}".child DROP COLUMN previous_slot_date`);
   await page.goto(`/schemoo?model=${model.id}`);
-  await expect(page.getByRole("button", { name: "Run preview", exact: true })).toBeEnabled();
+  await expect(page.locator("#graph-status")).toContainText("1 source change needs review");
+  await expect(page.getByRole("button", { name: "Run preview", exact: true })).toBeDisabled();
   await page.getByRole("button", { name: "Explore model", exact: true }).click();
   await expect(page.locator("#fields .preview-output")).toHaveCount(1);
   await expect(page.locator("#fields")).not.toContainText("previous_slot_date");
   await page.getByRole("button", { name: "Save model", exact: true }).click();
   await expect(page.locator("#draft-status")).toContainText("Saved");
+  await expect(page.getByRole("button", { name: "Run preview", exact: true })).toBeEnabled();
+  await expect(page.locator("#graph-status")).not.toContainText("source change");
   const saved = await (await request.get(url)).json();
   expect(saved.definition.exposedFields.map(field => field.column)).toEqual(["id"]);
   expect(saved.explore.fields.map(field => field.column)).toEqual(["id"]);
+  expect(saved.definition.sourceContract.tables.flatMap(table => table.columns.map(column => [table.name, column.name])))
+    .not.toContainEqual(["child", "previous_slot_date"]);
   await page.reload(); await expect(page.getByRole("button", { name: "Run preview", exact: true })).toBeEnabled();
 });
 
@@ -56,7 +61,7 @@ test("changed keys and types are labeled, reviewed, and changed foreign keys bec
   const changedEdge = page.locator(".sc-edge.sc-source-changed").first();
   await expect(changedEdge).toHaveAttribute("role", "button"); await changedEdge.focus(); await expect(changedEdge).toBeFocused(); await changedEdge.press("Enter");
   await expect(sourcePanel).toContainText("Foreign key");
-  await page.screenshot({ path: `artifacts/source-reconciliation-${test.info().project.name}.png` });
+  await test.info().attach(`source-reconciliation-${test.info().project.name}`, { body: await page.screenshot(), contentType: "image/png" });
   page.once("dialog", dialog => dialog.accept()); await sourcePanel.getByRole("button", { name: "Accept current source", exact: true }).click();
   await expect(page.locator("#graph-status")).not.toContainText("source change");
   await expect(page.locator(`#relationships input[aria-label="Enable ${edgeId}"]`)).not.toBeChecked();
@@ -69,7 +74,10 @@ test("changed keys and types are labeled, reviewed, and changed foreign keys bec
 test("clients cannot replace the canonical live source contract with fabricated historical drift", async ({ request }) => {
   const definition = structuredClone(model.definition), contract = definition.sourceContract;
   contract.tables[0].primaryKey = ["invented"]; contract.tables[0].columns[0].dataType = "invented";
-  contract.relationships[0].sourceColumn = "invented";
+  contract.relationships[0].columns[0].source = "invented";
+  // Keep the fabricated history structurally valid under the complete mapping
+  // contract so this tests server canonicalization, rather than alias conflicts.
+  delete contract.relationships[0].sourceColumn; delete contract.relationships[0].targetColumn;
   const response = await request.put(`/api/v1/schemoo/models/${model.id}`, { data: { expectedRevision: model.revision, name: model.name, definition } });
   expect(response.ok(), await response.text()).toBeTruthy();
   expect((await response.json()).definition.sourceContract).toEqual(model.definition.sourceContract);
@@ -89,11 +97,12 @@ test("qualified duplicate source names retain complete FK pairs and author a com
     await chooseModelOption(page,"Source schema",source.namespace);
     await library.getByRole("checkbox",{name:`Include schema ${target.namespace}`,exact:true}).check();
     const picker=library.getByRole("region",{name:"Model sources and fields"});
-    await expect(picker.getByRole("checkbox",{name:`Include source ${target.namespace}.same.name`,exact:true})).toBeVisible();
+    const leftLabel='"same.name"',rightLabel=`${target.namespace}."same.name"`;
+    await expect(picker.getByRole("checkbox",{name:`Include source ${rightLabel}`,exact:true})).toBeVisible();
     await picker.getByRole("button",{name:"Clear selection",exact:true}).click();
     await picker.getByRole("searchbox",{name:"Search sources",exact:true}).fill("same.name");
-    await picker.getByRole("checkbox",{name:"Include source same.name",exact:true}).check();
-    await picker.getByRole("checkbox",{name:`Include source ${target.namespace}.same.name`,exact:true}).check();
+    await picker.getByRole("checkbox",{name:`Include source ${leftLabel}`,exact:true}).check();
+    await picker.getByRole("checkbox",{name:`Include source ${rightLabel}`,exact:true}).check();
     const posted=page.waitForResponse(response=>response.url().endsWith("/api/v1/schemoo/models")&&response.request().method()==="POST");
     await library.getByRole("button",{name:"Create model",exact:true}).click();
     const created=await posted;expect(created.status()).toBe(201);const saved=await created.json();source.trackModel(saved);
@@ -103,14 +112,13 @@ test("qualified duplicate source names retain complete FK pairs and author a com
     await page.getByRole("button",{name:"Edit model",exact:true}).click();
     await page.locator("#relationships input[type=checkbox]").uncheck();
     await page.getByRole("button",{name:"Add logical relationship",exact:true}).click();
-    const rightLabel=`${target.namespace}.same.name`;
-    await chooseModelOption(page,"source object",`same.name · same.name`);
+    await chooseModelOption(page,"source object",`${leftLabel} · ${leftLabel}`);
     await chooseModelOption(page,"target object",`${rightLabel} · ${rightLabel}`);
     await chooseModelOption(page,"source column 1","tenant");await chooseModelOption(page,"target column 1","tenant");
     await page.getByRole("button",{name:"Add column pair",exact:true}).click();
     await chooseModelOption(page,"source column 2","id");await chooseModelOption(page,"target column 2","id");
     const pair=page.getByRole("group",{name:"Column pair 2",exact:true});await expect(pair).toBeVisible();
-    await page.screenshot({path:`artifacts/qualified-composite-model-${test.info().project.name}.png`});
+    await test.info().attach(`qualified-composite-model-${test.info().project.name}`,{body:await page.screenshot(),contentType:"image/png"});
     await page.getByRole("button",{name:"Add relationship",exact:true}).click();
     await page.getByRole("button",{name:"Save model",exact:true}).click();await expect(page.locator("#draft-status")).toContainText("Saved");
     await page.reload();await expect(page.locator(".sc-node")).toHaveCount(2);
