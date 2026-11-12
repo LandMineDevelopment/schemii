@@ -1,3 +1,4 @@
+import { measureEditor } from "./measures.js";
 import { element } from '#common/dom.js';
 import { createIconButton } from '#common/ui.js';
 import { modelSelect, disposeSelects } from '#model/select.js';
@@ -13,7 +14,7 @@ function icon(name, label, onClick, disabled = false) {
 }
 export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, saveLabel = 'Apply & run' }) {
   const current = structuredClone(tile), original = JSON.stringify(tile);
-  current.selections ||= {};
+  current.selections ||= {};current.hiddenMeasures ||= [];current.calculations ||= [];
   current.rowDimensions ||= []; current.columnDimensions ||= [];
   current.pivotTotals = { ...pivotDefaults(), ...current.pivotTotals };
   current.sort ||= []; current.aggregateFilters ||= []; current.topN ??= null;
@@ -94,7 +95,7 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, sav
         body.append(element('p', { className: 'hint', text: current.kind === 'pivot' ? 'Choose independent row and column axes, then explicitly aggregate each measure at their intersections.' : current.kind === 'aggregate' ? 'Dimensions become GROUP BY columns. Measures calculate one value per group.' : current.kind === 'kpi' ? 'Choose one measure across all matching records.' : current.kind === 'line' ? 'The first dimension is the horizontal axis; remaining dimensions define separate lines for each measure. Move dimensions to change their roles. Put the date first for time trends. Missing points break lines.' : current.kind === 'donut' ? 'Choose one or more dimensions and one numeric measure. Each complete dimension combination becomes a slice.' : 'Choose one or more dimensions and numeric measures. The first dimension groups the bars; remaining dimensions become colored series. Move dimensions to set the default grouping.' }));
         if (current.kind === 'pivot') { body.append(element('p', { className: 'hint', text: 'Totals reaggregate all qualifying semantic inputs before Top N. AVG and distinct counts are recalculated at each grain. Reaggregating a model summary means per-owner values, not original raw-child rows.' }), fieldList('Row dimensions', 'rowDimensions'), fieldList('Column dimensions', 'columnDimensions')); renderPivotOptions(); }
         else if (current.kind !== 'kpi') body.append(fieldList('Dimensions', 'dimensions'));
-        body.append(fieldList('Measures', 'measures', true));
+        body.append(fieldList('Measures', 'measures', true),fieldList('Hidden calculation inputs','hiddenMeasures',true),measureEditor(current,{outputs:reportOutputs(current,model,catalog),onChange:render,element,modelSelect}));
       }
       body.append(element('p', { className: 'hint', text: 'Results stream automatically into a bounded browser cache. Scroll to browse received rows or groups; scrolling does not run another query. Previews stop at row or memory limits, and charts may display fewer groups. Refresh runs the query again. Expand a tile and choose Download full results to run the full query against a fresh snapshot.' }));
 
@@ -137,8 +138,8 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, sav
   }
   function renderResultControls() {
     const outputs = reportOutputs(current, model, catalog), reference = output => ({ table: output.table, column: output.column, aggregate: output.aggregate, kind: output.kind });
-    const measures = new Set(current.measures.map(field => JSON.stringify([field.table, field.column, field.aggregate])));
-    const aggregateOutputs = outputs.filter(output => measures.has(JSON.stringify([output.table, output.column, output.aggregate])));
+    const measures = new Set([...current.measures,...current.hiddenMeasures].map(field => JSON.stringify([field.table, field.column, field.aggregate])));
+    const aggregateOutputs = outputs.filter(output => output.kind==="calculated" || measures.has(JSON.stringify([output.table, output.column, output.aggregate])));
     body.append(element('p', { className: 'hint', text: 'Source filters run first. Result filters run after aggregation and complete time comparisons or running totals. Sorting and Top N then choose the final results, before browser delivery limits. Remaining outputs break sort ties in ascending order, with NULLs last.' }));
     const top = element('input', { attrs: { type: 'number', min: 1, max: 2147483647, step: 1, placeholder: 'All qualifying results', 'aria-label': 'Top N results' } });
     top.value = current.topN ?? ''; top.oninput = () => { current.topN = numericFilterValue(top.value); };

@@ -17,7 +17,8 @@ from schemii.schemoo.service import document, load_model, model_catalog, plan_qu
 from schemii.schemoo.prototype import _literal
 from .models import ReportQuery
 from .time_analysis import bucket_expression, compile_time_analysis, validate_time_analysis, source_type
-from .dashboard_models import ReportOutput, tile_dimensions
+from .dashboard_models import ReportOutput, tile_dimensions, base_measures
+from .measures import MeasureGraph, output_definitions
 
 
 def _problem(message):
@@ -33,16 +34,7 @@ def _output_key(field):
 
 
 def report_outputs(tile):
-    fields = tile.detail_fields if tile.kind == "detail" else [*tile_dimensions(tile), *tile.measures]
-    outputs = [ReportOutput(**document(field)) for field in fields]
-    time = getattr(tile, "time_analysis", None)
-    if time:
-        for field in tile.measures:
-            kinds = (["comparison", "change", "percent_change"] if time.comparison != "none" else [])
-            if time.running_total:
-                kinds.append("running_total")
-            outputs.extend(ReportOutput(**document(field), kind=kind) for kind in kinds)
-    return outputs
+    return output_definitions(tile)
 
 
 def validate_report_controls(tile, catalog, definition):
@@ -52,16 +44,16 @@ def validate_report_controls(tile, catalog, definition):
 
     outputs = report_outputs(tile)
     positions = {_output_key(output): index for index, output in enumerate(outputs)}
-    measure_keys = {_key(field) + (field.aggregate,) for field in tile.measures}
+    measure_keys = {_key(field) + (field.aggregate,) for field in base_measures(tile)}
     filters, ordering = [], []
     for sort in getattr(tile, "sort", []):
         if _output_key(sort) not in positions:
             raise ApiProblem(422, "invalid_report_output", "A sort output is no longer selected. Repair it in the tile editor.")
         ordering.append((positions[_output_key(sort)], sort.direction, sort.nulls))
     for predicate in getattr(tile, "aggregate_filters", []):
-        if _output_key(predicate) not in positions or (*_key(predicate), predicate.aggregate) not in measure_keys:
+        if _output_key(predicate) not in positions or (predicate.kind != "calculated" and (*_key(predicate), predicate.aggregate) not in measure_keys):
             raise ApiProblem(422, "invalid_report_output", "Aggregate filters must reference selected measures or their enabled time-analysis outputs.")
-        if predicate.kind in {"change", "percent_change", "running_total"} or predicate.aggregate in {"count", "count_distinct", "sum", "avg"}:
+        if predicate.kind in {"change", "percent_change", "running_total", "calculated"} or predicate.aggregate in {"count", "count_distinct", "sum", "avg"}:
             kind = "numeric"
         else:
             kind = source_type(catalog, definition, predicate.table, predicate.column)
@@ -161,7 +153,7 @@ class DashboardPlanning:
 
 
 def tile_report_query(dashboard, tile, selections=None):
-    fields = tile.detail_fields if tile.kind == "detail" else [*tile_dimensions(tile), *tile.measures]
+    fields = tile.detail_fields if tile.kind == "detail" else [*tile_dimensions(tile), *base_measures(tile)]
     return ReportQuery(model_id=dashboard.model_id, expected_revision=dashboard.model_revision,
                        explore=ExploreState(fields=fields, selections=dashboard.selections if selections is None else selections,
                                             reportFilters=tile.report_filters, limit=tile.limit))
@@ -188,7 +180,7 @@ def _text_order_fields(catalog, definition, fields):
     return {index for index, field in enumerate(fields) if needs_text(field.table, field.column, field.aggregate)}
 
 
-def _ordered(plan, sql, page_size, text_order_fields=(), *, ordering=(), filters=(), top_n=None):
+def _ordered(plan, sql, page_size, text_order_fields=(), *, ordering=(), filters=(), top_n=None, visible_indices=None):
     # One retained execution supplies forward-only batches. Sorting happens
     # once; subsequent result requests advance its cursor without rerunning SQL.
     # Keep numeric/date dimensions in their native order (not 1, 10, 2).
@@ -230,6 +222,9 @@ def _ordered(plan, sql, page_size, text_order_fields=(), *, ordering=(), filters
     sql = sql.order_by(*ordered)
     if top_n is not None:
         sql = sql.limit(top_n)
+    if visible_indices is not None:
+        sql = exp.select(*(exp.column(aliases[index],table="visible_rows",quoted=True) for index in visible_indices)).from_(sql.subquery("visible_rows"))
+        output_labels = [output_labels[index] for index in visible_indices]
     return {**plan, "sql": sql.sql(dialect="postgres") + ";", "rowLimit": page_size,
             "outputLabels": output_labels}
 
