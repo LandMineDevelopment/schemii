@@ -132,7 +132,7 @@ function studio() {
   Object.defineProperty(document.getElementById('notice'), 'textContent', { set: value => notices.push(value) });
   const initialModel = { ...model, revision: 1 }, initialCatalog = { old: true };
   const state = { get: async () => ({ model, catalog, permissions: { edit: true, export: true, drill: true } }), put: async body => ({ ...dashboard, ...body, revision: 8 }), stop: async () => {} };
-  const context = vm.createContext({ document, window: { confirm: () => true, addEventListener: (name, fn) => events.set(name, fn) }, structuredClone, URLSearchParams,
+  const context = vm.createContext({ document, window: { confirm: () => true, addEventListener: (name, fn) => events.set(name, fn) }, location: { search: '' }, structuredClone, URLSearchParams,
     element, dashboardUpdate, modelUpgradeDraft, modelUpgradeIssues, repairUpgradeIssue,
     currentAccount: () => new Promise(() => {}), createProductAssistant: () => ({}), CacheBudget: class {}, initializeUi() {}, installProductNavigation() {},
     createIconButton: ({ label }) => element('button', { text: label }),
