@@ -95,10 +95,15 @@ def test_assistant_exposes_legacy_quality_controls_and_safe_rich_messages() -> N
     assert 'event.key === "Enter" && !event.shiftKey && !event.isComposing' in source
     assert "elements.form.requestSubmit()" in source
     assert "activity?after=${activitySequence}" in source
-    assert 'requestJson("/api/v1/ai/prototype/login"' in source
-    assert '/api/v1/ai/prototype/logins/${encodeURIComponent(login.id)}' in source
-    assert '/api/v1/ai/credentials/${encodeURIComponent(provider.id)}' in source
-    assert 'Cancel sign-in' in source
+    connections = files("schemii.common").joinpath("web", "assets", "ai-provider-connections.js").read_text(encoding="utf-8")
+    assert 'import { createProviderConnections } from "#common/ai-provider-connections.js"' in source
+    assert 'const providerConnections = createProviderConnections({' in source
+    assert 'container: elements.providerList' in source
+    assert 'getScope: () => ({ product: "schemii", resourceId: workspaceId() })' in source
+    assert 'request("/api/v1/ai/prototype/login"' in connections
+    assert '/api/v1/ai/prototype/logins/${encodeURIComponent(id)}' in connections
+    assert '/api/v1/ai/credentials/${encodeURIComponent(provider.id)}' in connections
+    assert 'Cancel sign-in' in connections
     assert 'acknowledgeProviderDataPolicy: true' in source
     assert 'window.confirm' in source
     assert '/api/v1/schemii/ai/chats/${chatId}/stream' in source
