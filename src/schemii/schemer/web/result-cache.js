@@ -19,6 +19,29 @@ export async function readResultStream(url, body, onFrame, signal, fetcher = fet
 
 const decodedRowBytes = row => JSON.stringify(row).length * 2 + row.length * 32 + 64;
 
+/** Deliberate attachment boundary. Navigation keeps using the live cache; AI gets
+ * a deep frozen, independently bounded copy with no cursor or query capability. */
+export function freezeDisplayedResult(result, provenance, { maxRows = 100, maxBytes = 256 * 1024 } = {}) {
+  if (!result.snapshotAt) throw new Error('Wait for the result snapshot before attaching displayed rows.');
+  const copy = value => JSON.parse(JSON.stringify(value));
+  const attachment = copy({ ...provenance, snapshotAt: result.snapshotAt,
+    metric: result.metric || 'values', barGroupIndex: result.barGroupIndex || 0,
+    cachedRows: result.cachedRows ?? result.rows.length, displayedRows: result.rows.length,
+    partial: Boolean(result.loading || result.hasMore || result.error || result.limitReached),
+    cacheTruncated: Boolean(result.limitReached), chartTruncated: Boolean(result.visualTruncated),
+    clientSampleTruncated: Boolean(result.rows.length),
+    columns: result.columns.map(column => ({ name: String(column.name), type: String(column.dataType || column.type || 'unknown') })), rows: [] });
+  const bytes = () => new TextEncoder().encode(JSON.stringify(attachment)).length;
+  if (bytes() + 1 > maxBytes) throw new Error('Displayed column or filter metadata exceeds the attachment limit. Choose fewer fields.');
+  for (const row of result.rows.slice(0, maxRows)) {
+    attachment.rows.push(copy(row));
+    if (bytes() + 1 > maxBytes) { attachment.rows.pop(); break; }
+  }
+  attachment.clientSampleTruncated = attachment.rows.length < result.rows.length;
+  const freeze = value => { if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); } return value; };
+  return freeze(attachment);
+}
+
 /** Shared decoded capacity, with protected initial shares for main tiles. */
 export class CacheBudget {
   constructor({ bytes = 64 * 1024 * 1024, rows = 50000 } = {}) {

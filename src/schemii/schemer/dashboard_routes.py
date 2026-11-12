@@ -47,7 +47,7 @@ def validate_dashboard(services, owner, body):
     if invalid_optional:
         raise ValueError("Optional dashboard filters must be model scopes marked optional in Schemoo")
     invalid_current_selections = [scope_id for scope_id in body.selections
-                                  if scope_id in scopes and not (
+                                  if scope_id not in scopes or not (
                                       scopes[scope_id].kind == "required" and scopes[scope_id].requirement == "required"
                                       or scope_id in body.optional_filters)]
     if invalid_current_selections:
@@ -55,6 +55,30 @@ def validate_dashboard(services, owner, body):
     if any(selection.active and scope_id not in body.optional_filters
            for scope_id, selection in body.selections.items()):
         raise ValueError("Only exposed optional dashboard filters may be activated")
+
+    def validate_selection_references(selections):
+        # Validate even inactive choices: a later activation must not revive
+        # removed alternatives or inputs. Missing runtime values remain legal.
+        for scope_id, selection in selections.items():
+            scope = scopes[scope_id]
+            alternative = next((item for item in scope.alternatives
+                                if item.id == selection.alternativeId), None)
+            if selection.alternativeId is not None and alternative is None:
+                raise ValueError(f"Filter {scope_id} references an unavailable model alternative")
+            if alternative is None and scope.alternatives:
+                alternative = scope.alternatives[0]
+            # Switching options retains the other options' entered values.
+            # Reject removed inputs, not still-valid values from this scope.
+            inputs = {item.id for option in scope.alternatives for item in option.inputs}
+            if any(key not in inputs for key in selection.values):
+                raise ValueError(f"Filter {scope_id} references an unavailable model input")
+
+    validate_selection_references(body.selections)
+    for tile in body.tiles:
+        if any(key not in scopes or scopes[key].kind == "required" or scopes[key].requirement == "optional"
+               for key in tile.selections):
+            raise ValueError("Tile selections may only override required source-conditional model filters")
+        validate_selection_references(tile.selections)
     if not body.tiles:
         return
     catalog = model_catalog(services, owner, model)
@@ -81,9 +105,6 @@ def validate_dashboard(services, owner, body):
         return type_family(details) == "numeric"
 
     for tile in body.tiles:
-        if any(key not in scopes or scopes[key].kind == "required" or scopes[key].requirement == "optional"
-               for key in tile.selections):
-            raise ValueError("Tile selections may only override required source-conditional model filters")
         for fields in (tile.dimensions + tile.measures, tile.detail_fields):
             if fields:
                 plan_query(catalog, definition, ExploreState(root=definition.root, fields=fields,

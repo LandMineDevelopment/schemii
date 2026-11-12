@@ -1,5 +1,6 @@
 import { timeAnalysisErrors } from './time-analysis.js';
 import { availableFields, aggregateChoices } from './report-state.js';
+import { nodeColumns } from '#model/model-columns.js';
 
 export const TILE_TYPES = [['detail', 'Detail report'], ['aggregate', 'Aggregation report'], ['bar', 'Bar chart'], ['line', 'Line chart'], ['donut', 'Donut chart'], ['kpi', 'KPI']];
 export const fieldKey = field => JSON.stringify([field.table, field.column]);
@@ -28,5 +29,9 @@ export function markSelection(tile, row, measureIndex) {
 }
 export function fieldChoices(model, catalog, search = '', measures = false) {
   const draft = { ...model.definition, fields: [] };
-  return availableFields(draft, catalog, search).filter(field => !measures || aggregateChoices(draft, catalog, field).some(([value]) => value !== 'none') || model.definition.nodes.find(n => n.id === field.table)?.derivation?.kind === 'aggregate');
+  return availableFields(draft, catalog, search).filter(field => {
+    const node = draft.nodes.find(node => node.id === field.table);
+    return nodeColumns(draft, catalog, node).some(column => column.name === field.column)
+      && (!measures || aggregateChoices(draft, catalog, field).some(([value]) => value !== 'none') || node?.derivation?.kind === 'aggregate');
+  });
 }

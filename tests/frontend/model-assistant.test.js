@@ -41,6 +41,8 @@ class TestNode extends EventTarget {
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   closest() { return null; }
   contains(node) { return this === node || this.querySelectorAll("*").includes(node); }
+  showModal() { this.open = true; }
+  close() { this.open = false; }
   focus() { this.ownerDocument.activeElement = this; }
   setCustomValidity() {}
   scrollIntoView() {}
@@ -52,7 +54,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 async function until(predicate) { for (let i = 0; i < 30; i++) { if (predicate()) return; await settle(); } assert.fail("Expected component request did not arrive"); }
 const conversation = (subject, id = `chat-${subject}`) => ({ id, modelId: subject, revision: 1, status: "idle", providerId: "openai", aiModelId: "fixture-model", messages: [], activity: [] });
 
-async function fixture(t, { existing = true, create, message, chatRead } = {}) {
+async function fixture(t, { existing = true, create, message, chatRead, providerStatus } = {}) {
   const document = Object.assign(new EventTarget(), { activeElement: null });
   document.createElement = tag => new TestNode(tag, document);
   document.createTextNode = text => Object.assign(new TestNode("#text", document), { textContent: text });
@@ -65,7 +67,7 @@ async function fixture(t, { existing = true, create, message, chatRead } = {}) {
   Object.assign(globalThis, { document, window, Node: TestNode, MutationObserver: class { observe() {} disconnect() {} }, fetch: async (path, options) => {
     const url = new URL(path, "https://localhost:8001"), body = options.body ? JSON.parse(options.body) : null;
     requests.push({ path: url.pathname, method: options.method, body });
-    if (url.pathname === "/api/v1/ai/status") return response({ healthy: true, providers: [{ id: "openai", name: "OpenAI", available: true, models: [{ id: "fixture-model", name: "Fixture", status: "active" }] }] });
+    if (url.pathname === "/api/v1/ai/status") return response(providerStatus ? await providerStatus(url) : { healthy: true, providers: [{ id: "openai", name: "OpenAI", available: true, models: [{ id: "fixture-model", name: "Fixture", status: "active" }] }] });
     if (url.pathname.endsWith("/settings")) return response({ providerId: "openai", aiModelId: "fixture-model", actions: [], modes: {} });
     if (url.pathname.endsWith("/chats") && options.method === "GET") return response({ chats: (typeof existing === "function" ? existing(url.searchParams.get("model_id")) : existing) ? [conversation(url.searchParams.get("model_id"))] : [] });
     if (url.pathname.endsWith("/chats") && options.method === "POST") return response(create ? await create(body) : conversation(body.modelId));
@@ -251,4 +253,45 @@ test("same-subject reopen preserves the next draft during first-chat creation", 
   create.resolve(conversation("A")); await pending;
   assert.equal(f.input.value, "Next draft");
   assert.equal(f.requests.filter(item => item.path.endsWith("/messages")).length, 1);
+});
+
+for (const failure of [false, true]) {
+  test(`provider refresh ${failure ? "failure" : "success"} cannot update a replacement model subject`, async t => {
+    const old = deferred(); let reads = 0;
+    const status = { healthy: true, providers: [{ id: "openai", name: "Current provider", available: true, models: [{ id: "fixture-model", name: "Current model", status: "active" }] }] };
+    const f = await fixture(t, { providerStatus: () => ++reads === 2 ? old.promise : status });
+    f.document.body.querySelectorAll("button").find(node => node.getAttribute("aria-label") === "Assistant settings").onclick();
+    await until(() => reads === 2);
+    await f.switchTo("B");
+    if (failure) old.reject(new Error("Obsolete provider failure"));
+    else old.resolve({ healthy: true, providers: [{ id: "openai", name: "Obsolete provider", available: false, models: [] }] });
+    await settle(); await settle();
+    assert.ok(!f.document.body.textContent.includes("Obsolete provider"));
+    assert.ok(!f.document.body.textContent.includes("Obsolete provider failure"));
+    const model = f.document.body.querySelectorAll("select").find(node => node.getAttribute("aria-label") === "Assistant model");
+    assert.ok(model.textContent.includes("Current model"));
+    assert.equal(model.value, "openai\u0000fixture-model");
+  });
+}
+
+test('displayed handoff sends a typed attachment separately from text and preserves the composer draft', async t => {
+  const f = await fixture(t);
+  f.edit('Keep my ordinary next question');
+  const packet = Object.freeze({ dashboardId: 'A', rows: [['private-displayed-207']], snapshotAt: '2026-11-11T12:00:00Z' });
+  await f.assistant.explainDisplayed(packet);
+  const sent = f.requests.find(request => request.path.endsWith('/messages'));
+  assert.deepEqual(sent.body.displayedResult, packet);
+  assert.equal(sent.body.acknowledgedProviderId, 'openai');
+  assert.ok(!sent.body.text.includes('private-displayed-207'));
+  assert.equal(f.input.value, 'Keep my ordinary next question');
+});
+
+test('displayed handoff cannot attach to a replacement subject while first chat creation is pending', async t => {
+  const create = deferred();
+  const f = await fixture(t, { existing: id => id === 'B', create: () => create.promise });
+  const pending = f.assistant.explainDisplayed({ dashboardId: 'A', rows: [['private-displayed-207']] });
+  const rejected = assert.rejects(pending, /conversation or provider changed/);
+  await until(() => f.requests.some(request => request.method === 'POST' && request.path.endsWith('/chats')));
+  await f.switchTo('B'); create.resolve(conversation('A')); await rejected;
+  assert.equal(f.requests.filter(request => request.path.endsWith('/messages')).length, 0);
 });
