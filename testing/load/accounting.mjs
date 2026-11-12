@@ -54,10 +54,16 @@ export function assertHealthy(summary, budgets, { allowRejections = false } = {}
   return failures;
 }
 
-export function verifyRecovery(before, after) {
+export function verifyRecovery(before, after, { requireOwnedProbe = false, probe = null, ownedWork = null } = {}) {
   const fields = ['retainedSessions', 'openCursors', 'ownedBackends', 'activeJobs', 'ordinaryPermits', 'retainedPermits'];
   if (!before || !after || fields.some(key => !Number.isSafeInteger(before[key]) || !Number.isSafeInteger(after[key])))
     return { verified: false, failures: ['missing_resource_observation'] };
   const failures = fields.filter(key => after[key] > before[key]).map(key => `${key}_leak`);
+  if (requireOwnedProbe) {
+    if (probe?.verified !== true || probe.authenticatedRead !== true || probe.exactSelectTerminal !== true || probe.capturedBackendReleased !== true)
+      failures.push('owned_authenticated_select_recovery_unverified');
+    if (ownedWork?.status !== 'available' || ownedWork.activeJobs !== 0 || ownedWork.activeExecutions !== 0)
+      failures.push('owned_work_release_unverified');
+  }
   return { verified: failures.length === 0, failures };
 }
