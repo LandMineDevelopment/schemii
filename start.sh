@@ -193,6 +193,7 @@ def stop_retired():
         if not all(eligible(record, primary) for record in records):
             raise ValueError()
         stopped = []
+        confirmations = []
         for index, identifier in enumerate(IDENTIFIERS):
             stage = "revalidation"
             try:
@@ -200,21 +201,31 @@ def stop_retired():
                 if not eligible(current, primary):
                     raise ValueError()
                 stage = "stop-unconfirmed"
-                output = bounded_command(["docker", "container", "stop", "--time", "10", identifier], timeout=15, limit=256)
-                if output.strip() != identifier:
-                    raise ValueError()
-                stage = "post-stop-unconfirmed"
+                command_confirmed = False
+                try:
+                    output = bounded_command(["docker", "container", "stop", "--time", "10", identifier], timeout=15, limit=256)
+                    command_confirmed = output.strip() == identifier
+                except Exception:
+                    # A failed/timed-out CLI may still have stopped the target.
+                    # Observe exact owned state; never replay an uncertain write.
+                    pass
+                if command_confirmed:
+                    stage = "post-stop-unconfirmed"
                 after = json.loads(inspect(identifier))
                 if not retired_identity(after, primary) or after["status"] != "exited":
                     raise ValueError()
                 stopped.append(identifier)
+                if not command_confirmed:
+                    confirmations.append({"id": identifier, "outcome": "confirmed-after-uncertain-command"})
             except (Exception, SystemExit):
                 sys.stdout.write(json.dumps({"outcome": "incomplete", "stopped": stopped,
                     "unconfirmed": identifier, "stage": stage,
-                    "unattempted": IDENTIFIERS[index + 1:]}, separators=(",", ":")) + "\n")
+                    "unattempted": IDENTIFIERS[index + 1:],
+                    **({"confirmations": confirmations} if confirmations else {})}, separators=(",", ":")) + "\n")
                 sys.stderr.write("Schemii retired runtime stop incomplete; inspect the reported exact IDs before another action\n")
                 return 1
-        sys.stdout.write(json.dumps({"outcome": "stopped", "stopped": stopped}, separators=(",", ":")) + "\n")
+        sys.stdout.write(json.dumps({"outcome": "stopped", "stopped": stopped,
+            **({"confirmations": confirmations} if confirmations else {})}, separators=(",", ":")) + "\n")
         return 0
 
 

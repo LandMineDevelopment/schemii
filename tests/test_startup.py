@@ -1141,6 +1141,7 @@ def _retired_stop_fixture(tmp_path):
         " print('PRIVATE_STOP_ERROR_SECRET',file=sys.stderr)\n"
         " if plan.get('stop_error'): print('PRIVATE_STOP_STDOUT_SECRET');sys.exit(1)\n"
         " state[identifier]['stopped']=True;state_path.write_text(json.dumps(state))\n"
+        " if plan.get('stop_error_after_stopping'): print('PRIVATE_STOP_STDOUT_SECRET');sys.exit(1)\n"
         " if plan.get('timeout'): time.sleep(30)\n"
         " print(plan.get('stop_stdout',identifier));sys.exit(0)\n"
         "print('PRIVATE_FORBIDDEN_RUNTIME_COMMAND',file=sys.stderr);sys.exit(97)\n"
@@ -1396,6 +1397,9 @@ def test_retired_stop_partial_failure_reports_confirmed_and_unconfirmed_ids(
             "status": "running" if stage == "post-status" else "exited",
             "composeProject": "foreign" if stage == "post-owner" else "schemii",
         }
+    if stage in {"stop-output", "stop-oversize", "timeout"}:
+        # An uncertain CLI reply with a still-restarting target is not success.
+        plan["after"] = {**plan["record"], "status": "restarting"}
     plans.write_text(json.dumps(data))
     before = _filesystem_snapshot(protected)
     result = _run_retired_stop(worktree, environment)
@@ -1490,3 +1494,106 @@ def test_retired_stop_checks_genuine_inherited_exclusive_descriptors(tmp_path, v
         assert result.returncode == 1
         assert result.stdout == ""
         assert _stop_events(commands) == []
+
+
+@pytest.mark.parametrize(
+    "command,observation",
+    [
+        ("nonzero", "exited"),
+        ("unexpected-output", "exited"),
+        ("timeout", "exited"),
+        ("nonzero", "changed-owner"),
+        ("nonzero", "missing-state"),
+        ("unexpected-output", "running"),
+    ],
+)
+def test_retired_stop_reconciles_uncertain_command_with_fresh_exact_state(
+    tmp_path,
+    command,
+    observation,
+):
+    worktree, environment, commands, protected, _, _, plans, _ = _retired_stop_fixture(
+        tmp_path
+    )
+    data = json.loads(plans.read_text())
+    plan = data[RUNTIME_ID]
+    if command == "nonzero":
+        plan["stop_error_after_stopping"] = True
+    elif command == "unexpected-output":
+        plan["stop_stdout"] = "PRIVATE_UNEXPECTED_STOP_STDOUT"
+    else:
+        plan["timeout"] = True
+    if observation == "changed-owner":
+        plan["after"] = {
+            **plan["record"],
+            "status": "exited",
+            "composeProject": "foreign",
+        }
+    elif observation == "missing-state":
+        plan["after"] = {}
+    elif observation == "running":
+        plan["after"] = {**plan["record"], "status": "running"}
+    plans.write_text(json.dumps(data))
+    before = _filesystem_snapshot(protected)
+    # A successful reconciliation permits the next preflighted ID; failure must
+    # leave it unattempted. No uncertain write is ever repeated.
+    result = _run_retired_stop(worktree, environment)
+    output = json.loads(result.stdout)
+    if observation == "exited":
+        assert result.returncode == 0, result.stderr
+        assert output == {
+            "outcome": "stopped",
+            "stopped": [RUNTIME_ID, RUNTIME_OTHER_ID],
+            "confirmations": [
+                {"id": RUNTIME_ID, "outcome": "confirmed-after-uncertain-command"}
+            ],
+        }
+        assert len(_stop_events(commands)) == 2
+    else:
+        assert result.returncode == 1
+        assert output == {
+            "outcome": "incomplete",
+            "stopped": [],
+            "unconfirmed": RUNTIME_ID,
+            "stage": "stop-unconfirmed",
+            "unattempted": [RUNTIME_OTHER_ID],
+        }
+        assert len(_stop_events(commands)) == 1
+    events = list(map(json.loads, commands.read_text().splitlines()))
+    first_stop = next(
+        index
+        for index, event in enumerate(events)
+        if event[:3] == ["docker", "container", "stop"]
+    )
+    assert events[first_stop + 1] == [
+        "docker",
+        "container",
+        "inspect",
+        "--format",
+        RUNTIME_INSPECT_TEMPLATE,
+        RUNTIME_ID,
+    ]
+    assert _filesystem_snapshot(protected) == before
+    assert "PRIVATE_" not in result.stdout + result.stderr
+
+
+def test_retired_stop_keeps_confirmed_uncertain_result_when_next_stop_fails(tmp_path):
+    worktree, environment, commands, _, _, _, plans, _ = _retired_stop_fixture(tmp_path)
+    data = json.loads(plans.read_text())
+    data[RUNTIME_ID]["stop_error_after_stopping"] = True
+    data[RUNTIME_OTHER_ID]["stop_error"] = True
+    plans.write_text(json.dumps(data))
+    result = _run_retired_stop(worktree, environment)
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {
+        "outcome": "incomplete",
+        "stopped": [RUNTIME_ID],
+        "unconfirmed": RUNTIME_OTHER_ID,
+        "stage": "stop-unconfirmed",
+        "unattempted": [],
+        "confirmations": [
+            {"id": RUNTIME_ID, "outcome": "confirmed-after-uncertain-command"},
+        ],
+    }
+    assert len(_stop_events(commands)) == 2
+    assert "PRIVATE_" not in result.stdout + result.stderr
