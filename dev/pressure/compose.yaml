@@ -16,11 +16,11 @@ x-database: &database
       cp /run/secrets/database_cert /tls/server.crt
       chown postgres:postgres /tls/server.key /tls/server.crt
       chmod 600 /tls/server.key
-      exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key -c max_connections=24 -c shared_buffers=32MB -c log_min_messages=panic -c log_min_error_statement=panic
+      exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key -c max_connections=${PRESSURE_DATABASE_MAXIMUM} -c shared_buffers=${PRESSURE_DATABASE_SHARED_BUFFERS} -c log_min_messages=panic -c log_min_error_statement=panic
   tmpfs: ["/tls:size=4m,mode=0755", "/tmp:size=16m,mode=1777"]
-  mem_limit: 256m
-  cpus: 0.5
-  pids_limit: 64
+  mem_limit: ${PRESSURE_METADATA_MEMORY}
+  cpus: ${PRESSURE_METADATA_CPUS}
+  pids_limit: ${PRESSURE_METADATA_PIDS}
   restart: "no"
   networks: [database]
   healthcheck:
@@ -42,6 +42,9 @@ services:
       - ${PRESSURE_DIRECTORY}/database.crt:/run/secrets/database_cert:ro
   source:
     <<: *database
+    mem_limit: ${PRESSURE_SOURCE_MEMORY}
+    cpus: ${PRESSURE_SOURCE_CPUS}
+    pids_limit: ${PRESSURE_SOURCE_PIDS}
     environment:
       POSTGRES_USER: pressure_admin
       POSTGRES_DB: pressure_source
@@ -72,7 +75,7 @@ services:
     image: ${PRESSURE_APPLICATION_IMAGE}
     labels: *labels
     logging: *logging
-    command: [uvicorn, pressure_app:observed_application, --factory, --app-dir, /qualification, --host, 0.0.0.0, --port, "8000", --no-access-log]
+    command: [uvicorn, pressure_app:observed_application, --factory, --app-dir, /qualification, --host, 0.0.0.0, --port, "8000", --workers, "1", --no-access-log]
     environment:
       PRESSURE_OBSERVER_RUN: ${PRESSURE_RUN}
       SCHEMII_DEPLOYMENT_MODE: authenticated
@@ -83,11 +86,11 @@ services:
       SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/app_password
       SCHEMII_METADATA_ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
       SCHEMII_METADATA_TARGET_HOST_ALIASES: metadata
-      SCHEMII_METADATA_MAXIMUM_CONNECTIONS: "2"
-      SCHEMII_METADATA_STATEMENT_TIMEOUT_MS: "3000"
-      SCHEMII_METADATA_LOCK_TIMEOUT_MS: "1500"
-      SCHEMII_METADATA_IDLE_TRANSACTION_TIMEOUT_MS: "3000"
-      SCHEMII_METADATA_SHUTDOWN_TIMEOUT_SECONDS: "2"
+      SCHEMII_METADATA_MAXIMUM_CONNECTIONS: ${PRESSURE_METADATA_MAXIMUM}
+      SCHEMII_METADATA_STATEMENT_TIMEOUT_MS: ${PRESSURE_METADATA_STATEMENT_MS}
+      SCHEMII_METADATA_LOCK_TIMEOUT_MS: ${PRESSURE_METADATA_LOCK_MS}
+      SCHEMII_METADATA_IDLE_TRANSACTION_TIMEOUT_MS: ${PRESSURE_METADATA_IDLE_MS}
+      SCHEMII_METADATA_SHUTDOWN_TIMEOUT_SECONDS: ${PRESSURE_METADATA_SHUTDOWN_SECONDS}
       SCHEMII_TARGET_EGRESS_MODE: internal-only
       SCHEMII_ALLOWED_TARGET_HOSTS: source
       SCHEMII_CONFIG_FILE: /etc/schemii/schemii.toml
@@ -105,9 +108,9 @@ services:
     tmpfs: ["/tmp:size=16m,mode=1777"]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    mem_limit: 512m
-    cpus: 1.0
-    pids_limit: 128
+    mem_limit: ${PRESSURE_SCHEMII_MEMORY}
+    cpus: ${PRESSURE_SCHEMII_CPUS}
+    pids_limit: ${PRESSURE_SCHEMII_PIDS}
     restart: "no"
   ingress:
     image: nginx:1.29.1-alpine@sha256:42a516af16b852e33b7682d5ef8acbd5d13fe08fecadc7ed98605ba5e3b26ab8
@@ -127,9 +130,9 @@ services:
     tmpfs: ["/tmp:size=16m,mode=1777"]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    mem_limit: 64m
-    cpus: 0.25
-    pids_limit: 32
+    mem_limit: ${PRESSURE_INGRESS_MEMORY}
+    cpus: ${PRESSURE_INGRESS_CPUS}
+    pids_limit: ${PRESSURE_INGRESS_PIDS}
     restart: "no"
     healthcheck:
       test: [CMD, wget, -q, --no-check-certificate, -O, /dev/null, --header, "Host: localhost", "https://127.0.0.1:8443/api/v1/readiness"]

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from contextlib import suppress
 from datetime import datetime, timezone
+from dataclasses import dataclass
 import fcntl
 import hashlib
 import io
@@ -58,8 +59,10 @@ ASSETS = (
     "dev/pressure/compose.yaml",
     "dev/ingress/nginx.conf",
     "dev/schemii.toml",
+    "testing/load/runtime.mjs",
 )
 INSPECT = '{"id":{{json .Id}},"created":{{json .Created}},"name":{{json .Name}},"image":{{json .Image}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"oomKilled":{{json .State.OOMKilled}},"startedAt":{{json .State.StartedAt}},"finishedAt":{{json .State.FinishedAt}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},"labels":{{json .Config.Labels}},"ports":{{json .HostConfig.PortBindings}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}},"memory":{{json .HostConfig.Memory}},"nanoCpus":{{json .HostConfig.NanoCpus}},"pids":{{json .HostConfig.PidsLimit}}}'
+OS_INSPECT = '{"id":{{json .Id}},"pid":{{json .State.Pid}},"running":{{json .State.Running}},"startedAt":{{json .State.StartedAt}}}'
 # No environment, command arguments, database rows or runtime error messages.
 PACKAGE_SCRIPT = """import hashlib,importlib.util,json
 from pathlib import Path
@@ -86,6 +89,149 @@ def check(condition: bool, reason: str) -> None:
         raise Refused(reason)
 
 
+@dataclass(frozen=True)
+class Allocation:
+    service: str
+    memory_bytes: int
+    nano_cpus: int
+    pids: int
+
+    def receipt(self) -> dict:
+        return {
+            "memoryBytes": self.memory_bytes,
+            "nanoCpus": self.nano_cpus,
+            "pids": self.pids,
+        }
+
+
+@dataclass(frozen=True)
+class FixtureProfile:
+    name: str
+    purpose: str
+    allocations: tuple[Allocation, ...]
+    normal_maximum: int
+    statement_ms: int
+    lock_ms: int
+    idle_ms: int
+    shutdown_seconds: int
+    database_maximum: int
+    shared_buffers: str
+
+    def receipt(self) -> dict:
+        return {
+            "name": self.name,
+            "version": 1,
+            "purpose": self.purpose,
+            "allocations": {item.service: item.receipt() for item in self.allocations},
+            "metadata": {
+                "normalMaximum": self.normal_maximum,
+                "readinessMaximum": 2,
+                "statementTimeoutMs": self.statement_ms,
+                "lockTimeoutMs": self.lock_ms,
+                "idleTransactionTimeoutMs": self.idle_ms,
+                "shutdownTimeoutSeconds": self.shutdown_seconds,
+            },
+            "sourceAdmission": {
+                "ordinaryTotal": 20,
+                "ordinaryPerIdentity": 4,
+                "retainedTotal": 19,
+                "retainedPerIdentity": 3,
+            },
+            "database": {
+                "maximumConnections": self.database_maximum,
+                "sharedBuffers": self.shared_buffers,
+            },
+            "apiProcesses": 1,
+            "instrumentation": "fixture_only_stock_asgi_lifespan_and_owner_sampler",
+            "instrumentationOverheadMeasured": False,
+            "stockCapacityEligible": False,
+        }
+
+    def environment(self) -> dict[str, str]:
+        values = {
+            "PRESSURE_PROFILE": self.name,
+            "PRESSURE_METADATA_MAXIMUM": str(self.normal_maximum),
+            "PRESSURE_METADATA_STATEMENT_MS": str(self.statement_ms),
+            "PRESSURE_METADATA_LOCK_MS": str(self.lock_ms),
+            "PRESSURE_METADATA_IDLE_MS": str(self.idle_ms),
+            "PRESSURE_METADATA_SHUTDOWN_SECONDS": str(self.shutdown_seconds),
+            "PRESSURE_DATABASE_MAXIMUM": str(self.database_maximum),
+            "PRESSURE_DATABASE_SHARED_BUFFERS": self.shared_buffers,
+        }
+        for item in self.allocations:
+            prefix = "PRESSURE_" + item.service.upper().replace("-", "_")
+            values.update(
+                {
+                    prefix + "_MEMORY": str(item.memory_bytes),
+                    prefix + "_CPUS": str(item.nano_cpus / 1_000_000_000),
+                    prefix + "_PIDS": str(item.pids),
+                }
+            )
+        return values
+
+
+PRESSURE_PROFILE = FixtureProfile(
+    "pressure-v1",
+    "metadata-pressure-qualification",
+    (
+        Allocation("schemii", 536870912, 1000000000, 128),
+        Allocation("metadata", 268435456, 500000000, 64),
+        Allocation("source", 268435456, 500000000, 64),
+        Allocation("ingress", 67108864, 250000000, 32),
+        Allocation("observer-init", 67108864, 250000000, 16),
+    ),
+    2,
+    3000,
+    1500,
+    3000,
+    2,
+    24,
+    "32MB",
+)
+LOAD_PROFILE = FixtureProfile(
+    "representative-load-v1",
+    "representative-one-api-load-fixture",
+    (
+        Allocation("schemii", 2147483648, 2000000000, 256),
+        Allocation("metadata", 1073741824, 1000000000, 256),
+        Allocation("source", 2147483648, 2000000000, 256),
+        Allocation("ingress", 134217728, 500000000, 64),
+        Allocation("observer-init", 67108864, 250000000, 16),
+    ),
+    16,
+    5000,
+    1000,
+    5000,
+    15,
+    100,
+    "128MB",
+)
+PROFILES = (PRESSURE_PROFILE, LOAD_PROFILE)
+
+
+def selected_profile(name: str) -> FixtureProfile:
+    for profile in PROFILES:
+        if type(name) is str and name == profile.name:
+            return profile
+    raise Refused("fixed_fixture_profile_required")
+
+
+def bound_profile(value: dict) -> FixtureProfile:
+    check(type(value) is dict, "profile_receipt_required")
+    profile = selected_profile(value.get("name"))
+    try:
+        supplied = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, ValueError):
+        raise Refused("profile_receipt_changed") from None
+    expected = json.dumps(
+        profile.receipt(), sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    check(supplied == expected, "profile_receipt_changed")
+    return profile
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -95,7 +241,7 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def private_read(path: Path) -> dict:
+def private_read(path: Path, *, with_digest: bool = False) -> dict | tuple[dict, str]:
     before = path.lstat()
     check(
         stat.S_ISREG(before.st_mode)
@@ -120,7 +266,7 @@ def private_read(path: Path) -> dict:
     check(len(raw) <= 262144, "journal_size")
     result = json.loads(raw)
     check(type(result) is dict, "journal_schema")
-    return result
+    return (result, hashlib.sha256(raw).hexdigest()) if with_digest else result
 
 
 def private_write(path: Path, value: dict) -> None:
@@ -311,7 +457,14 @@ def instant(value: str) -> datetime:
     return parsed
 
 
-def validate_observation(value: dict, run: str, native: dict, *, fresh: bool) -> None:
+def validate_observation(
+    value: dict,
+    run: str,
+    native: dict,
+    *,
+    fresh: bool,
+    profile: FixtureProfile = PRESSURE_PROFILE,
+) -> None:
     check(
         type(value) is dict
         and value.get("version") == 1
@@ -354,8 +507,8 @@ def validate_observation(value: dict, run: str, native: dict, *, fresh: bool) ->
             "observer_owner_unknown",
         )
     check(
-        value["normal"]["counts"]["maximum"] == 2
-        and value["readiness"]["counts"]["maximum"] == 1,
+        value["normal"]["counts"]["maximum"] == profile.normal_maximum
+        and value["readiness"]["counts"]["maximum"] == 2,
         "observer_fixed_owner_limits",
     )
 
@@ -562,7 +715,11 @@ def attachment_request(
         and journal.get("assets") == {name: sha(root / name) for name in ASSETS},
         "attachment_journal",
     )
+    profile = bound_profile(journal.get("profile"))
     authority = private_read(directory / "authority.json")
+    check(
+        bound_profile(authority.get("profile")) is profile, "authority_profile_changed"
+    )
     check(
         authority.get("kind") == "launcher_owned_disposable_pressure"
         and authority.get("status") == "held"
@@ -681,6 +838,7 @@ class Fixture:
             runtime,
         )
         self.journal = directory / "journal.json"
+        self.profile = bound_profile(state.get("profile"))
         self.environment = {
             key: value
             for key, value in os.environ.items()
@@ -699,6 +857,7 @@ class Fixture:
             PRESSURE_GID=str(os.getgid()),
             PRESSURE_APPLICATION_IMAGE=state["applicationImage"],
         )
+        self.environment.update(self.profile.environment())
         self.compose = [
             "compose",
             "--env-file",
@@ -765,16 +924,14 @@ class Fixture:
                 ]
             )
             check(record["image"] == expected, "disposable_image")
-            limits = {
-                "metadata": (268435456, 500000000, 64),
-                "source": (268435456, 500000000, 64),
-                "schemii": (536870912, 1000000000, 128),
-                "ingress": (67108864, 250000000, 32),
-                "observer-init": (67108864, 250000000, 16),
-            }
+            allocation = self.profile.receipt()["allocations"][service]
             check(
                 (record["memory"], record["nanoCpus"], record["pids"])
-                == limits[service],
+                == (
+                    allocation["memoryBytes"],
+                    allocation["nanoCpus"],
+                    allocation["pids"],
+                ),
                 "disposable_runtime_limits",
             )
             old = self.state.get("containers", {}).get(service)
@@ -1060,7 +1217,9 @@ class Fixture:
             and current.get("startedAt") == owned.get("startedAt"),
             "observer_native_changed_during_copy",
         )
-        validate_observation(value, self.state["run"], owned, fresh=not stopped)
+        validate_observation(
+            value, self.state["run"], owned, fresh=not stopped, profile=self.profile
+        )
         return {
             "containerId": owned["id"],
             "containerStartedAt": owned["startedAt"],
@@ -1312,6 +1471,11 @@ class Fixture:
             and prepared["sourceBaseline"]["releaseVerified"] is False,
             "preparation_baseline_missing",
         )
+        check(
+            bound_profile(prepared.get("profile")) is self.profile
+            and prepared.get("databaseSettings") == self.database_settings(),
+            "preparation_profile_mismatch",
+        )
         private_write(self.directory / "preparation.json", prepared)
         self.up(["observer-init"])
         initialized = self.state["containers"]["observer-init"]
@@ -1326,7 +1490,252 @@ class Fixture:
         self.up(["ingress"])
         restored_readiness()
 
+    def os_records(self) -> list[dict]:
+        self.inventory()
+        records = []
+        for service in ("schemii", "ingress", "metadata", "source"):
+            owned = self.state["containers"][service]
+            check(owned["state"] == "running", "os_owned_service_not_running")
+            data = json.loads(
+                self.docker(
+                    ["container", "inspect", "--format", OS_INSPECT, owned["id"]]
+                )
+            )
+            check(
+                set(data) == {"id", "pid", "running", "startedAt"}
+                and data["id"] == owned["id"]
+                and type(data["pid"]) is int
+                and data["pid"] > 1
+                and data["running"] is True
+                and data["startedAt"] == owned["startedAt"],
+                "os_owned_pid_unconfirmed",
+            )
+            current = self.inspect(owned["id"])
+            check(
+                fixed_identity(current) == fixed_identity(owned)
+                and current["state"] == "running"
+                and current["startedAt"] == data["startedAt"],
+                "os_owned_identity_changed",
+            )
+            records.append(
+                {
+                    "id": owned["id"],
+                    "image": owned["image"],
+                    "pid": data["pid"],
+                    "running": True,
+                    "project": self.state["project"],
+                    "service": service,
+                    "memoryBytes": owned["memory"],
+                    "nanoCpus": owned["nanoCpus"],
+                    "pids": owned["pids"],
+                    "startedAt": data["startedAt"],
+                }
+            )
+        return records
+
+    def export_os_runtime(self) -> str:
+        path = self.directory / "os-runtime.json"
+        check(
+            not path.exists()
+            and not path.is_symlink()
+            and "osExport" not in self.state,
+            "new_os_export_required",
+        )
+        revision = command(["git", "-C", str(self.root), "rev-parse", "HEAD"]).strip()
+        check(re.fullmatch(r"[0-9a-f]{40}", revision) is not None, "os_source_revision")
+        check(
+            not command(
+                [
+                    "git",
+                    "-C",
+                    str(self.root),
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=normal",
+                ]
+            ).strip(),
+            "os_clean_source_required",
+        )
+        records = self.os_records()
+        intent = {
+            "version": 1,
+            "status": "pending",
+            "nonce": self.state["nonce"],
+            "revision": revision,
+            "profile": self.profile.receipt(),
+            "records": records,
+            "output": "os-runtime.json",
+        }
+        self.save("os-export-intent", osExport=intent)
+        result = self.runtime(
+            [
+                "node",
+                str(self.root / "testing/load/runtime.mjs"),
+                "export-fixture",
+                str(self.directory),
+            ],
+            environment=self.environment,
+            timeout=15,
+            limit=4096,
+        )
+        check(json.loads(result) == {"status": "exported"}, "os_export_unconfirmed")
+        # Independently re-inspect the exact four IDs/PIDs after host capture.
+        check(self.os_records() == records, "os_owned_pid_changed_during_export")
+        exported, exported_digest = private_read(path, with_digest=True)
+        fixture = exported.get("fixture", {})
+        check(
+            exported.get("version") == 1
+            and exported.get("origin") == LOCAL
+            and exported.get("revision") == revision
+            and fixture.get("run") == self.state["run"]
+            and fixture.get("nonce") == self.state["nonce"]
+            and bound_profile(fixture.get("profile")) is self.profile,
+            "os_receipt_provenance",
+        )
+        check(
+            type(exported.get("bootId")) is str
+            and re.fullmatch(r"[0-9a-f-]{36}", exported["bootId"]) is not None
+            and fixture.get("owner") == self.state["owner"]
+            and fixture.get("sourceAssetsSha256")
+            == hashlib.sha256(
+                json.dumps(
+                    self.state["assets"], sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+            and exported.get("topology", {}).get("apiProcesses") == 1,
+            "os_receipt_source_identity",
+        )
+        containers = exported.get("containers", [])
+        check(type(containers) is list and len(containers) == 4, "os_receipt_inventory")
+        actual = {item["service"]: item for item in containers}
+        check(
+            set(actual) == {item["service"] for item in records}, "os_receipt_services"
+        )
+        for record in records:
+            item = actual[record["service"]]
+            check(
+                item.get("id") == record["id"]
+                and item.get("image") == record["image"]
+                and item.get("rootProcess", {}).get("pid") == record["pid"],
+                "os_receipt_container_changed",
+            )
+            identity = item.get("rootProcess", {})
+            cgroup = item.get("cgroup", {})
+            check(
+                type(identity.get("birthTick")) is str
+                and identity["birthTick"].isdecimal()
+                and type(cgroup.get("path")) is str
+                and cgroup["path"].startswith("/")
+                and cgroup["path"] != "/"
+                and all(
+                    type(cgroup.get(key)) is int and cgroup[key] > 0
+                    for key in ("device", "inode")
+                ),
+                "os_receipt_process_unknown",
+            )
+        app = actual["schemii"]
+        api, init = app.get("apiProcess", {}), app.get("initProcess", {})
+        observed_process = self.state["runtimeReceipt"]["application"]["observation"][
+            "process"
+        ]
+        check(
+            type(api.get("pid")) is int
+            and api["pid"] > 1
+            and api.get("namespacePid") == observed_process["pid"]
+            and api.get("birthTick") == observed_process["startTicks"]
+            and init.get("pid") == app["rootProcess"]["pid"]
+            and init.get("birthTick") == app["rootProcess"]["birthTick"]
+            and init.get("namespacePid") == 1
+            and api["pid"] != init["pid"],
+            "os_receipt_api_init_unknown",
+        )
+        intent["status"] = "complete"
+        self.save(
+            "os-runtime-observed",
+            osExport=intent,
+            osRuntimeReceiptFile=str(path),
+            osRuntimeReceiptSha256=exported_digest,
+        )
+        return str(path)
+
+    def capture_runtime(self, api: dict) -> dict:
+        """Bind fixed launch allocation to actual owners and authenticated API process."""
+        observed = self.observation()
+        metadata = api.get("sources", {}).get("metadata", {})
+        source = api.get("sources", {}).get("source", {})
+        ordinary = source.get("counts", {}).get("ordinary", {})
+        check(
+            api.get("version") == 1
+            and api.get("processPid") == observed["observation"]["process"]["pid"]
+            and metadata.get("status") == "available"
+            and metadata.get("counts", {}).get("maximum_connections")
+            == self.profile.normal_maximum
+            and source.get("status") == "available"
+            and ordinary.get("maximum") == 20
+            and ordinary.get("maximumPerProfileRevision") == 4,
+            "effective_application_budget_mismatch",
+        )
+        preparation = private_read(self.directory / "preparation.json")
+        check(
+            bound_profile(preparation.get("profile")) is self.profile
+            and preparation.get("databaseSettings") == self.database_settings(),
+            "effective_database_budget_mismatch",
+        )
+        allocations = {
+            name: {
+                "containerId": record["id"],
+                "created": record["created"],
+                "image": record["image"],
+                "memoryBytes": record["memory"],
+                "nanoCpus": record["nanoCpus"],
+                "pids": record["pids"],
+            }
+            for name, record in self.state["containers"].items()
+        }
+        check(set(allocations) == SERVICES, "effective_service_inventory_missing")
+        receipt = {
+            "version": 1,
+            "run": self.state["run"],
+            "at": now(),
+            "scope": "startup-effective-configuration",
+            "profile": self.profile.receipt(),
+            "effectiveAllocations": allocations,
+            "metadata": {
+                "normalMaximum": observed["observation"]["normal"]["counts"]["maximum"],
+                "readinessMaximum": observed["observation"]["readiness"]["counts"][
+                    "maximum"
+                ],
+            },
+            "sourceOrdinaryMaximum": ordinary["maximum"],
+            "sourcePerIdentityMaximum": ordinary["maximumPerProfileRevision"],
+            "sourceRetainedBudgetEvidence": "stock-source-and-config-bound; declared19/3, not a live retained-permit measurement",
+            "databaseSettings": preparation["databaseSettings"],
+            "application": observed,
+            "apiProcesses": 1,
+            "apiProcessEvidence": "fixed --workers 1 launch plus authenticated API PID matches observer incarnation",
+            "instrumentation": self.profile.receipt()["instrumentation"],
+            "instrumentationOverheadMeasured": False,
+            "stockCapacityEligible": False,
+            "capacityAcceptance": False,
+        }
+        self.save("effective-profile-observed", runtimeReceipt=receipt)
+        private_write(self.directory / "runtime.json", receipt)
+        self.export_os_runtime()
+        return receipt
+
+    def database_settings(self) -> dict:
+        return {
+            name: {
+                "maximumConnections": self.profile.database_maximum,
+                "sharedBuffers": self.profile.shared_buffers,
+            }
+            for name in ("metadata", "source")
+        }
+
     def run(self) -> dict:
+        check(
+            self.profile is PRESSURE_PROFILE, "pressure_qualification_profile_required"
+        )
         outcome = "failed"
         try:
             self.prepare_stack()
@@ -1337,6 +1746,7 @@ class Fixture:
                 and result.get("capacityAcceptance") is False,
                 "qualification_incomplete",
             )
+            self.capture_runtime(result.get("runtimeObservation", {}))
             outcome = "qualified"
             return result
         finally:
@@ -1345,12 +1755,29 @@ class Fixture:
 
     def authority(self, status: str) -> dict:
         hold = self.state["hold"]
+        if status == "held":
+            path = self.directory / "os-runtime.json"
+            check(
+                self.state.get("osExport", {}).get("status") == "complete"
+                and self.state.get("osRuntimeReceiptFile") == str(path)
+                and hold["nonce"] == self.state["nonce"],
+                "os_authority_receipt_required",
+            )
+            _, current_digest = private_read(path, with_digest=True)
+            check(
+                current_digest == self.state.get("osRuntimeReceiptSha256"),
+                "os_authority_receipt_changed",
+            )
         value = {
             "version": 1,
             "kind": "launcher_owned_disposable_pressure",
             "status": status,
             "run": self.state["run"],
             "nonce": hold["nonce"],
+            "profile": self.state["profile"],
+            "runtimeReceipt": self.state.get("runtimeReceipt"),
+            "osRuntimeReceiptFile": self.state.get("osRuntimeReceiptFile"),
+            "osRuntimeReceiptSha256": self.state.get("osRuntimeReceiptSha256"),
             "directory": str(self.directory),
             "owner": self.state["owner"],
             "heartbeatAt": now(),
@@ -1462,6 +1889,7 @@ class Fixture:
             self.prepare_stack()
             result = self.probe("bootstrap")
             check(result.get("phase") == "bootstrapped", "hold_bootstrap_missing")
+            self.capture_runtime(result.get("runtimeObservation", {}))
             credentials = {
                 "version": 1,
                 "run": self.state["run"],
@@ -1490,7 +1918,7 @@ class Fixture:
             self.save(
                 "held",
                 hold={
-                    "nonce": secrets.token_hex(32),
+                    "nonce": self.state["nonce"],
                     "expiresAt": datetime.fromtimestamp(
                         time.time() + seconds, timezone.utc
                     ).isoformat(),
@@ -1604,8 +2032,16 @@ class Fixture:
 
 
 def begin(
-    root: Path, primary: Path, directory: Path | None, runtime=command
+    root: Path,
+    primary: Path,
+    directory: Path | None,
+    runtime=command,
+    *,
+    profile_name: str = PRESSURE_PROFILE.name,
 ) -> Fixture:
+    profile = selected_profile(
+        profile_name
+    )  # Reject ambiguity before runtime inspection or private writes.
     run = directory.name if directory is not None else "pressure_" + uuid.uuid4().hex
     check(bool(re.fullmatch(r"pressure_[0-9a-f]{32}", run)), "run_directory_name")
     base = primary / ".schemii/metadata-pressure"
@@ -1622,6 +2058,7 @@ def begin(
         "project": "schemii-pressure-" + run[9:],
         "applicationImage": "",
         "images": {},
+        "profile": profile.receipt(),
     }
     fixture = Fixture(root, primary, directory, minimal, runtime)
     runtime_context = fixture.context()
@@ -1784,6 +2221,7 @@ def begin(
     directory.mkdir(mode=0o700)
     fixture.state.update(
         version=1,
+        nonce=secrets.token_hex(32),
         root=str(root),
         primary=str(primary),
         directory=str(directory),
@@ -1868,6 +2306,7 @@ def main() -> int:
             "--qualify-metadata-pressure",
             "--recover-metadata-pressure",
             "--hold-metadata-pressure",
+            "--hold-load-fixture",
             "--metadata-pressure-attach",
             "--metadata-pressure-heartbeat",
             "--metadata-pressure-detach",
@@ -1905,7 +2344,7 @@ def main() -> int:
             fixture.cleanup()
         else:
             seconds = None
-            if args.action == "--hold-metadata-pressure":
+            if args.action in {"--hold-metadata-pressure", "--hold-load-fixture"}:
                 check(
                     args.directory is not None
                     and args.argument is None
@@ -1915,7 +2354,12 @@ def main() -> int:
                 seconds = int(str(args.directory))
                 check(60 <= seconds <= 3600, "hold_duration_bound")
             fixture = begin(
-                args.root, args.primary, None if seconds is not None else args.directory
+                args.root,
+                args.primary,
+                None if seconds is not None else args.directory,
+                profile_name=LOAD_PROFILE.name
+                if args.action == "--hold-load-fixture"
+                else PRESSURE_PROFILE.name,
             )
             print(
                 json.dumps(

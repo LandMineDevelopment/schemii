@@ -419,9 +419,86 @@ explicitly recorded. All actual peak/lifespan/cleanup/restoration evidence remai
 pending until coordinator-scheduled execution and independent review; fake tests
 establish only the ownership and discriminator controls.
 
+### Fixed pressure and representative load profiles
+
+Exactly two immutable, versioned fixture profiles are allowlisted. They share the
+same disposable ownership, private data, canonical leases, HTTPS ingress and
+restoration/recovery path. There are no resource, environment, DSN or SQL tuning
+arguments. Ambient profile-budget variables are discarded and replaced with the
+selected fixed values.
+
+| Allocation or budget | `pressure-v1` | `representative-load-v1` |
+| --- | --- | --- |
+| Application | 1 CPU, 512 MiB, 128 PIDs | 2 CPU, 2 GiB, 256 PIDs |
+| Metadata PostgreSQL | 0.5 CPU, 256 MiB, 64 PIDs | 1 CPU, 1 GiB, 256 PIDs |
+| Source PostgreSQL | 0.5 CPU, 256 MiB, 64 PIDs | 2 CPU, 2 GiB, 256 PIDs |
+| HTTPS ingress | 0.25 CPU, 64 MiB, 32 PIDs | 0.5 CPU, 128 MiB, 64 PIDs |
+| One-shot observer initializer | 0.25 CPU, 64 MiB, 16 PIDs | Same |
+| Normal/readiness metadata admission | 2 / 2 | 16 / 2 |
+| PostgreSQL max connections/shared buffers, each database | 24 / 32 MiB | 100 / 128 MiB |
+| Metadata statement/lock/idle/shutdown deadlines | 3000ms / 1500ms / 3000ms / 2s | Stock 5000ms / 1000ms / 5000ms / 15s |
+| Source ordinary total/per identity; retained total/per identity | 20 / 4; 19 / 3 | Same |
+
+The representative allocations match the stock `compose.test.yaml` application,
+metadata, demo-source PostgreSQL and ingress defaults. Its PostgreSQL server
+settings explicitly select the stock PostgreSQL defaults, while its normal
+metadata and source admission budgets match `MetadataConfig`, the actual
+`create_metadata_repositories` composition and `dev/schemii.toml`. Readiness is
+always the unchanged stock independent factory budget of **two**, not a fixture
+capacity reduction. Both profiles run exactly one API worker from the same image
+and unchanged stock application, through the disclosed fixture-only observer.
+
+`--qualify-metadata-pressure` and `--hold-metadata-pressure SECONDS` retain the
+small `pressure-v1` scope. The separate explicit
+`./start.sh --hold-load-fixture SECONDS` selects `representative-load-v1`; the
+pressure saturation recipe cannot run against that profile. The same bounded
+60–3600s holder supports a real 1800s lane plus preparation/drain allowance when
+scheduled with sufficient total duration. This is configuration capability;
+actual ramp, hold, soak, idle expiry and overhead qualification remain unrun until
+coordinator scheduling.
+
+The intent journal, private authority and runtime receipt bind the exact profile
+name/version and complete fixed budget object. Preparation reads actual owned
+PostgreSQL `max_connections`/`shared_buffers` before provisioning. A startup
+`runtime.json` receipt records actual inspected container CPU/memory/PID limits,
+normal/readiness owner maxima and source ordinary/per-identity maxima. The
+authenticated API PID must match the observer process incarnation. Any mismatch
+or unknown prevents held authority publication. Retained 19/3 budgets are bound
+to the reviewed stock source/configuration; the receipt does not label them as
+live retained-permit measurements. `stockCapacityEligible` and
+`capacityAcceptance` stay false; sampler overhead is still unmeasured.
+
+The startup configuration receipt is distinct from the load observer's OS
+PID/birth/cgroup receipt. Before publishing a held authority, the launcher now
+captures a separate private `os-runtime.json` for exactly its four running owned
+services (`schemii`, `ingress`, `metadata`, `source`). The stopped one-shot
+`observer-init` is not a running sidecar; Docker's init process inside the app
+container is separately recorded as `initProcess`, alongside the actual
+`apiProcess`, each with host PID, birth and namespace PID. Both remain counted by
+the observer's cgroup resource totals.
+
+The internal fixture export reuses the reviewed shared host identity helpers.
+It accepts only the private validated journal, exact fixed profile/source and
+current launcher parent with inherited exclusive canonical descriptors. Only the
+launcher inspects host PIDs, after exact container ownership validation; it
+re-inspects those IDs/PIDs after export. Boot/PID/cgroup reuse, source/profile
+drift, ambiguous/unclassified app members, missing observation or uncertain
+export fail qualification and never publish a held authority. Output is private,
+bounded and exclusive; a failed export is not replayed. The existing normal
+builder retains its `schemii-test` service restrictions. Do not invoke the
+internal exporter as a substitute launcher or relabel startup configuration as OS
+evidence. All actual OS export and collector qualification remain unrun.
+
+Authority fields `osRuntimeReceiptFile` and `osRuntimeReceiptSha256` identify that
+separate receipt. Its fixture provenance binds run/nonce/profile/source/owner;
+the current shared `processRole` classifies only the fixed single-worker wrapper
+and exact Docker-init argv. The load consumer must match exported init/API
+identities while counting both processes and must independently qualify source,
+generator and live metrics. No capacity gate is relaxed by the export.
+
 ### Bounded attachment for the #135 fixture consumer
 
-`./start.sh --hold-metadata-pressure SECONDS` (60–3600) prepares the same unique
+`./start.sh --hold-metadata-pressure SECONDS` (60–3600), or the explicit load mode above, prepares the selected unique
 fixture, bootstraps its private administrator, prints an `authorityFile` path and
 retains both canonical exclusive leases. The default short qualification still
 cleans up immediately. The held authority is a private version-1

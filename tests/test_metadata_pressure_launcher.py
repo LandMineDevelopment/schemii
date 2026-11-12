@@ -89,10 +89,76 @@ class Runtime:
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
         if argv[0] == "git":
+            if "rev-parse" in argv:
+                return "a" * 40
+            if "status" in argv:
+                return ""
             if "ls-files" in argv:
                 return "testing/load/source_monitor.py\n"
             assert "diff" in argv and "--quiet" in argv
             return ""
+        if argv[0] == "node":
+            assert argv[1:] == [
+                str(self.root / "testing/load/runtime.mjs"),
+                "export-fixture",
+                kwargs["environment"]["PRESSURE_DIRECTORY"],
+            ]
+            directory = Path(argv[-1])
+            journal = c.private_read(directory / "journal.json")
+            assert (
+                journal["stage"] == "os-export-intent"
+                and journal["osExport"]["status"] == "pending"
+            )
+            records = journal["osExport"]["records"]
+            observed = journal["runtimeReceipt"]["application"]["observation"][
+                "process"
+            ]
+            containers = [
+                {
+                    "service": record["service"],
+                    "id": record["id"],
+                    "image": record["image"],
+                    "rootProcess": {"pid": record["pid"], "birthTick": "123"},
+                    "cgroup": {
+                        "path": "/owned/" + record["id"],
+                        "device": 1,
+                        "inode": record["pid"],
+                    },
+                }
+                for record in records
+            ]
+            app = next(item for item in containers if item["service"] == "schemii")
+            app.update(
+                apiProcess={
+                    "pid": 201,
+                    "birthTick": observed["startTicks"],
+                    "namespacePid": observed["pid"],
+                },
+                initProcess={**app["rootProcess"], "namespacePid": 1},
+            )
+            c.private_write(
+                directory / "os-runtime.json",
+                {
+                    "version": 1,
+                    "origin": c.LOCAL,
+                    "revision": "a" * 40,
+                    "bootId": "12345678-1234-1234-1234-123456789abc",
+                    "topology": {"apiProcesses": 1},
+                    "fixture": {
+                        "run": journal["run"],
+                        "nonce": journal["nonce"],
+                        "profile": journal["profile"],
+                        "owner": journal["owner"],
+                        "sourceAssetsSha256": hashlib.sha256(
+                            json.dumps(
+                                journal["assets"], sort_keys=True, separators=(",", ":")
+                            ).encode()
+                        ).hexdigest(),
+                    },
+                    "containers": containers,
+                },
+            )
+            return '{"status":"exported"}'
         if argv[0] != "docker":
             assert argv[1:] == ["-c", "import psycopg,httpx"]
             return ""
@@ -128,6 +194,22 @@ class Runtime:
                 if record["labels"]["com.docker.compose.project"] == project
             )
         if args[:2] == ["container", "inspect"]:
+            if args[3] == c.OS_INSPECT:
+                record = self.records[args[-1]]
+                assert record["labels"].get(
+                    c.RUN_LABEL
+                )  # Never inspect a retained/foreign PID.
+                pid = {"schemii": 101, "ingress": 102, "metadata": 103, "source": 104}[
+                    record["labels"]["com.docker.compose.service"]
+                ]
+                return json.dumps(
+                    {
+                        "id": record["id"],
+                        "pid": pid,
+                        "running": record["state"] == "running",
+                        "startedAt": record["startedAt"],
+                    }
+                )
             assert args[2:4] == ["--format", c.INSPECT]
             return json.dumps(self.records[args[-1]])
         if args[:2] == ["container", "exec"]:
@@ -192,6 +274,12 @@ class Runtime:
             services = args[args.index("60") + 1 :] if "60" in args else args[-1:]
             for service in services:
                 record = container(service, project, run)
+                prefix = "PRESSURE_" + service.upper().replace("-", "_")
+                record.update(
+                    memory=int(env[prefix + "_MEMORY"]),
+                    nanoCpus=int(float(env[prefix + "_CPUS"]) * 1_000_000_000),
+                    pids=int(env[prefix + "_PIDS"]),
+                )
                 self.records[record["id"]] = record
             for kind, names in (
                 (
@@ -246,7 +334,7 @@ def setup(tmp_path, monkeypatch):
         destination.write_bytes((source / name).read_bytes())
     (root / "src/schemii").mkdir(parents=True)
     (root / "src/schemii/owned.py").write_text("VALUE = 42\n")
-    (root / "testing/load").mkdir(parents=True)
+    (root / "testing/load").mkdir(parents=True, exist_ok=True)
     (root / "testing/load/source_monitor.py").write_text("# fake committed witness\n")
     (primary / ".venv/bin").mkdir(parents=True)
     (primary / ".venv/bin/python").touch()
@@ -332,6 +420,8 @@ def test_failed_probe_restores_exact_retained_ingress_and_preserves_user_state(
         lambda self, phase: (
             {
                 "phase": "prepared",
+                "profile": self.profile.receipt(),
+                "databaseSettings": self.database_settings(),
                 "sourceBaseline": {"ownedBackends": 0, "releaseVerified": False},
             }
             if phase == "prepare"
@@ -479,7 +569,7 @@ def shell_fixture(tmp_path):
     )
     (binary / "python3").write_text(
         header
-        + 'assert any(x in sys.argv for x in ("--qualify-metadata-pressure", "--recover-metadata-pressure", "--metadata-pressure-attach"))\n'
+        + 'assert any(x in sys.argv for x in ("--qualify-metadata-pressure", "--recover-metadata-pressure", "--metadata-pressure-attach", "--hold-load-fixture"))\n'
     )
     for name in ("git", "docker", "python3"):
         (binary / name).chmod(0o755)
@@ -545,6 +635,8 @@ def test_cancelled_live_phase_restores_without_replaying_or_other_project_writes
             raise KeyboardInterrupt()
         return {
             "phase": "prepared",
+            "profile": self.profile.receipt(),
+            "databaseSettings": self.database_settings(),
             "sourceBaseline": {"ownedBackends": 0, "releaseVerified": False},
         }
 
@@ -771,7 +863,7 @@ def observed_sample(owned, native, *, stage="running", closed=False):
             "startedAt": native["startedAt"],
         },
     }
-    for name, maximum in (("normal", 2), ("readiness", 1)):
+    for name, maximum in (("normal", owned.profile.normal_maximum), ("readiness", 2)):
         value[name] = {
             "status": "observed",
             "counts": {
@@ -925,8 +1017,19 @@ def test_observer_copy_is_exact_owned_fixed_path_bounded_and_never_extracts(setu
 def held_fixture(setup):
     owned = fixture(setup)
     owned.up(["metadata", "source", "schemii"])
+    owned.up(["observer-init"])
+    owned.up(["ingress"])
+    owned.observation = lambda: fake_observer(owned)
+    c.private_write(
+        owned.directory / "preparation.json",
+        {
+            "profile": owned.profile.receipt(),
+            "databaseSettings": owned.database_settings(),
+        },
+    )
+    owned.capture_runtime(runtime_api(owned))
     owned.state["hold"] = {
-        "nonce": "b" * 64,
+        "nonce": owned.state["nonce"],
         "expiresAt": "2099-01-01T00:00:00Z",
         "attachment": None,
         "requests": 0,
@@ -1043,6 +1146,7 @@ def test_hold_expiry_joins_consumer_before_any_restore(setup, monkeypatch):
         "probe",
         lambda phase: {"phase": "bootstrapped", "principal": {"username": "own"}},
     )
+    monkeypatch.setattr(owned, "capture_runtime", lambda api: None)
     clock = iter([0, 61])
     monkeypatch.setattr(c.time, "monotonic", lambda: next(clock))
     order = []
@@ -1142,3 +1246,415 @@ def test_initializer_waits_for_exact_one_shot_exit_without_service_running_wait(
     assert "--wait" not in call
     assert owned.state["containers"]["observer-init"]["state"] == "exited"
     assert owned.state["containers"]["observer-init"]["exitCode"] == 0
+
+
+def profile_fixture(setup, profile):
+    return c.begin(setup[0], setup[1], None, setup[2], profile_name=profile.name)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [None, True, "load", "pressure", "representative-load-v2", "pressure-v1 ", {}],
+)
+def test_invalid_profile_is_rejected_before_runtime_access_or_private_intent(
+    setup, invalid
+):
+    with pytest.raises(c.Refused, match="fixed_fixture_profile_required"):
+        c.begin(setup[0], setup[1], None, setup[2], profile_name=invalid)
+    assert setup[2].calls == setup[2].writes == []
+    assert not (setup[1] / ".schemii").exists()
+
+
+@pytest.mark.parametrize("profile", c.PROFILES, ids=lambda profile: profile.name)
+def test_fixed_profile_owns_exact_allocations_and_overrides_ambient_budget_inputs(
+    setup, monkeypatch, profile
+):
+    monkeypatch.setenv("PRESSURE_SCHEMII_MEMORY", "1")
+    monkeypatch.setenv("PRESSURE_METADATA_MAXIMUM", "999")
+    owned = profile_fixture(setup, profile)
+    assert c.private_read(owned.journal)["profile"] == profile.receipt()
+    assert owned.environment["PRESSURE_METADATA_MAXIMUM"] == str(profile.normal_maximum)
+    owned.up(["metadata", "source"])
+    owned.up(["observer-init"])
+    owned.up(["schemii", "ingress"])
+    for name, record in owned.state["containers"].items():
+        expected = profile.receipt()["allocations"][name]
+        assert (record["memory"], record["nanoCpus"], record["pids"]) == tuple(
+            expected.values()
+        )
+    app = owned.state["containers"]["schemii"]
+    setup[2].records[app["id"]]["memory"] += 1
+    with pytest.raises(c.Refused, match="disposable_runtime_limits"):
+        owned.inventory()
+
+
+def test_profile_values_are_immutable_and_load_budgets_are_distinct_stock_defaults():
+    from dataclasses import FrozenInstanceError
+
+    assert tuple(profile.name for profile in c.PROFILES) == (
+        "pressure-v1",
+        "representative-load-v1",
+    )
+    with pytest.raises(FrozenInstanceError):
+        c.LOAD_PROFILE.normal_maximum = 2
+    altered = c.LOAD_PROFILE.receipt()
+    altered["metadata"]["normalMaximum"] = 2
+    with pytest.raises(c.Refused, match="profile_receipt_changed"):
+        c.bound_profile(altered)
+    assert c.LOAD_PROFILE.receipt()["allocations"] == {
+        "schemii": {"memoryBytes": 2147483648, "nanoCpus": 2000000000, "pids": 256},
+        "metadata": {"memoryBytes": 1073741824, "nanoCpus": 1000000000, "pids": 256},
+        "source": {"memoryBytes": 2147483648, "nanoCpus": 2000000000, "pids": 256},
+        "ingress": {"memoryBytes": 134217728, "nanoCpus": 500000000, "pids": 64},
+        "observer-init": {"memoryBytes": 67108864, "nanoCpus": 250000000, "pids": 16},
+    }
+    assert (
+        c.LOAD_PROFILE.normal_maximum == 16 and c.PRESSURE_PROFILE.normal_maximum == 2
+    )
+    assert (
+        c.LOAD_PROFILE.database_maximum == 100
+        and c.PRESSURE_PROFILE.database_maximum == 24
+    )
+    assert (
+        c.LOAD_PROFILE.receipt()["metadata"]["readinessMaximum"]
+        == c.PRESSURE_PROFILE.receipt()["metadata"]["readinessMaximum"]
+        == 2
+    )
+    assert not c.LOAD_PROFILE.receipt()["stockCapacityEligible"]
+
+
+def runtime_api(owned):
+    return {
+        "version": 1,
+        "processPid": 7,
+        "sources": {
+            "metadata": {
+                "status": "available",
+                "counts": {"maximum_connections": owned.profile.normal_maximum},
+            },
+            "source": {
+                "status": "available",
+                "counts": {"ordinary": {"maximum": 20, "maximumPerProfileRevision": 4}},
+            },
+        },
+    }
+
+
+def fake_observer(owned):
+    owned.inventory()
+    native = owned.state["containers"]["schemii"]
+    result = observed_sample(owned, native)
+    c.validate_observation(
+        result["observation"],
+        owned.state["run"],
+        native,
+        fresh=True,
+        profile=owned.profile,
+    )
+    return result
+
+
+def prepare_fake_runtime_receipt(owned, monkeypatch):
+    owned.up(["metadata", "source"])
+    owned.up(["observer-init"])
+    owned.up(["schemii", "ingress"])
+    monkeypatch.setattr(owned, "observation", lambda: fake_observer(owned))
+    c.private_write(
+        owned.directory / "preparation.json",
+        {
+            "profile": owned.profile.receipt(),
+            "databaseSettings": owned.database_settings(),
+        },
+    )
+
+
+@pytest.mark.parametrize("profile", c.PROFILES, ids=lambda profile: profile.name)
+def test_authority_runtime_receipt_binds_profile_to_actual_limits_and_owner_budgets(
+    setup, monkeypatch, profile
+):
+    owned = profile_fixture(setup, profile)
+    prepare_fake_runtime_receipt(owned, monkeypatch)
+    receipt = owned.capture_runtime(runtime_api(owned))
+    assert receipt["profile"] == profile.receipt()
+    assert receipt["metadata"] == {
+        "normalMaximum": profile.normal_maximum,
+        "readinessMaximum": 2,
+    }
+    assert receipt["databaseSettings"] == owned.database_settings()
+    assert receipt["apiProcesses"] == 1 and receipt["capacityAcceptance"] is False
+    assert (
+        receipt["instrumentationOverheadMeasured"] is False
+        and receipt["stockCapacityEligible"] is False
+    )
+    assert c.private_read(owned.directory / "runtime.json") == receipt
+    owned.state["hold"] = {
+        "nonce": owned.state["nonce"],
+        "expiresAt": "2099-01-01T00:00:00Z",
+        "attachment": None,
+    }
+    c.private_write(
+        owned.directory / "principal.json", {"username": "own", "userId": "own"}
+    )
+    owned.save("held")
+    authority = owned.authority("held")
+    assert (
+        authority["runtimeReceipt"] == receipt
+        and authority["profile"] == profile.receipt()
+    )
+    authority["profile"] = (
+        c.LOAD_PROFILE.receipt()
+        if profile is c.PRESSURE_PROFILE
+        else c.PRESSURE_PROFILE.receipt()
+    )
+    c.private_write(owned.directory / "authority.json", authority)
+    with pytest.raises(c.Refused, match="authority_profile_changed"):
+        c.attachment_request(
+            owned.root, owned.primary, owned.directory, "attach", "1234"
+        )
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ["metadata", "source", "source-identity", "process", "database", "profile"],
+)
+def test_runtime_receipt_never_adopts_declared_or_api_budget_drift(
+    setup, monkeypatch, defect
+):
+    owned = profile_fixture(setup, c.LOAD_PROFILE)
+    prepare_fake_runtime_receipt(owned, monkeypatch)
+    api = runtime_api(owned)
+    if defect == "metadata":
+        api["sources"]["metadata"]["counts"]["maximum_connections"] = 2
+    elif defect == "source":
+        api["sources"]["source"]["counts"]["ordinary"]["maximum"] = 21
+    elif defect == "source-identity":
+        api["sources"]["source"]["counts"]["ordinary"]["maximumPerProfileRevision"] = 5
+    elif defect == "process":
+        api["processPid"] = 8
+    else:
+        preparation = c.private_read(owned.directory / "preparation.json")
+        if defect == "database":
+            preparation["databaseSettings"]["source"]["maximumConnections"] = 24
+        else:
+            preparation["profile"] = c.PRESSURE_PROFILE.receipt()
+        c.private_write(owned.directory / "preparation.json", preparation)
+    with pytest.raises(c.Refused):
+        owned.capture_runtime(api)
+    assert (
+        "runtimeReceipt" not in owned.state
+        and not (owned.directory / "runtime.json").exists()
+    )
+
+
+def test_load_profile_cannot_run_pressure_qualification_before_any_mutation(setup):
+    owned = profile_fixture(setup, c.LOAD_PROFILE)
+    with pytest.raises(c.Refused, match="pressure_qualification_profile_required"):
+        owned.run()
+    assert setup[2].writes == []
+
+
+def test_load_1800_second_hold_uses_guarded_cleanup_and_restores_only_exact_retained_ingress(
+    setup, monkeypatch
+):
+    owned = profile_fixture(setup, c.LOAD_PROFILE)
+    baseline = deepcopy(setup[2].records)
+    monkeypatch.setattr(owned, "secrets", lambda: owned.intent("fake-secrets"))
+
+    def probe(phase):
+        if phase == "prepare":
+            return {
+                "phase": "prepared",
+                "profile": owned.profile.receipt(),
+                "databaseSettings": owned.database_settings(),
+                "sourceBaseline": {"ownedBackends": 0, "releaseVerified": False},
+            }
+        assert phase == "bootstrap"
+        principal = {"username": "own", "userId": "own", "passwordFile": "own"}
+        c.private_write(owned.directory / "principal.json", principal)
+        return {
+            "phase": "bootstrapped",
+            "principal": principal,
+            "runtimeObservation": runtime_api(owned),
+        }
+
+    monkeypatch.setattr(owned, "probe", probe)
+    monkeypatch.setattr(owned, "observation", lambda: fake_observer(owned))
+    # Advance the test clock only after the durable holder start, regardless of
+    # read-only preflight/initializer deadline observations.
+    monkeypatch.setattr(
+        c.time, "monotonic", lambda: 1801 if "hold" in owned.state else 0
+    )
+    owned.hold(1800)
+    assert owned.state["cleanup"] is owned.state["restored"] is True
+    assert setup[2].records == baseline
+    assert owned.state["runtimeReceipt"]["profile"]["name"] == c.LOAD_PROFILE.name
+    assert c.private_read(owned.directory / "authority.json")["status"] == "closing"
+
+
+def test_load_hold_dispatch_uses_canonical_fake_leases_and_rejects_tuning_flags(
+    tmp_path,
+):
+    import subprocess
+
+    root, _, log, environment = shell_fixture(tmp_path)
+    result = subprocess.run(
+        [str(root / "start.sh"), "--hold-load-fixture", "3600"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    events = list(map(json.loads, log.read_text().splitlines()))
+    assert [event[0] for event in events] == ["git", "git", "docker", "python3"]
+    assert events[-1][-3:] == ["--", "--hold-load-fixture", "3600"]
+    before = log.read_text()
+    result = subprocess.run(
+        [str(root / "start.sh"), "--hold-load-fixture", "3600", "--memory", "1"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 1 and log.read_text() == before
+
+
+@pytest.mark.parametrize(
+    "field,value", [("version", True), ("apiProcesses", 1.0), ("version", float("nan"))]
+)
+def test_profile_binding_rejects_json_scalar_lookalikes(field, value):
+    profile = c.LOAD_PROFILE.receipt()
+    profile[field] = value
+    with pytest.raises(c.Refused, match="profile_receipt_changed"):
+        c.bound_profile(profile)
+
+
+def test_python_and_node_os_export_pin_the_same_two_immutable_profile_contracts():
+    import re
+
+    source = (
+        Path(__file__).resolve().parents[1] / "testing/load/runtime.mjs"
+    ).read_text()
+    encoded = re.search(r"const fixtureProfileDigests = (\{[^;]+\});", source)[1]
+    expected = {
+        profile.name: hashlib.sha256(
+            json.dumps(
+                profile.receipt(), sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        for profile in c.PROFILES
+    }
+    assert json.loads(encoded) == expected
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing-api",
+        "wrong-init",
+        "wrong-source",
+        "unknown-boot",
+        "uncertain-command",
+        "pid-reused",
+    ],
+)
+def test_missing_or_changed_os_proof_never_publishes_authority_or_replays_export(
+    setup, monkeypatch, defect
+):
+    owned = profile_fixture(setup, c.LOAD_PROFILE)
+    prepare_fake_runtime_receipt(owned, monkeypatch)
+    original = owned.runtime
+    node_calls = []
+    changed = False
+
+    def runtime(argv, **kwargs):
+        nonlocal changed
+        result = original(argv, **kwargs)
+        if argv[0] == "node":
+            node_calls.append(argv)
+            if defect == "uncertain-command":
+                raise c.Refused("command_failed")
+            if defect == "pid-reused":
+                changed = True
+            receipt_path = owned.directory / "os-runtime.json"
+            receipt = c.private_read(receipt_path)
+            if defect == "missing-api":
+                receipt["containers"][0].pop("apiProcess")
+            elif defect == "wrong-init":
+                receipt["containers"][0]["initProcess"]["birthTick"] = "wrong"
+            elif defect == "wrong-source":
+                receipt["fixture"]["sourceAssetsSha256"] = "0" * 64
+            elif defect == "unknown-boot":
+                receipt["bootId"] = None
+            c.private_write(receipt_path, receipt)
+        elif (
+            changed
+            and argv[:3] == ["docker", "container", "inspect"]
+            and argv[4] == c.OS_INSPECT
+        ):
+            value = json.loads(result)
+            value["pid"] += 1
+            result = json.dumps(value)
+        return result
+
+    owned.runtime = runtime
+    with pytest.raises(c.Refused):
+        owned.capture_runtime(runtime_api(owned))
+    assert len(node_calls) == 1
+    assert owned.state["osExport"]["status"] == "pending"
+    assert "osRuntimeReceiptFile" not in owned.state
+    assert not (owned.directory / "authority.json").exists()
+    with pytest.raises(c.Refused, match="new_os_export_required"):
+        owned.export_os_runtime()
+    assert len(node_calls) == 1
+
+
+def test_os_pid_inspection_refuses_unknown_owner_before_reading_any_retained_or_foreign_pid(
+    setup,
+):
+    owned = profile_fixture(setup, c.LOAD_PROFILE)
+    owned.up(["metadata", "source"])
+    owned.up(["observer-init"])
+    owned.up(["schemii", "ingress"])
+    setup[2].records[owned.state["containers"]["source"]["id"]]["labels"][
+        c.RUN_LABEL
+    ] = "foreign"
+    calls = len(setup[2].calls)
+    with pytest.raises(c.Refused, match="disposable_container_owner"):
+        owned.os_records()
+    assert all(c.OS_INSPECT not in call for call in setup[2].calls[calls:])
+
+
+def test_node_process_roles_match_the_actual_fixed_compose_wrapper_command():
+    import ast
+    import csv
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "dev/pressure/compose.yaml").read_text()
+    command = next(
+        csv.reader(
+            [re.search(r"command: \[(uvicorn, pressure_app[^\]]+)\]", compose)[1]],
+            skipinitialspace=True,
+        )
+    )
+    helper = (root / "testing/load/runtime.mjs").read_text()
+    expected = ast.literal_eval(
+        re.search(r"const fixtureArgs = (\[[^\]]+\]);", helper)[1]
+    )
+    assert command == ["uvicorn", *expected]
+
+
+def test_held_authority_refuses_missing_or_changed_os_receipt(setup):
+    owned = held_fixture(setup)
+    owned.state["osExport"]["status"] = "pending"
+    with pytest.raises(c.Refused, match="os_authority_receipt_required"):
+        owned.authority("held")
+    owned.state["osExport"]["status"] = "complete"
+    path = owned.directory / "os-runtime.json"
+    receipt = c.private_read(path)
+    receipt["bootId"] = "changed"
+    c.private_write(path, receipt)
+    with pytest.raises(c.Refused, match="os_authority_receipt_changed"):
+        owned.authority("held")
+    assert not (owned.directory / "authority.json").exists()

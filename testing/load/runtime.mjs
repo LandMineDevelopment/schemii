@@ -2,16 +2,22 @@
 import { readFile, stat, lstat, open, rename, unlink, mkdir, link } from 'node:fs/promises';
 import { dirname, resolve, posix, basename } from 'node:path';
 import { hostname, cpus, totalmem, freemem, availableParallelism } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 
 const services = new Set(['schemii', 'ingress', 'metadata-postgres', 'demo-postgres', 'qa-postgres', 'ai-prototype-runtime']);
 export function processRole(command) {
   const argv = command.split('\0').filter(Boolean), name = basename(argv[0] || '');
+  const exactFixtureArgv = !command.replace(/\0$/, '').split('\0').includes('');
+  const fixtureArgs = ['pressure_app:observed_application', '--factory', '--app-dir', '/qualification', '--host', '0.0.0.0', '--port', '8000', '--workers', '1', '--no-access-log'];
+  if (exactFixtureArgv && argv[0] === '/sbin/docker-init' && argv[1] === '--' && basename(argv[2] || '') === 'uvicorn' &&
+      JSON.stringify(argv.slice(3)) === JSON.stringify(fixtureArgs)) return 'container_init';
   const python = /^python(3(\.\d+)?)?$/.test(name);
   const target = name === 'uvicorn' ? 1 : python && argv[1] === '-m' && argv[2] === 'uvicorn' ? 3 :
     python && basename(argv[1] || '') === 'uvicorn' ? 2 : null;
+  if (exactFixtureArgv && target !== null && JSON.stringify(argv.slice(target)) === JSON.stringify(fixtureArgs)) return 'api';
   if (target !== null && argv[target] === 'schemii.main:app' && !argv.includes('--reload')) {
     const workers = argv.findIndex(value => value === '--workers' || value.startsWith('--workers='));
     if (workers < 0 || (argv[workers] === '--workers' && argv[workers + 1] === '1') || argv[workers] === '--workers=1') return 'api';
@@ -127,6 +133,163 @@ export async function buildReceipt(records, { procRoot = '/proc', cgroupRoot = '
   return { version: 1, at: new Date().toISOString(), revision, origin, bootId,
     topology: { host: hostname(), logicalCpus: cpus().length, hostMemoryBytes: totalmem(), generatorPlacement: 'cohosted_unqualified' }, containers };
 }
+const fixtureServices = ['schemii', 'ingress', 'metadata', 'source'];
+const fixtureAssets = ['start.sh', 'dev/pressure/launcher.sh', 'dev/pressure/controller.py', 'dev/pressure/probe.py',
+  'dev/pressure/app.py', 'dev/pressure/compose.yaml', 'dev/ingress/nginx.conf', 'dev/schemii.toml', 'testing/load/runtime.mjs'];
+const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const canonical = value => JSON.stringify(value && typeof value === 'object' ?
+  Array.isArray(value) ? value.map(item => JSON.parse(canonical(item))) :
+    Object.fromEntries(Object.keys(value).sort().map(key => [key, JSON.parse(canonical(value[key]))])) : value);
+const digest = value => createHash('sha256').update(value).digest('hex');
+const fixtureProfileDigests = {"pressure-v1": "4be8ad3e008fca63d10b2d80593d798b39ca630c2312c09dd41f25262c1ffe80", "representative-load-v1": "ba07302c0307538fcc3146fa7f4dba51d436297e264ad27987c89f7082379d82"};
+async function boundedText(path, maximum = 8192) {
+  const file = await open(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    const data = Buffer.alloc(maximum + 1), { bytesRead } = await file.read(data, 0, data.length, 0);
+    if (bytesRead > maximum) throw new Error('fixture_read_bound');
+    return data.subarray(0, bytesRead).toString('utf8');
+  } finally { await file.close(); }
+}
+async function fixtureApiProcesses(container, namespacePid, options) {
+  const { procRoot, cgroupRoot } = options;
+  const members = (await boundedText(`${cgroupRoot}${container.cgroup.path}/cgroup.procs`)).trim().split(/\s+/).map(Number);
+  if (members.length !== 2 || new Set(members).size !== 2 || !members.includes(container.rootProcess.pid) ||
+      members.some(pid => !Number.isSafeInteger(pid) || pid < 1)) throw new Error('fixture_api_topology_unknown');
+  let apiProcess, initProcess;
+  for (const pid of members) {
+    const identity = await processIdentity(pid, procRoot);
+    if (canonical(await cgroupIdentity(pid, options)) !== canonical(container.cgroup)) throw new Error('fixture_process_cgroup_changed');
+    const status = await boundedText(`${procRoot}/${pid}/status`, 16384);
+    const ns = status.match(/^NSpid:\s+([\d\s]+)$/m)?.[1].trim().split(/\s+/).map(Number).at(-1);
+    const role = processRole(await boundedText(`${procRoot}/${pid}/cmdline`));
+    if (ns === namespacePid && role === 'api' && !apiProcess) apiProcess = { ...identity, namespacePid: ns };
+    else if (pid === container.rootProcess.pid && ns === 1 && role === 'container_init' && !initProcess)
+      initProcess = { ...identity, namespacePid: ns };
+    else throw new Error('fixture_api_member_unknown');
+    if ((await processIdentity(pid, procRoot)).birthTick !== identity.birthTick) throw new Error('fixture_process_reused');
+  }
+  if (!apiProcess || !initProcess) throw new Error('fixture_api_identity_missing');
+  return { apiProcess, initProcess };
+}
+export async function recheckFixtureReceipt(receipt, { procRoot = '/proc', cgroupRoot = '/sys/fs/cgroup' } = {}) {
+  if ((await boundedText(`${procRoot}/sys/kernel/random/boot_id`)).trim() !== receipt.bootId) throw new Error('fixture_boot_changed');
+  for (const container of receipt.containers) {
+    for (const identity of [container.rootProcess, container.apiProcess, container.initProcess].filter(Boolean)) {
+      if ((await processIdentity(identity.pid, procRoot)).birthTick !== identity.birthTick) throw new Error('fixture_process_reused');
+      if (canonical(await cgroupIdentity(identity.pid, { procRoot, cgroupRoot })) !== canonical(container.cgroup))
+        throw new Error('fixture_cgroup_changed');
+    }
+    if (container.service === 'schemii') {
+      const current = await fixtureApiProcesses(container, container.apiProcess.namespacePid, { procRoot, cgroupRoot });
+      if (canonical(current) !== canonical({ apiProcess: container.apiProcess, initProcess: container.initProcess }))
+        throw new Error('fixture_api_identity_changed');
+    }
+  }
+}
+export async function buildFixtureReceipt(journal, { root, revision, procRoot = '/proc', cgroupRoot = '/sys/fs/cgroup' } = {}) {
+  const intent = journal?.osExport, records = intent?.records, profile = journal?.profile;
+  if (journal?.version !== 1 || journal.stage !== 'os-export-intent' || journal.root !== root || journal.directory !== `${journal.primary}/.schemii/metadata-pressure/${journal.run}` ||
+      !/^pressure_[0-9a-f]{32}$/.test(journal.run || '') || journal.project !== `schemii-pressure-${journal.run.slice(9)}` ||
+      !/^[0-9a-f]{64}$/.test(journal.nonce || '') || intent?.version !== 1 || intent.status !== 'pending' ||
+      intent.nonce !== journal.nonce || intent.output !== 'os-runtime.json' || intent.revision !== revision || !/^[0-9a-f]{40}$/.test(revision || '') ||
+      !Object.hasOwn(fixtureProfileDigests, profile?.name || '') || profile.version !== 1 || digest(canonical(profile)) !== fixtureProfileDigests[profile.name] ||
+      canonical(profile) !== canonical(intent.profile) || canonical(profile) !== canonical(journal.runtimeReceipt?.profile) ||
+      journal.runtimeReceipt?.run !== journal.run || !Array.isArray(records) || records.length !== 4)
+    throw new Error('fixture_export_provenance');
+  const bootId = (await boundedText(`${procRoot}/sys/kernel/random/boot_id`)).trim();
+  if (!/^[0-9a-f-]{36}$/.test(bootId)) throw new Error('invalid_boot_identity');
+  const containers = [], seen = new Set(), pids = new Set(), groups = new Set();
+  const recordKeys = ['id', 'image', 'memoryBytes', 'nanoCpus', 'pid', 'pids', 'project', 'running', 'service', 'startedAt'].sort().join(',');
+  for (const record of records) {
+    const original = journal.containers?.[record.service], allocation = profile.allocations?.[record.service];
+    if (Object.keys(record).sort().join(',') !== recordKeys || record.project !== journal.project ||
+        !fixtureServices.includes(record.service) || seen.has(record.service) || pids.has(record.pid) ||
+        !/^[0-9a-f]{64}$/.test(record.id || '') || record.id !== original?.id || record.image !== original.image ||
+        original.state !== 'running' || record.running !== true || record.startedAt !== original.startedAt ||
+        record.memoryBytes !== allocation?.memoryBytes || record.nanoCpus !== allocation?.nanoCpus || record.pids !== allocation?.pids ||
+        record.memoryBytes !== original.memory || record.nanoCpus !== original.nanoCpus || record.pids !== original.pids)
+      throw new Error('fixture_container_provenance');
+    seen.add(record.service); pids.add(record.pid);
+    const rootProcess = await processIdentity(record.pid, procRoot), cgroup = await cgroupIdentity(record.pid, { procRoot, cgroupRoot });
+    if (groups.has(canonical(cgroup))) throw new Error('fixture_shared_cgroup');
+    groups.add(canonical(cgroup));
+    const container = { service: record.service, id: record.id, image: record.image, rootProcess, cgroup,
+      configuredMemoryBytes: record.memoryBytes, configuredCpus: record.nanoCpus / 1e9, configuredPids: record.pids };
+    if (record.service === 'schemii') {
+      const observed = journal.runtimeReceipt.application;
+      if (observed?.containerId !== record.id || observed.containerStartedAt !== record.startedAt ||
+          observed.observation?.run !== journal.run || observed.observation?.stage !== 'running' ||
+          observed.observation?.startupComplete !== true || observed.observation?.observationFailed !== false ||
+          !Number.isSafeInteger(observed.observation.process?.pid) || observed.observation.process.pid < 2)
+        throw new Error('fixture_api_provenance');
+      Object.assign(container, await fixtureApiProcesses(container, observed.observation.process.pid, { procRoot, cgroupRoot }));
+      if (container.apiProcess.birthTick !== observed.observation.process.startTicks || observed.observation.process.uid !== 10001 ||
+          !/^[0-9a-f]{32}$/.test(observed.observation.process.incarnation || '')) throw new Error('fixture_api_birth_mismatch');
+    }
+    containers.push(container);
+  }
+  if (fixtureServices.some(service => !seen.has(service))) throw new Error('fixture_topology_incomplete');
+  const receipt = { version: 1, at: new Date().toISOString(), revision, origin: 'https://localhost:8001', bootId,
+    topology: { host: hostname(), logicalCpus: cpus().length, hostMemoryBytes: totalmem(), generatorPlacement: 'cohosted_unqualified',
+      apiProcesses: 1, apiProcessScope: 'exact_namespace_API_and_distinct_container_init', instrumentationOverheadMeasured: false },
+    fixture: { version: 1, run: journal.run, nonce: journal.nonce, project: journal.project, profile,
+      owner: journal.owner, sourceAssetsSha256: digest(canonical(journal.assets)), stockCapacityEligible: false }, containers };
+  await recheckFixtureReceipt(receipt, { procRoot, cgroupRoot });
+  return receipt;
+}
+async function gitOutput(root, args) {
+  return new Promise((done, reject) => execFile('git', ['--no-optional-locks', '-C', root, ...args],
+    { timeout: 2000, maxBuffer: 16384, env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))) },
+    (error, output) => error ? reject(new Error('fixture_source_unavailable')) : done(output.trim())));
+}
+export async function fixtureLauncherFence(journal, root, primary, common, { procRoot = '/proc', parentPid = process.ppid, leaseMode = process.env.SCHEMII_QA_LEASE_MODE } = {}) {
+  const owner = journal.owner;
+  if (!owner || owner.pid !== parentPid || journal.root !== root || journal.primary !== primary ||
+      (await processIdentity(owner.pid, procRoot)).birthTick !== owner.start || leaseMode !== 'exclusive')
+    throw new Error('fixture_launcher_owner_required');
+  const command = (await boundedText(`${procRoot}/${owner.pid}/cmdline`)).split('\0').filter(Boolean);
+  if (!/^python(3(\.\d+)?)?$/.test(basename(command[0] || '')) || command[1] !== `${root}/dev/pressure/controller.py` ||
+      canonical(command.slice(2, 9)) !== canonical(['--root', root, '--primary', primary, '--common', common, '--']) ||
+      !['--qualify-metadata-pressure', '--hold-metadata-pressure', '--hold-load-fixture'].includes(command[9]) || command.length > 11)
+    throw new Error('fixture_launcher_command_required');
+  if ((command[9] === '--hold-load-fixture') !== (journal.profile?.name === 'representative-load-v1') ||
+      (command[9] !== '--qualify-metadata-pressure' && (command.length !== 11 || !/^\d+$/.test(command[10]) ||
+        Number(command[10]) < 60 || Number(command[10]) > 3600)) ||
+      (command[9] === '--qualify-metadata-pressure' && command.length === 11 && command[10] !== journal.directory))
+    throw new Error('fixture_launcher_profile_command');
+  for (const [fd, name] of [[3, 'qa-deployment.lock'], [4, 'qa-startup.lock']]) {
+    const expected = await lstat(`${common}/${name}`), actual = await stat(`${procRoot}/self/fd/${fd}`);
+    const info = await boundedText(`${procRoot}/self/fdinfo/${fd}`);
+    if (!expected.isFile() || expected.isSymbolicLink() || expected.dev !== actual.dev || expected.ino !== actual.ino ||
+        !/^lock:\s+\d+:\s+FLOCK\s+ADVISORY\s+WRITE\b/m.test(info)) throw new Error('fixture_exclusive_lease_required');
+  }
+  if (canonical(Object.keys(journal.assets || {}).sort()) !== canonical([...fixtureAssets].sort())) throw new Error('fixture_source_inventory');
+  for (const asset of fixtureAssets) {
+    const entry = await lstat(`${root}/${asset}`);
+    if (!entry.isFile() || entry.isSymbolicLink() || digest(await boundedText(`${root}/${asset}`, 262144)) !== journal.assets[asset])
+      throw new Error('fixture_source_changed');
+  }
+}
+export async function exportFixtureReceipt(directory) {
+  const root = moduleRoot, common = await gitOutput(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  const primary = (await gitOutput(root, ['worktree', 'list', '--porcelain'])).split('\n')[0].slice('worktree '.length);
+  if (directory !== resolve(directory) || dirname(directory) !== `${primary}/.schemii/metadata-pressure` ||
+      !/^pressure_[0-9a-f]{32}$/.test(basename(directory))) throw new Error('fixture_directory_required');
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700 || info.uid !== process.getuid()) throw new Error('fixture_private_directory');
+  const journal = await readPrivateJSON(`${directory}/journal.json`);
+  await fixtureLauncherFence(journal, root, primary, common);
+  const revision = await gitOutput(root, ['rev-parse', 'HEAD']);
+  if (await gitOutput(root, ['status', '--porcelain', '--untracked-files=normal'])) throw new Error('fixture_clean_source_required');
+  const receipt = await buildFixtureReceipt(journal, { root, revision });
+  const latest = await readPrivateJSON(`${directory}/journal.json`);
+  await fixtureLauncherFence(latest, root, primary, common);
+  if (latest.stage !== 'os-export-intent' || canonical(latest.osExport) !== canonical(journal.osExport) ||
+      canonical(latest.profile) !== canonical(journal.profile) || canonical(latest.runtimeReceipt) !== canonical(journal.runtimeReceipt))
+    throw new Error('fixture_journal_changed');
+  await recheckFixtureReceipt(receipt);
+  await writePrivateJSON(`${directory}/os-runtime.json`, receipt, { exclusive: true });
+}
 export async function writePrivateJSON(path, data, { exclusive = false } = {}) {
   if (!path || !path.startsWith('/')) throw new Error('absolute_private_path_required');
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -144,20 +307,30 @@ export async function writePrivateJSON(path, data, { exclusive = false } = {}) {
   } finally { await file?.close(); await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
 }
 export async function readPrivateJSON(path) {
-  const file = await open(path, 'r');
+  const before = await lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() || (before.mode & 0o077) || before.uid !== process.getuid() || before.size > 1024 * 1024)
+    throw new Error('invalid_private_receipt');
+  const file = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
   try {
-    const information = await file.stat(), entry = await lstat(path);
-    if (!information.isFile() || (information.mode & 0o077) || entry.isSymbolicLink() ||
-        entry.dev !== information.dev || entry.ino !== information.ino || information.size > 1024 * 1024) throw new Error('invalid_private_receipt');
-    return JSON.parse(await file.readFile('utf8'));
+    const information = await file.stat();
+    if (!information.isFile() || information.dev !== before.dev || information.ino !== before.ino ||
+        information.uid !== process.getuid() || (information.mode & 0o077) || information.size > 1024 * 1024) throw new Error('invalid_private_receipt');
+    const raw = Buffer.alloc(1024 * 1024 + 1), { bytesRead } = await file.read(raw, 0, raw.length, 0);
+    if (bytesRead > 1024 * 1024) throw new Error('invalid_private_receipt');
+    return JSON.parse(raw.subarray(0, bytesRead).toString('utf8'));
   } finally { await file.close(); }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
+    if (process.argv.length === 4 && process.argv[2] === 'export-fixture') {
+      await exportFixtureReceipt(process.argv[3]);
+      process.stdout.write('{"status":"exported"}\n');
+    } else {
     if (process.argv.length !== 5 || process.argv[2] !== 'export') throw new Error('Usage: runtime.mjs export PRIVATE_RECEIPT REVISION');
     let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 65536) throw new Error('runtime_export_budget'); }
     const records = input.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
     const receipt = await buildReceipt(records, { revision: process.argv[4], origin: `https://localhost:${process.env.SCHEMII_TEST_APP_PORT || '8001'}` });
     await writePrivateJSON(resolve(process.argv[3]), receipt, { exclusive: true });
-  } catch (error) { process.stderr.write(`Runtime observation receipt unavailable: ${error.message}\n`); process.exitCode = 1; }
+    }
+  } catch (error) { process.stderr.write(process.argv[2] === 'export-fixture' ? 'Fixture runtime observation receipt unavailable\n' : `Runtime observation receipt unavailable: ${error.message}\n`); process.exitCode = 1; }
 }

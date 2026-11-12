@@ -27,6 +27,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from dev.pressure.controller import (  # noqa: E402
     LOCAL,
+    PRESSURE_PROFILE,
+    bound_profile,
     PREVIEW,
     check,
     command,
@@ -165,6 +167,7 @@ class Probe:
             ),
             "private_database_addresses",
         )
+        self.profile = bound_profile(self.manifest.get("profile"))
         self.run = self.manifest["run"]
         self.observations: list[dict] = []
         self.identities: list[dict] = []
@@ -222,8 +225,21 @@ class Probe:
 
         fixture_id = hashlib.sha256((self.run + ":source-fixture").encode()).hexdigest()
         server = None
+        database_settings = {}
         for kind in ("metadata", "source"):
             with self.connect(kind, "admin") as connection:
+                effective = connection.execute(
+                    "SELECT current_setting('max_connections')::integer AS maximum_connections,current_setting('shared_buffers') AS shared_buffers"
+                ).fetchone()
+                check(
+                    effective["maximum_connections"] == self.profile.database_maximum
+                    and effective["shared_buffers"] == self.profile.shared_buffers,
+                    "fixed_database_profile_mismatch",
+                )
+                database_settings[kind] = {
+                    "maximumConnections": effective["maximum_connections"],
+                    "sharedBuffers": effective["shared_buffers"],
+                }
                 names = (
                     ("app", "monitor", "blocker") if kind == "metadata" else ("source",)
                 )
@@ -310,6 +326,8 @@ class Probe:
         )
         return {
             "phase": "prepared",
+            "profile": self.profile.receipt(),
+            "databaseSettings": database_settings,
             "sourceBaseline": baseline,
             "databaseAuthorities": self.identities,
         }
@@ -488,13 +506,18 @@ class Probe:
     def bootstrap(self) -> dict:
         with self.client() as client:
             self.administrator(client)
+            runtime = self.expect(client.get("/api/v1/admin/runtime-observation"), 200)
         return {
             "phase": "bootstrapped",
+            "runtimeObservation": runtime,
             "run": self.run,
             "principal": private_read(self.directory / "principal.json"),
         }
 
     def qualify(self) -> dict:
+        check(
+            self.profile is PRESSURE_PROFILE, "pressure_qualification_profile_required"
+        )
         with ExitStack() as cleanup:
             admin = cleanup.enter_context(self.client())
             account, identity = self.administrator(admin)
@@ -746,11 +769,16 @@ class Probe:
                     "source": final_source,
                 }
             )
+            final_runtime = self.expect(
+                admin.get("/api/v1/admin/runtime-observation"), 200
+            )
         # This qualifies an explicitly instrumented fixture, never stock capacity.
         return {
             "version": 1,
             "run": self.run,
             "phase": "qualify",
+            "profile": self.profile.receipt(),
+            "runtimeObservation": final_runtime,
             "acceptance": True,
             "capacityAcceptance": False,
             "instrumentation": "fixture_only_stock_asgi_lifespan_and_owner_sampler",

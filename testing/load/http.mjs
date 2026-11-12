@@ -18,11 +18,11 @@ export class HTTPClient {
       rejectUnauthorized: origin !== LOCAL }); this.pending = new Set();
   }
   async request({ method = 'GET', path, body = undefined, oracle = null, slowMs = 0,
-    disconnectAfterBytes = 0, signal, onHeaders = () => {}, validate = () => {} }) {
+    disconnectAfterBytes = 0, signal, onHeaders = () => {}, validate = () => {}, operation = 'http' }) {
     apiPath(path);
     const startedAt = performance.now(), payload = body === undefined ? undefined : JSON.stringify(body);
     let status = 0, complete = false, valid = false, timing = {}, responseCookie, failure = null;
-    this.accounting?.sent();
+    this.accounting?.sent(operation);
     try {
       const response = await new Promise((resolve, reject) => {
         const req = https.request(new URL(path, this.origin), { method, agent: this.agent,
@@ -70,16 +70,16 @@ export class HTTPClient {
       if (!(error instanceof ProtocolFailure)) throw new ProtocolFailure(failure);
       throw error;
     } finally {
-      this.accounting?.finish({ status, complete, valid, failure, timing: { ...timing, httpMs: performance.now() - startedAt } });
+      this.accounting?.finish({ status, complete, valid, failure, operation, timing: { ...timing, httpMs: performance.now() - startedAt } });
     }
   }
-  async json(method, path, body, expected = 200) {
-    const response = await this.request({ method, path, body });
+  async json(method, path, body, expected = 200, options = {}) {
+    const response = await this.request({ method, path, body, ...options });
     if (response.status !== expected) throw new ProtocolFailure(`unexpected_http_${response.status}`);
     return response.data;
   }
   async login(account, expectedId) {
-    const response = await this.request({ method: 'POST', path: '/api/v1/auth/login', body: account });
+    const response = await this.request({ method: 'POST', path: '/api/v1/auth/login', body: account, operation: 'login' });
     this.cookie = response.cookie || '';
     if (response.status !== 200 || !response.cookie || response.data?.user?.username !== account.username ||
         (expectedId && response.data.user.id !== expectedId)) {
@@ -88,6 +88,6 @@ export class HTTPClient {
     }
     return response.data;
   }
-  async logout() { if (this.cookie) await this.json('POST', '/api/v1/auth/logout'); this.cookie = ''; }
+  async logout() { if (this.cookie) await this.json('POST', '/api/v1/auth/logout', undefined, 200, { operation: 'logout' }); this.cookie = ''; }
   close() { for (const request of this.pending) request.destroy(new ProtocolFailure('run_cancelled')); this.agent.destroy(); }
 }

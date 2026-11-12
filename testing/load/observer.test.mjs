@@ -53,6 +53,34 @@ test('known internal counters match endpoint process and remain distinct from un
   assert(!('ownedBackends' in output)); assert(!('activeJobs' in output)); assert(!('ingressConnections' in output));
   assert.equal(output.qualification.generatorHeadroomVerified, false); assert.equal(output.qualification.capacityEligible, false);
 });
+test('one verified API plus container init retains all resource accounting; unknown or replaced init cannot qualify', async t => {
+  const f = await fixture(t), sampled = await sampleContainer(f.container, f), now = Date.now();
+  const init = { pid: 99, birthTick: '100', namespacePid: 1, role: 'container_init', rssBytes: 4096, threads: 1, fds: 1 };
+  const api = { ...sampled.processes[0], namespacePid: 2 }, app = { ...sampled, rssBytes: sampled.rssBytes + init.rssBytes,
+    initProcessVerified: true, apiProcessVerified: true, processes: [init, api] };
+  const snapshot = { ...internal(now), processPid: 2 }, output = combineObservation(receipt, { schemii: app }, snapshot, { now });
+  assert.equal(output.apiProcesses, 1); assert.equal(output.appRssBytes, 86016); assert.equal(output.containers.schemii.cpuUsageUsec, sampled.cpuUsageUsec);
+  assert.equal(combineObservation(receipt, { schemii: { ...app, initProcessVerified: false } }, snapshot, { now }).status, 'unavailable');
+  const bound = { ...f.container, initProcess: { pid: 99, birthTick: '100', namespacePid: 1 }, apiProcess: { pid: 100, birthTick: '999', namespacePid: 2 } };
+  assert.equal((await sampleContainer(bound, f)).status, 'unavailable');
+});
+test('integrated fixture argv and PID birth bindings qualify init plus exactly one API through the real sampler', async t => {
+  const f = await fixture(t), args = ['pressure_app:observed_application', '--factory', '--app-dir', '/qualification', '--host', '0.0.0.0', '--port', '8000', '--workers', '1', '--no-access-log'];
+  await writeFile(join(f.procRoot, '100/cmdline'), ['/sbin/docker-init', '--', 'uvicorn', ...args, ''].join('\0'));
+  await mkdir(join(f.procRoot, '101')); const fields = Array(22).fill('0'); fields[0] = 'S'; fields[19] = '1001';
+  await writeFile(join(f.procRoot, '101/stat'), `101 (api) ${fields.join(' ')}\n`);
+  await writeFile(join(f.procRoot, '101/status'), 'VmRSS:\t40 kB\nNSpid:\t101\t7\nThreads:\t2\n');
+  await writeFile(join(f.procRoot, '101/cmdline'), ['uvicorn', ...args, ''].join('\0'));
+  await writeFile(join(f.procRoot, '101/cgroup'), '0::/owned.scope\n'); await writeFile(join(f.cgroupRoot, 'owned.scope/cgroup.procs'), '100\n101\n');
+  const bound = { ...f.container, initProcess: { pid: 100, birthTick: '999', namespacePid: 1 }, apiProcess: { pid: 101, birthTick: '1001', namespacePid: 7 } };
+  const sampled = await sampleContainer(bound, f); assert.equal(sampled.status, 'available'); assert.equal(sampled.rssBytes, 122880);
+  assert.deepEqual(sampled.processes.map(value => value.role), ['container_init', 'api']);
+  const now = Date.now(), output = combineObservation(receipt, { schemii: sampled }, { ...internal(now), processPid: 7 }, { now });
+  assert.equal(output.apiProcesses, 1); assert.equal(output.appRssBytes, 122880);
+  assert.equal((await sampleContainer({ ...bound, apiProcess: { ...bound.apiProcess, birthTick: 'replacement' } }, f)).status, 'unavailable');
+  await writeFile(join(f.procRoot, '101/cmdline'), ['uvicorn', ...args, '--workers', '2', ''].join('\0'));
+  assert.equal((await sampleContainer(bound, f)).status, 'unavailable');
+});
 test('busy cursor, wrong endpoint and stale internal observations never manufacture gauges', async t => {
   const f = await fixture(t), app = await sampleContainer(f.container, f), now = Date.now(), value = internal(now);
   delete value.sources.console.counts.nativeCursors;
