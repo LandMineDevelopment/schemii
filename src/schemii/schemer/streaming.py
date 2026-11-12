@@ -80,6 +80,11 @@ async def _cleanup(console, owner, receipt, pending, closed):
         raise first_error
 
 
+def _retire_result(console, owner, execution_id, result_id, closed):
+    console.close_result(owner, None, execution_id, result_id)
+    closed.add(result_id)
+
+
 class _PreviewShares:
     """Protected unconsumed capacity; consumed rows remain charged until end."""
 
@@ -218,8 +223,10 @@ async def events(services, owner, model, tiles, errors=(), *, export=False):
                 exhausted = (state["offset"] == len(state["rows"])
                              and (state["cursor"] is None or tile.get("scalarKpi", False)))
                 if reason or exhausted:
-                    await asyncio.to_thread(console.close_result, owner, None, receipt.id, state["result"].id)
-                    closed.add(state["result"].id)
+                    pending = asyncio.create_task(asyncio.to_thread(
+                        _retire_result, console, owner, receipt.id, state["result"].id, closed))
+                    await asyncio.shield(pending)
+                    pending = None
                     state["done"] = True
                     state["rows"] = []
                     if len(closed) == len(states):
@@ -242,8 +249,10 @@ async def events(services, owner, model, tiles, errors=(), *, export=False):
                 for state in active:
                     tile_id = state["tile"]["tileId"]
                     reason = "dashboard_row_limit" if shares.remaining("count", "totalRows") == 0 else "dashboard_byte_limit"
-                    await asyncio.to_thread(console.close_result, owner, None, receipt.id, state["result"].id)
-                    closed.add(state["result"].id)
+                    pending = asyncio.create_task(asyncio.to_thread(
+                        _retire_result, console, owner, receipt.id, state["result"].id, closed))
+                    await asyncio.shield(pending)
+                    pending = None
                     state["done"] = True
                     state["rows"] = []
                     if len(closed) == len(states):

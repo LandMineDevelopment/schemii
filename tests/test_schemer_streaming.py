@@ -209,6 +209,47 @@ def test_cancellation_during_fetch_joins_worker_and_closes():
     assert console.cancelled and console.closed == ["result"]
 
 
+def test_cancellation_during_result_close_joins_its_worker_and_never_closes_twice():
+    import threading
+    console, services, model = setup([[['row']]])
+    entered, cancelled, release, exited = [threading.Event() for _ in range(4)]
+
+    def close(*args):
+        assert args[-1] not in console.closed, "result retirement is not idempotent"
+        console.closed.append(args[-1])
+        entered.set()
+        assert release.wait(3)
+        exited.set()
+
+    def cancel(*args):
+        console.cancelled = True
+        cancelled.set()
+
+    console.close_result, console.cancel = close, cancel
+
+    async def consume():
+        async for _ in streaming.events(services, "owner", model,
+                [{"tileId": "tile", "plan": {"sql": "select 1"}}]):
+            pass
+
+    async def run():
+        task = asyncio.create_task(consume())
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        assert await asyncio.to_thread(cancelled.wait, 2)
+        assert not task.done(), "consumer must join the close worker before finishing"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert exited.is_set()
+
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+    assert console.cancelled and console.closed == ["result"]
+
+
 @pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
 @pytest.mark.parametrize("failure", ["send_error", "timeout", "disconnect"])
 def test_asgi_transport_failures_release_source(monkeypatch, spec_version, failure):
