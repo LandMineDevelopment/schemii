@@ -2239,6 +2239,7 @@ def _plan_view_changes(plan: _MigrationPlan) -> None:
                             f"views.{after.name}.acl.{index}",
                             "preserve_privileges",
                             sql,
+                            order=index,
                         )
                     )
                 continue

@@ -1315,3 +1315,74 @@ def test_three_way_view_comparison_retains_external_and_cte_binding_changes(
     desired = baseline.model_copy(deep=True)
     desired.views[0].definition = baseline_query + " WHERE value >= 2"
     assert reconcile_designs(baseline, desired, catalog).conflicts
+
+
+def test_materialized_acl_replay_preserves_privileges_past_single_digit_step_numbers():
+    from pglast import parse_sql
+    from schemii.common.postgres.models import PostgresGrant
+
+    before = materialized_catalog()
+    privileges = (
+        "DELETE",
+        "INSERT",
+        "MAINTAIN",
+        "REFERENCES",
+        "SELECT",
+        "TRIGGER",
+        "TRUNCATE",
+        "UPDATE",
+    )
+    acl = tuple(
+        PostgresGrant(
+            grantor="author", grantee="author", privilege=privilege, grantable=False
+        )
+        for privilege in privileges
+    )
+    acl += (
+        PostgresGrant(
+            grantor="author", grantee="reader", privilege="SELECT", grantable=True
+        ),
+    )
+    catalog = build_postgres_catalog(
+        **before.model_dump(exclude={"fingerprint", "captured_at", "safety"}),
+        safety=before.safety.model_copy(
+            update={
+                "preservation": (
+                    before.safety.preservation[0].model_copy(update={"acl": acl}),
+                )
+            }
+        ),
+        captured_at=before.captured_at,
+    )
+    live = import_postgres_catalog(catalog).content
+    desired = live.model_copy(deep=True)
+    desired.views[0].definition = "SELECT 2 AS value"
+    steps, blockers = compile_migration_steps("public", live, desired, catalog=catalog)
+    assert not blockers
+    # Replay the emitted PostgreSQL grants rather than asserting a path/sort implementation.
+    rights = {
+        "author": {(privilege, False) for privilege in privileges},
+        "default_reader": {("SELECT", False)},
+    }
+    replay = [step for step in steps if step.operation == "preserve_privileges"]
+    assert len(replay) > 10
+    for step in replay:
+        grant = parse_sql(step.sql)[0].stmt
+        for role in grant.grantees:
+            current = rights.setdefault(role.rolename or "PUBLIC", set())
+            if grant.is_grant:
+                current.update(
+                    (item.priv_name.upper(), grant.grant_option)
+                    for item in grant.privileges
+                )
+            elif grant.privileges is None:
+                current.clear()
+            else:
+                names = {item.priv_name.upper() for item in grant.privileges}
+                current.difference_update(
+                    item for item in list(current) if item[0] in names
+                )
+    assert {role: value for role, value in rights.items() if value} == {
+        "author": {(privilege, False) for privilege in privileges},
+        "reader": {("SELECT", True)},
+    }
