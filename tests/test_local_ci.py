@@ -21,7 +21,20 @@ def git(root, *args):
 
 
 @pytest.fixture
-def repository(tmp_path, monkeypatch):
+def ambient_secret_directory(tmp_path_factory, monkeypatch):
+    directory = tmp_path_factory.mktemp("ambient-launcher-secrets")
+    token = directory / "account_setup_token"
+    token.write_text("inert ambient setup token")
+    token.chmod(0o600)
+    monkeypatch.setenv("SCHEMII_SECRET_DIRECTORY", str(directory))
+    yield directory
+    assert list(directory.iterdir()) == [token]
+    assert token.read_text() == "inert ambient setup token"
+    assert stat.S_IMODE(token.stat().st_mode) == 0o600
+
+
+@pytest.fixture
+def repository(tmp_path, monkeypatch, ambient_secret_directory):
     git(tmp_path, "init", "-q")
     git(tmp_path, "config", "user.name", "Local CI test")
     git(tmp_path, "config", "user.email", "local-ci@example.invalid")
@@ -41,6 +54,7 @@ def repository(tmp_path, monkeypatch):
         "SCHEMII_E2E_USERNAME",
         "SCHEMII_E2E_PASSWORD",
         "SCHEMII_CI_QUALITY_PYTHON",
+        "SCHEMII_SECRET_DIRECTORY",
     ):
         monkeypatch.delenv(name, raising=False)
     return tmp_path
@@ -675,7 +689,7 @@ def test_bootstrap_consent_cannot_replace_partial_explicit_credentials(
 )
 @pytest.mark.parametrize("populated", [False, True])
 def test_run_owned_bootstrap_file_supports_actual_helper_sequential_setup_and_login(
-    repository, monkeypatch, populated, capsys
+    repository, monkeypatch, populated, capsys, ambient_secret_directory
 ):
     monkeypatch.setenv("SCHEMII_E2E_BOOTSTRAP", "1")
     secret_dir = repository / ".schemii/secrets"
@@ -778,6 +792,10 @@ writeFileSync(process.env.CI_TELEMETRY_FILE, records.map(record => JSON.stringif
         credentials["username"]
         not in receipt_path.read_text() + captured.out + captured.err
     )
+    foreign_token = (ambient_secret_directory / "account_setup_token").read_text()
+    assert foreign_token not in captured.out + captured.err
+    for report in (receipt_path, *receipt_path.parent.rglob("*.summary.json")):
+        assert foreign_token not in report.read_text()
     state = json.loads((repository / ".schemii/auth-state.json").read_text())
     if populated:
         assert code == 1 and receipt["acceptance"] is False

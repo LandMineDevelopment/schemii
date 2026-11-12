@@ -19,6 +19,7 @@ SCHEMII_LAUNCH_LOCK_FILE="${SCHEMII_LAUNCH_LOCK_FILE-${ROOT_DIR}/.schemii/start.
 SCHEMII_RESET_MIGRATION_DEMO="${SCHEMII_RESET_MIGRATION_DEMO-0}"
 SCHEMII_DEMO_SCENARIO="${SCHEMII_DEMO_SCENARIO-baseline}"
 SCHEMII_DEMO_SOURCE_REVISION="${SCHEMII_DEMO_SOURCE_REVISION-unknown+dirty}"
+SCHEMII_DEMO_STATE_DIRECTORY="${SCHEMII_DEMO_STATE_DIRECTORY-}"
 SCHEMII_LAUNCH_ACTION=start
 SCHEMII_RECOVERY_DIRECTORY=
 SCHEMII_TESTING_SPACE=all
@@ -28,7 +29,7 @@ SCHEMII_RUNTIME_RECEIPT="${SCHEMII_RUNTIME_RECEIPT-}"
 SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
-  printf 'Usage: %s [--prepare-testing | --reset-testing SPACE | --check-testing-reset SPACE | --verify-testing [SPACE] | --prepare-testing-writable ACCOUNT | --reset-testing-writable ACCOUNT | --verify-testing-writable ACCOUNT | --backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
+  printf 'Usage: %s [--demo | --prepare-testing | --reset-testing SPACE | --check-testing-reset SPACE | --verify-testing [SPACE] | --prepare-testing-writable ACCOUNT | --reset-testing-writable ACCOUNT | --verify-testing-writable ACCOUNT | --backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
 }
 
 list_demo_scenarios() {
@@ -43,6 +44,12 @@ list_demo_scenarios() {
 
 if (( $# > 0 )); then
   case "$1" in
+    --demo)
+      (( $# == 1 )) || { usage >&2; exit 2; }
+      SCHEMII_LAUNCH_ACTION=demo
+      # A demo launch always preserves existing source data and saved work.
+      SCHEMII_RESET_MIGRATION_DEMO=0
+      ;;
     --prepare-testing)
       (( $# == 1 )) || { usage >&2; exit 2; }
       SCHEMII_LAUNCH_ACTION=prepare-testing
@@ -175,7 +182,7 @@ if [[ "$SCHEMII_LAUNCH_ACTION" != "logs" ]]; then
   command -v git >/dev/null 2>&1 || fail "Git is required to resolve the shared deployment lease"
   command -v flock >/dev/null 2>&1 || fail "flock is required to serialize local application lifecycle changes"
   SCHEMII_QA_LOCK_DIRECTORY="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)" || fail "could not resolve the shared deployment lease directory"
-  if [[ -z "${SCHEMII_SECRET_DIRECTORY+x}" ]]; then
+  if [[ -z "${SCHEMII_SECRET_DIRECTORY+x}" || "$SCHEMII_LAUNCH_ACTION" == demo ]]; then
     # Linked worktrees share the fixed Compose project and its persistent volumes.
     # Keep their secrets with Git's primary worktree so the first launch from any
     # linked checkout uses one stable credential owner. Git lists the primary
@@ -184,7 +191,14 @@ if [[ "$SCHEMII_LAUNCH_ACTION" != "logs" ]]; then
       | sed -n '1s/^worktree //p')" || fail "could not resolve the primary Git worktree for shared stack secrets"
     [[ -n "$SCHEMII_PRIMARY_WORKTREE_ROOT" && -d "$SCHEMII_PRIMARY_WORKTREE_ROOT" ]] \
       || fail "the primary Git worktree is unavailable; set SCHEMII_SECRET_DIRECTORY to the retained stack secrets"
-    SCHEMII_SECRET_DIRECTORY="${SCHEMII_PRIMARY_WORKTREE_ROOT}/.schemii/secrets"
+    if [[ -z "${SCHEMII_SECRET_DIRECTORY+x}" ]]; then
+      SCHEMII_SECRET_DIRECTORY="${SCHEMII_PRIMARY_WORKTREE_ROOT}/.schemii/secrets"
+    fi
+    if [[ "$SCHEMII_LAUNCH_ACTION" == demo ]]; then
+      SCHEMII_DEMO_STATE_DIRECTORY="${SCHEMII_DEMO_STATE_DIRECTORY:-${SCHEMII_PRIMARY_WORKTREE_ROOT}/.schemii/demo}"
+      [[ "$SCHEMII_DEMO_STATE_DIRECTORY" == /* ]] || fail "demo state directory must be an absolute path"
+      [[ -f "$ROOT_DIR/dev/demo/prepare.py" ]] || fail "demo preparation helper is missing"
+    fi
   fi
   SCHEMII_QA_LOCK_FILE="${SCHEMII_QA_LOCK_DIRECTORY}/qa-deployment.lock"
   SCHEMII_QA_GATE_FILE="${SCHEMII_QA_LOCK_DIRECTORY}/qa-startup.lock"
@@ -653,10 +667,30 @@ if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
   printf 'Demo workspace: https://localhost:%s/?workspace=%s\n' "$SCHEMII_TEST_APP_PORT" "$demo_workspace_id"
   printf 'Remote demo workspace: https://omarchy.taile4f57f.ts.net/?workspace=%s\n' "$demo_workspace_id"
 fi
+# This operator-only command prepares one account's demo resources after every
+# service is healthy. Secret input travels over stdin, never command arguments.
+if [[ "$SCHEMII_LAUNCH_ACTION" == demo ]]; then
+  printf 'Preparing the demo administrator and connected bookstore workspace...\n'
+  if ! demo_result="$(python3 "$ROOT_DIR/dev/demo/prepare.py" request \
+      --state-directory "$SCHEMII_DEMO_STATE_DIRECTORY" \
+      --target-database "$SCHEMII_TEST_POSTGRES_DB" \
+      --target-username "$SCHEMII_TEST_POSTGRES_USER" \
+      --target-password-file "$SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE" \
+    | docker "${compose_args[@]}" exec -T schemii python \
+      -c "$(cat "$ROOT_DIR/dev/demo/prepare.py")" provision)"; then
+    fail "demo account and database preparation failed"
+  fi
+  if ! printf '%s\n' "$demo_result" | python3 "$ROOT_DIR/dev/demo/prepare.py" verify \
+      --state-directory "$SCHEMII_DEMO_STATE_DIRECTORY" \
+      --origin "https://localhost:${SCHEMII_TEST_APP_PORT}" \
+      --preview-origin "https://omarchy.taile4f57f.ts.net"; then
+    fail "demo readiness verification failed"
+  fi
+fi
 # Export only selected nonsecret ownership fields after successful health checks.
 # This optional action stays inside the launcher's existing deployment lease.
 if [[ -n "$SCHEMII_RUNTIME_RECEIPT" ]] &&
-   [[ "$SCHEMII_LAUNCH_ACTION" == start || "$SCHEMII_LAUNCH_ACTION" == prepare-testing ]]; then
+   [[ "$SCHEMII_LAUNCH_ACTION" == start || "$SCHEMII_LAUNCH_ACTION" == prepare-testing || "$SCHEMII_LAUNCH_ACTION" == demo ]]; then
   runtime_revision="$(git -C "$ROOT_DIR" rev-parse HEAD)" || fail "could not identify the observed source revision"
   if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]]; then runtime_revision+="+dirty"; fi
   runtime_container_ids="$(docker ps --quiet --filter label=com.docker.compose.project=schemii-test --filter status=running)" || fail "could not identify runtime containers"

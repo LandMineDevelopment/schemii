@@ -13,6 +13,7 @@ from schemii.common.api.errors import ApiProblem
 from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.postgres.console import ConsoleExecution, ConsoleResultPage
 from .errors import ConsoleServiceError
+from .streaming import QueryExportStreamingResponse
 
 
 router = APIRouter(tags=["common-query-executions"])
@@ -119,10 +120,13 @@ def export_result(
     service = _service(request, execution_id, read=True, owner_id=principal.user_id)
     try:
         receipt = service.get_owned(principal.user_id, execution_id)
-        rows = service.export_csv(principal.user_id, receipt.workspace_id, execution_id, result_id)
+        connections = request.app.state.services.connections
+        access = connections.for_product("schemoo" if receipt.workspace_id is None else "schemii") if hasattr(connections, "for_product") else None
+        rows = service.export_csv(principal.user_id, receipt.workspace_id, execution_id, result_id,
+                                  connection_access=access)
     except ConsoleServiceError as error:
         raise _problem(error) from error
-    return StreamingResponse(
+    return QueryExportStreamingResponse(
         rows, media_type="text/csv; charset=utf-8",
         headers={
             "Content-Disposition": f'attachment; filename="{result_id}.csv"',
