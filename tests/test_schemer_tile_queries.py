@@ -95,6 +95,27 @@ def test_new_detail_branch_does_not_activate_conditional_scope(context):
     assert any("repeat a contributing row" in message for message in drill["warnings"])
 
 
+def test_unused_cycle_allows_chart_but_ambiguous_detail_rejects_drill(context):
+    dashboard, tile, model = context
+    model.definition.edges.append(model.definition.edges[-1].model_copy(update={"id": "other_cert"}))
+    _, chart = queries.tile_plan(None, None, dashboard, tile.id)
+    assert chart["cycleEdges"] == ["cert_fk", "other_cert"]
+    assert execute(chart["sql"]) == [("Engineering", 2), ("Sales", 1)]
+    tile.detail_fields.append(field("cert", "id"))
+    with pytest.raises(ApiProblem, match="ambiguous"):
+        queries.tile_plan(None, None, dashboard, tile.id, selection=selection())
+
+
+def test_required_scope_rejects_cycle_even_when_source_not_in_tile_outputs(context):
+    dashboard, tile, model = context
+    from schemii.schemoo.models import ModelScope
+    model.definition.edges.append(model.definition.edges[-1].model_copy(update={"id": "other_cert"}))
+    model.definition.scopes = [ModelScope.model_validate({"id": "cert_filter", "label": "Certificate", "kind": "required", "alternatives": [
+        {"id": "choice", "label": "Choice", "conditions": [{"table": "cert", "column": "id", "operator": "eq", "value": "special"}]}]})]
+    with pytest.raises(ApiProblem, match="ambiguous"):
+        queries.tile_plan(None, None, dashboard, tile.id)
+
+
 def test_dashboard_exposed_optional_scope_only_filters_when_viewer_activates_it(context):
     dashboard, tile, model = context
     from schemii.schemoo.models import ModelScope, ScopeSelection
@@ -184,6 +205,22 @@ def test_required_scope_keeps_original_population_with_related_details(context):
     assert execute(chart["sql"]) == [("Engineering", 1)]
     tile.detail_fields.append(field("cert", "id"))
     _, drill = queries.tile_plan(None, None, dashboard, tile.id, selection=selection())
+    assert execute(drill["sql"]) == [("Alice", "other"), ("Alice", "special")]
+
+
+def test_self_cycle_does_not_change_required_drill_scope_population(context):
+    dashboard, tile, model = context
+    from schemii.schemoo.models import ModelEdge, ModelScope
+    model.definition.edges.append(ModelEdge.model_validate({"id": "self_cert", "kind": "logical", "source": "cert", "target": "cert",
+                                                          "sourceColumn": "id", "targetColumn": "id"}))
+    model.definition.scopes = [ModelScope.model_validate({"id": "cert_filter", "label": "Certificate", "kind": "required", "alternatives": [
+        {"id": "choice", "label": "Choice", "conditions": [{"table": "cert", "column": "id", "operator": "eq", "value": "special"}]}]})]
+    _, chart = queries.tile_plan(None, None, dashboard, tile.id)
+    assert chart["cycleEdges"] == ["self_cert"]
+    assert execute(chart["sql"]) == [("Engineering", 1)]
+    tile.detail_fields.append(field("cert", "id"))
+    _, drill = queries.tile_plan(None, None, dashboard, tile.id, selection=selection())
+    assert drill["cycleEdges"] == ["self_cert"]
     assert execute(drill["sql"]) == [("Alice", "other"), ("Alice", "special")]
 
 

@@ -7,7 +7,7 @@ from .catalog import source_issues, model_source_contract
 from .models import ModelDefinition, ModelUpdate, ExploreState
 from .store import ModelConflictError
 from .prototype import analyze_model, compile_preview, validate_definition
-from .domain import parameter_domain
+from .domain import source_identity, definition_namespaces, parameter_domain
 
 
 def document(value):
@@ -24,8 +24,13 @@ def load_model(services, owner, model_id, expected_revision=None):
     return model
 
 
-def model_catalog(services, owner, model, *, fresh=False):
-    catalog = services.model_catalogs.get(services, owner, model.connection_id, model.namespace, fresh=fresh)
+def model_catalog(services, owner, model, *, fresh=False, definition=None):
+    try:
+        namespaces = definition_namespaces(model.namespace, document(definition or model.definition))
+    except ValueError as error:
+        raise ApiProblem(422, "model_source_limit", str(error)) from error
+    options = {"namespaces": namespaces} if namespaces != [model.namespace] else {}
+    catalog = services.model_catalogs.get(services, owner, model.connection_id, model.namespace, fresh=fresh, **options)
     if catalog["database"] != model.database:
         raise ApiProblem(409, "model_source_changed", "The model's connection now targets a different database.")
     return catalog
@@ -58,16 +63,16 @@ def patch_model_definition(services, owner, model_id, body):
         definition[label] = list(items.values())
     if body.root is not None:
         definition["root"] = body.root
-    catalog = model_catalog(services, owner, current)
+    catalog = model_catalog(services, owner, current, fresh=True, definition=ModelDefinition.model_validate(definition))
     exposed = definition.get("exposedFields")
     if exposed is None and body.hide:
         # Unrestricted exposure becomes an explicit list only when something is
         # hidden. Merely exposing an already available field stays unrestricted.
-        tables = {table["name"]: table["columns"] for table in catalog["tables"]}
+        tables = {source_identity(catalog, table): table["columns"] for table in catalog["tables"]}
         exposed = [{"table": node["id"], "column": column}
                    for node in definition["nodes"]
                    for column in ([output["id"] for output in node["derivation"]["outputs"]]
-                                  if node.get("derivation") else [c["name"] for c in tables.get(node["table"], [])])]
+                                  if node.get("derivation") else [c["name"] for c in tables.get(source_identity(catalog, node), [])])]
     if exposed is not None:
         hidden = {(field.table, field.column) for field in body.hide}
         selected = {(field["table"], field["column"]): field for field in exposed}
@@ -162,16 +167,16 @@ def domain_query(catalog, model, body):
     issues = source_issues(catalog, definition)
     if any(issue.get("severity", "breaking") == "breaking" for issue in issues):
         raise ApiProblem(422, "model_source_drift", "Source references need repair before browsing parameter values.", details={"issues": issues})
-    return domain_values_plan(catalog, lookup["table"], lookup["column"], lookup["labelColumn"], body.search)
+    return domain_values_plan(catalog, lookup["table"], lookup["column"], lookup["labelColumn"], body.search, namespace=lookup.get("namespace"))
 
 
-def domain_values_plan(catalog, table, column, label, search=""):
+def domain_values_plan(catalog, table, column, label, search="", *, namespace=None):
     """Shared bounded lookup compiler for authoring and saved report inputs."""
     if not table or not column:
         raise ApiProblem(422, "parameter_unbound", "Choose a domain value column in the model parameter setup before browsing values.")
     fields = [{"table": table, "column": c} for c in dict.fromkeys([column, label])]
     fields.append({"table": table, "column": column, "aggregate": "count"})
-    rules = ModelDefinition(root=table, nodes=[{"id": table, "table": table, "label": table}])
+    rules = ModelDefinition(root=table, nodes=[{"id": table, "table": table, "label": table[:100], **({"namespace": namespace} if namespace is not None else {})}])
     plan = plan_query(catalog, rules, ExploreState(root=table, fields=fields))
     if search:
         # Lookup text matches either the displayed label or the stored value.

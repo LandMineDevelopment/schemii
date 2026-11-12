@@ -1,3 +1,4 @@
+import { sourceIdentity, sourceLabel, sameSource } from "../../src/schemii/schemoo/web/logical-relationships.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
@@ -19,9 +20,9 @@ test("the visible add-table action preserves unrelated relationships and alias e
     { id: "unrelated", sourceTable: "b", sourceColumn: "id", targetTable: "c", targetColumn: "id" },
   ];
   const app = readFileSync(new URL("prototype.js", web), "utf8");
-  const action = app.slice(app.indexOf("function addTable(table) {"), app.indexOf("function renderAliasTools()"));
-  runInNewContext(`${action}\naddTable('d');`, {
-    draft, catalog: source, addSourceSelection, ensureAliasConnections,
+  const action = app.slice(app.indexOf("function addTable(identity) {"), app.indexOf("function renderAliasTools()"));
+  runInNewContext(`${action}\naddTable(sourceIdentity({table:'d'},catalog));`, {
+    draft, catalog: source, addSourceSelection, ensureAliasConnections, sourceIdentity, sourceLabel, sameSource,
     selected: null, diagnostics: {},
     showError(message) { throw new Error(message); },
     refreshForms() {}, changed() {}, inspectSelection() {}, $: () => ({}),
@@ -41,7 +42,7 @@ test("creating an alias adds candidates only for that occurrence, not existing a
   const app = readFileSync(new URL("prototype.js", web), "utf8");
   const action = app.slice(app.indexOf("function addAlias("), app.indexOf("function addTable("));
   runInNewContext(`${action}\naddAlias('a', 'New A');`, {
-    draft, catalog: source, inheritAliasExposure, ensureAliasConnections,
+    draft, catalog: source, inheritAliasExposure, ensureAliasConnections, sourceIdentity,
     crypto: { randomUUID: () => "11223344556677889900" }, canvas: { placeNode() {} },
     selected: null, refreshForms() {}, changed() {}, inspectSelection() {}, $: () => ({}),
   });
@@ -73,16 +74,16 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-async function libraryFixture() {
+async function libraryFixture({ loadedNamespaces = ["public"] } = {}) {
   const dialog = new Element("dialog"), content = new Element("div"), post = deferred();
-  const selects = new Map(), opened = [];
-  const small = { ...catalog(), tables: catalog().tables.slice(0, 1), fingerprint: "one" };
+  const selects = new Map(), opened = [], posted = [];
+  const small = { ...catalog(), tables: catalog().tables.slice(0, 1), fingerprint: "one", namespaces: loadedNamespaces };
   const source = readFileSync(new URL("model-library.js", web), "utf8")
     .replace(/^import .*;\n/gm, "").replace(/^export \{.*;\n/gm, "").replace(/^export /gm, "");
   const runtime = runInNewContext(`${source}\n({ openModelLibrary })`, {
-    importedDraft, defaultSourceSelection, splitDraft, structuredClone,
+    importedDraft, defaultSourceSelection, splitDraft, structuredClone, sourceIdentity, sourceLabel,
     requestJson: async (url, options = {}) => {
-      if (options.method === "POST") return post.promise;
+      if (options.method === "POST") { posted.push(JSON.parse(JSON.stringify(options.body))); return post.promise; }
       if (url.endsWith("/models")) return { models: [] };
       if (url.includes("/connections?")) return { connections: [{ id: "pg_offline", name: "Owned", database: "offline", username: "offline" }] };
       if (url.includes("/namespaces")) return { namespaces: [{ name: "public", system: false }] };
@@ -100,7 +101,7 @@ async function libraryFixture() {
   await new Promise(resolve => setImmediate(resolve));
   const form = content.children.find(item => item.tag === "form");
   form.children.find(item => item.tag === "label").children.find(item => item.tag === "input").value = "Owned model";
-  return { ...runtime, dialog, content, form, post, opened };
+  return { ...runtime, dialog, content, form, post, opened, posted };
 }
 
 for (const outcome of ["success", "failure"]) {
@@ -126,4 +127,15 @@ test("current create completion still opens its saved model", async () => {
   await pending;
   assert.deepEqual(fixture.opened, ["current_model"]);
   assert.equal(fixture.dialog.open, false);
+});
+
+test("creation submits the catalog fingerprint's loaded schema set even when only one schema is selected", async () => {
+  const fixture = await libraryFixture({ loadedNamespaces: ["other", "public"] });
+  const pending = fixture.form.onsubmit({ preventDefault() {} });
+  assert.equal(fixture.posted[0].catalogFingerprint, "one");
+  assert.deepEqual(fixture.posted[0].catalogNamespaces, ["other", "public"]);
+  assert.equal(fixture.posted[0].definition.nodes.length, 1);
+  fixture.post.resolve({ id: "selected_model" });
+  await pending;
+  assert.deepEqual(fixture.opened, ["selected_model"]);
 });

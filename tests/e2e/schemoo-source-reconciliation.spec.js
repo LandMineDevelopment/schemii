@@ -74,3 +74,48 @@ test("clients cannot replace the canonical live source contract with fabricated 
   expect(response.ok(), await response.text()).toBeTruthy();
   expect((await response.json()).definition.sourceContract).toEqual(model.definition.sourceContract);
 });
+
+test("qualified duplicate source names retain complete FK pairs and author a composite logical repair", async ({page,request})=>{
+  test.setTimeout(90_000);
+  const {chooseModelOption}=await import("./helpers/schemoo-select.js");
+  const target=await ownedSchemooSource(request);
+  try {
+    await target.sql(`CREATE TABLE "${target.namespace}"."same.name" (tenant integer, id integer, label text, PRIMARY KEY(tenant,id))`);
+    await source.sql(`CREATE TABLE "${source.namespace}"."same.name" (tenant integer, id integer, label text, PRIMARY KEY(tenant,id), CONSTRAINT exact_pair FOREIGN KEY(tenant,id) REFERENCES "${target.namespace}"."same.name"(tenant,id))`);
+    await page.goto("/schemoo");
+    const library=page.locator("#model-library");await expect(library).toBeVisible();
+    await library.getByRole("textbox",{name:"Model name",exact:true}).fill(source.name("qualified"));
+    await chooseModelOption(page,"Source connection",`${source.connection.name} · ${source.connection.database} · ${source.connection.username}`);
+    await chooseModelOption(page,"Source schema",source.namespace);
+    await library.getByRole("checkbox",{name:`Include schema ${target.namespace}`,exact:true}).check();
+    const picker=library.getByRole("region",{name:"Model sources and fields"});
+    await expect(picker.getByRole("checkbox",{name:`Include source ${target.namespace}.same.name`,exact:true})).toBeVisible();
+    await picker.getByRole("button",{name:"Clear selection",exact:true}).click();
+    await picker.getByRole("searchbox",{name:"Search sources",exact:true}).fill("same.name");
+    await picker.getByRole("checkbox",{name:"Include source same.name",exact:true}).check();
+    await picker.getByRole("checkbox",{name:`Include source ${target.namespace}.same.name`,exact:true}).check();
+    const posted=page.waitForResponse(response=>response.url().endsWith("/api/v1/schemoo/models")&&response.request().method()==="POST");
+    await library.getByRole("button",{name:"Create model",exact:true}).click();
+    const created=await posted;expect(created.status()).toBe(201);const saved=await created.json();source.trackModel(saved);
+    expect(saved.definition.nodes.map(node=>node.namespace).sort()).toEqual([source.namespace,target.namespace].sort());
+    expect(saved.definition.sourceContract.relationships[0].columns).toEqual([{source:"tenant",target:"tenant"},{source:"id",target:"id"}]);
+    await expect(library).toBeHidden();await expect(page.locator(".sc-node")).toHaveCount(2);
+    await page.getByRole("button",{name:"Edit model",exact:true}).click();
+    await page.locator("#relationships input[type=checkbox]").uncheck();
+    await page.getByRole("button",{name:"Add logical relationship",exact:true}).click();
+    const rightLabel=`${target.namespace}.same.name`;
+    await chooseModelOption(page,"source object",`same.name · same.name`);
+    await chooseModelOption(page,"target object",`${rightLabel} · ${rightLabel}`);
+    await chooseModelOption(page,"source column 1","tenant");await chooseModelOption(page,"target column 1","tenant");
+    await page.getByRole("button",{name:"Add column pair",exact:true}).click();
+    await chooseModelOption(page,"source column 2","id");await chooseModelOption(page,"target column 2","id");
+    const pair=page.getByRole("group",{name:"Column pair 2",exact:true});await expect(pair).toBeVisible();
+    await page.screenshot({path:`artifacts/qualified-composite-model-${test.info().project.name}.png`});
+    await page.getByRole("button",{name:"Add relationship",exact:true}).click();
+    await page.getByRole("button",{name:"Save model",exact:true}).click();await expect(page.locator("#draft-status")).toContainText("Saved");
+    await page.reload();await expect(page.locator(".sc-node")).toHaveCount(2);
+    const read=await(await request.get(`/api/v1/schemoo/models/${saved.id}`)).json();
+    const logical=read.definition.edges.find(edge=>edge.kind==="logical");expect(logical.columns).toEqual([{source:"tenant",target:"tenant"},{source:"id",target:"id"}]);
+    expect(read.definition.nodes.map(node=>node.id)).toEqual(saved.definition.nodes.map(node=>node.id));
+  }finally{await target.cleanup();}
+});

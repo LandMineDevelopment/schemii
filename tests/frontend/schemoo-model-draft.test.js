@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { importedDraft, defaultSourceSelection, MODEL_LIMITS } from "../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft, joinModel } from "../../src/schemii/schemoo/web/model-state.js";
+import { sourceIdentity, sourceNodeIds, sourceLabel } from "../../src/schemii/schemoo/web/logical-relationships.js";
 import { reconcileSourceCatalog, addSourceSelection } from "../../src/schemii/schemoo/web/source-reconciliation.js";
 
 const column = name => ({ name, dataType: "integer", nullable: false });
@@ -84,4 +85,62 @@ test("adding selected fields does not import relationships between unrelated mod
   assert.deepEqual(draft.edges.map(edge => [edge.relationshipId, edge.enabled]), [["selected_fk", false]]);
   assert.deepEqual(draft.sourceContract, contract);
   assert.equal(draft.exposedFields.length, 4);
+});
+
+test("qualified source selection preserves duplicate names and every composite dependency",()=>{
+  const catalog={namespace:"one",tables:["one","two"].map(namespace=>({namespace,name:"same.name",primaryKey:["tenant","id"],columns:[column("tenant"),column("id"),column("value")]})),relationships:[{id:"fk",sourceNamespace:"one",sourceTable:"same.name",targetNamespace:"two",targetTable:"same.name",columns:[{source:"tenant",target:"tenant"},{source:"id",target:"id"}]}]};
+  const draft=importedDraft(catalog,[{namespace:"one",table:"same.name",columns:["value"]},{namespace:"two",table:"same.name",columns:[]}]);
+  assert.deepEqual(draft.nodes.map(node=>[node.id,node.namespace,node.table]),[["same.name","one","same.name"],['["two","same.name"]',"two","same.name"]]);
+  assert.equal(draft.edges[0].target,'["two","same.name"]');
+  assert.deepEqual(draft.sourceContract.tables.map(table=>table.columns.map(column=>column.name)),[["tenant","id","value"],["tenant","id"]]);
+  const before=structuredClone(draft);reconcileSourceCatalog(draft,catalog);assert.deepEqual(draft,before);
+  addSourceSelection(draft,catalog,[{namespace:"two",table:"same.name",columns:["value"]}]);
+  assert.equal(draft.nodes.length,2);assert.deepEqual(draft.exposedFields.map(field=>field.table),["same.name",'["two","same.name"]']);
+});
+
+test("quoted legacy names cannot collide with qualified generated IDs or their references",()=>{
+  const legacy='["two","same"]';
+  const catalog={namespace:"one",tables:[{namespace:"one",name:legacy,columns:[column("id")]},{namespace:"two",name:"same",columns:[column("id")]}],
+    relationships:[{id:"fk",sourceNamespace:"one",sourceTable:legacy,targetNamespace:"two",targetTable:"same",columns:[{source:"id",target:"id"}]}]};
+  const draft=importedDraft(catalog), reversed=importedDraft({...catalog,tables:[...catalog.tables].reverse()});
+  const ids=new Map(draft.nodes.map(node=>[sourceIdentity(node,catalog),node.id]));
+  assert.equal(new Set(draft.nodes.map(node=>node.id)).size,2);
+  assert.equal(ids.get(sourceIdentity({namespace:"one",table:legacy},catalog)),legacy);
+  assert.equal(ids.get(sourceIdentity({namespace:"two",table:"same"},catalog)),`${legacy}_2`);
+  assert.deepEqual(new Map(reversed.nodes.map(node=>[sourceIdentity(node,catalog),node.id])),ids);
+  assert.deepEqual(draft.exposedFields.map(field=>field.table),draft.nodes.map(node=>node.id));
+  assert.equal(draft.edges[0].source,draft.nodes[0].id);assert.equal(draft.edges[0].target,draft.nodes[1].id);
+  const existing=importedDraft(catalog,[{namespace:"two",table:"same",columns:["id"]}]);
+  const old=existing.nodes[0].id;
+  addSourceSelection(existing,catalog,[{namespace:"one",table:legacy,columns:["id"]}]);
+  assert.equal(existing.nodes[0].id,old);assert.equal(new Set(existing.nodes.map(node=>node.id)).size,2);
+  assert.ok(existing.exposedFields.every(field=>existing.nodes.some(node=>node.id===field.table)));
+});
+
+test("generated IDs remain bounded and deterministic for long escaped identifiers",()=>{
+  const sources=["x","y"].map(end=>({namespace:'"'.repeat(63),table:'"'.repeat(62)+end}));
+  const catalog={namespace:"public"}, ids=sourceNodeIds(sources,catalog);
+  assert.equal(new Set(ids.values()).size,2);
+  assert.ok([...ids.values()].every(id=>Array.from(id).length<=200));
+  assert.deepEqual(sourceNodeIds([...sources].reverse(),catalog),ids);
+});
+
+test("adding fields prefers the collision-safe canonical occurrence even when aliases are ordered first",()=>{
+  const catalog={namespace:"one",tables:[{namespace:"one",name:'["two","same"]',columns:[column("id"),column("extra")]},
+    {namespace:"two",name:"same",columns:[column("id"),column("extra")]}],relationships:[]};
+  const draft=importedDraft(catalog,catalog.tables.map(table=>({namespace:table.namespace,table:table.name,columns:["id"]})));
+  const canonical=draft.nodes.find(node=>node.namespace==="two");
+  const alias={...canonical,id:"authored_alias",label:"Other role"};draft.nodes.unshift(alias);
+  const before=draft.nodes.map(node=>node.id);
+  addSourceSelection(draft,catalog,[{namespace:"two",table:"same",columns:["extra"]}]);
+  assert.deepEqual(draft.nodes.map(node=>node.id),before);
+  assert.equal(draft.exposedFields.find(field=>field.column==="extra").table,canonical.id);
+  assert.equal(draft.exposedFields.some(field=>field.table===alias.id),false);
+});
+
+test("source display quotes components so dotted names remain unambiguous",()=>{
+  const catalog={namespace:"public"};
+  assert.equal(sourceLabel({namespace:"a.b",table:"c"},catalog),'"a.b".c');
+  assert.equal(sourceLabel({namespace:"a",table:"b.c"},catalog),'a."b.c"');
+  assert.equal(sourceLabel({namespace:"public",table:'a."b'},catalog),'"a.""b"');
 });

@@ -118,11 +118,15 @@ def test_new_input_on_same_column_cannot_steal_an_unchanged_inputs_domain(alread
                                          "targetTable": "other_parent"})
     updated_rules = document(saved)
     new_scope = deepcopy(updated_rules["scopes"][0]); new_scope["id"] = "new_scope"
+    if already_bound:
+        # Two live FKs are intentionally ambiguous for a new inferred lookup.
+        # A local source input must not steal the unchanged positive FK binding.
+        new_scope["alternatives"][0]["inputs"][0]["type"] = "source"
     updated_rules["scopes"].append(new_scope)
     updated = _scoped_definition(current, ModelDefinition.model_validate(updated_rules), saved)
     assert domain_query(current, SimpleNamespace(definition=updated), body)["sql"] == old_sql
     body.scope_id = "new_scope"
-    assert '"other_parent"' in domain_query(current, SimpleNamespace(definition=updated), body)["sql"]
+    assert ('"child"' if already_bound else '"other_parent"') in domain_query(current, SimpleNamespace(definition=updated), body)["sql"]
     bindings = updated.sourceContract.parameterDomains
     assert len(bindings) == 2
     assert {item.scopeId for item in bindings} == {"parent", "new_scope"}
@@ -204,7 +208,7 @@ def test_scoped_contract_retains_hidden_keys_foreign_keys_alias_filters_and_doma
     rules["scopes"] = [{"id": "filter", "alternatives": [{"conditions": [{"table": "role", "column": "unused", "compareColumn": "parent_id"}],
         "inputs": [{"domain": {"table": "lookup", "column": "code", "labelColumn": "label"}}]}]}]
     selected, relationships = source_dependencies(source, rules)
-    assert selected == {"parent": {"id"}, "child": {"id", "parent_id", "unused"}, "lookup": {"code", "label"}}
+    assert selected == {("public", "parent"): {"id"}, ("public", "child"): {"id", "parent_id", "unused"}, ("public", "lookup"): {"code", "label"}}
     assert relationships == {"fk"}
     contract = catalog_contract(source, rules)
     assert contract["scope"] == "model" and len(contract["tables"]) == 3
@@ -228,8 +232,8 @@ def test_scoped_derived_dependencies_include_operands_groups_connections_conditi
         "outputs": [{"id": "total", "nodeId": "child", "column": "unused", "operand": "id", "conditions": [{"table": "child", "column": "id", "compareColumn": "parent_id"},
             {"table": "child", "column": "unused", "domain": {"nodeId": "child", "column": "unused", "labelColumn": "parent_id"}}]}]}})
     selected, _ = source_dependencies(source, rules)
-    assert selected["child"] == {"id", "parent_id", "unused"}
-    assert "total" not in selected["child"]
+    assert selected[("public", "child")] == {"id", "parent_id", "unused"}
+    assert "total" not in selected[("public", "child")]
 
 
 def test_scoped_hidden_key_and_logical_join_drift_block_but_unselected_columns_do_not():
@@ -253,13 +257,107 @@ def test_incomplete_domain_drafts_do_not_invent_source_dependencies():
     rules["scopes"] = [{"id": "picker", "alternatives": [{"conditions": [
         {"table": "child", "column": "id", "domain": {"table": "", "column": "", "labelColumn": ""}}],
         "inputs": [{"domain": {"table": "", "column": "", "labelColumn": ""}}]}]}]
-    assert source_dependencies(source, rules) == ({"parent": {"id"}, "child": {"id"}}, set())
+    assert source_dependencies(source, rules) == ({("public", "parent"): {"id"}, ("public", "child"): {"id"}}, set())
     domain = rules["scopes"][0]["alternatives"][0]["inputs"][0]["domain"]
     domain.update(table="child", column="parent_id")
-    assert source_dependencies(source, rules)[0]["child"] == {"id", "parent_id"}
+    assert source_dependencies(source, rules)[0][("public", "child")] == {"id", "parent_id"}
     domain.update(column="missing")
     with pytest.raises(ValueError, match="child.missing is unavailable"):
         source_dependencies(source, rules)
     domain.update(table="inaccessible", column="")
     with pytest.raises(ValueError, match="Source inaccessible is unavailable"):
         source_dependencies(source, rules)
+
+
+def test_qualified_composite_dependencies_and_acknowledgement_never_cross_namespaces():
+    from schemii.schemoo.catalog import model_source_contract, source_dependencies
+    source = {"namespace": "one", "tables": [
+        {"namespace": namespace, "name": "same", "primaryKey": ["tenant", "id"], "columns": [
+            {"name": name, "dataType": "integer", "nullable": False} for name in ["tenant", "id", "value", "unselected"]]}
+        for namespace in ["one", "two", "unselected"]],
+        "relationships": [{"id": "fk", "name": "mapping", "sourceNamespace": "one", "sourceTable": "same", "targetNamespace": "two", "targetTable": "same",
+            "columns": [{"source": "tenant", "target": "tenant"}, {"source": "id", "target": "id"}]}]}
+    rules = {"root": "left", "nodes": [{"id": "left", "table": "same"}, {"id": "right", "namespace": "two", "table": "same"}],
+        "edges": [{"id": "role", "relationshipId": "fk", "source": "left", "target": "right"}], "scopes": [],
+        "exposedFields": [{"table": "left", "column": "value"}]}
+    selected, relationships = source_dependencies(source, rules)
+    assert selected == {("one", "same"): {"value", "tenant", "id"}, ("two", "same"): {"tenant", "id"}}
+    assert relationships == {"fk"}
+    rules["sourceContract"] = catalog_contract(source, rules)
+    current = deepcopy(source)
+    current["tables"][2]["columns"][0]["dataType"] = "text"
+    current["tables"][0]["columns"][3]["dataType"] = "text"
+    assert source_drift(current, rules) == []
+    current["tables"][1]["columns"][1]["dataType"] = "bigint"
+    issues = source_drift(current, rules)
+    assert [(issue["namespace"], issue["table"], issue["column"]) for issue in issues] == [("two", "same", "id")]
+    forged = deepcopy(rules)
+    forged["sourceContract"]["tables"][0]["columns"][1]["dataType"] = "bigint"
+    preserved = model_source_contract(current, forged, rules)
+    assert preserved["tables"][1]["columns"][1]["dataType"] == "integer"
+    current["relationships"][0]["columns"][1]["target"] = "value"
+    assert any(issue["kind"] == "changed_relationship" for issue in source_drift(current, rules))
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_qualified_per_input_provenance_keeps_local_and_foreign_namespace_distinct(bound):
+    from schemii.schemoo.domain import qualified_relationship_id
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemoo.routes import _scoped_definition
+    from schemii.schemoo.service import document, domain_query
+    source, rules = inferred_lookup_fixture()
+    source["namespace"] = "one"
+    source["tables"][0]["namespace"] = "two.with.dot"
+    source["tables"][1]["namespace"] = "one"
+    relation = source["relationships"][0]
+    relation.update(id=qualified_relationship_id("one", "child", relation["name"]),
+                    sourceNamespace="one", targetNamespace="two.with.dot")
+    if not bound:
+        source["relationships"] = []
+    saved = _scoped_definition(source, ModelDefinition.model_validate(rules), creating=True)
+    body = SimpleNamespace(scope_id="parent", alternative_id="pick", parameter_id="value", search="")
+    before = domain_query(source, SimpleNamespace(definition=saved), body)["sql"]
+    if not bound:
+        source["relationships"] = [relation]
+    changed = document(saved)
+    new_scope = deepcopy(changed["scopes"][0]); new_scope["id"] = "independent"
+    if bound:
+        new_scope["alternatives"][0]["inputs"][0]["type"] = "source"
+    changed["scopes"].append(new_scope)
+    updated = _scoped_definition(source, ModelDefinition.model_validate(changed), saved)
+    assert domain_query(source, SimpleNamespace(definition=updated), body)["sql"] == before
+    body.scope_id = "independent"
+    sql = domain_query(source, SimpleNamespace(definition=updated), body)["sql"]
+    assert ('"one"."child"' if bound else '"two.with.dot"."parent"') in sql
+    assert len(updated.sourceContract.parameterDomains) == 2
+    assert source_issues(source, document(updated)) == []
+
+
+def test_parameter_provenance_resolves_legacy_fk_ids_and_rejects_composite_drift():
+    from schemii.common.api.errors import ApiProblem
+    from schemii.schemoo.domain import qualified_relationship_id, legacy_relationship_id
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemoo.routes import _scoped_definition
+    from schemii.schemoo.service import document, domain_query
+    source, rules = inferred_lookup_fixture()
+    source["namespace"] = "one.with.dot"
+    for table in source["tables"]:
+        table["namespace"] = source["namespace"]
+    relation = source["relationships"][0]
+    legacy = legacy_relationship_id(relation)
+    relation.update(id=qualified_relationship_id(source["namespace"], "child", relation["name"]),
+                    sourceNamespace=source["namespace"], targetNamespace=source["namespace"])
+    saved = _scoped_definition(source, ModelDefinition.model_validate(rules), creating=True)
+    historical = document(saved)
+    historical["sourceContract"]["parameterDomains"][0]["relationshipId"] = legacy
+    historical["sourceContract"]["relationships"][0]["id"] = legacy
+    model = SimpleNamespace(definition=ModelDefinition.model_validate(historical))
+    body = SimpleNamespace(scope_id="parent", alternative_id="pick", parameter_id="value", search="")
+    assert '"one.with.dot"."parent"' in domain_query(source, model, body)["sql"]
+    composite = deepcopy(source)
+    relation = composite["relationships"][0]
+    relation.pop("sourceColumn"); relation.pop("targetColumn")
+    relation["columns"] = [{"source": "parent_id", "target": "id"}, {"source": "id", "target": "tenant"}]
+    with pytest.raises(ApiProblem, match="explicit domain") as rejected:
+        domain_query(composite, model, body)
+    assert rejected.value.code == "parameter_unbound"

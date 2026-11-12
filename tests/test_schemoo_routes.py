@@ -345,12 +345,12 @@ def test_catalog_cache_is_identity_bound_and_refreshes_execution():
         counts.append(namespace)
         return SimpleNamespace(
             tables=[],
-            views=[SimpleNamespace(name="personnel_summary", columns=[], query_definition="SELECT 1")],
-            materialized_views=[SimpleNamespace(name="personnel_summary_reporting_mv", columns=[], query_definition="SELECT 1", populated=True)],
+            views=[SimpleNamespace(name="personnel_summary", columns=[SimpleNamespace(name="id", model_dump=lambda **kwargs:{"name":"id"})], query_definition="SELECT 1")],
+            materialized_views=[SimpleNamespace(name="personnel_summary_reporting_mv", columns=[SimpleNamespace(name="id", model_dump=lambda **kwargs:{"name":"id"})], query_definition="SELECT 1", populated=True)],
             relationships=[],
             fingerprint="one",
         )
-    services = SimpleNamespace(connections=SimpleNamespace(get=lambda *args: profile, use=use), postgres=SimpleNamespace(introspect=introspect))
+    services = SimpleNamespace(connections=SimpleNamespace(get=lambda *args: profile, use=use), postgres=SimpleNamespace(introspect=introspect, readable_columns=lambda *args:{("personnel_summary","id"),("personnel_summary_reporting_mv","id")}))
     cache = ModelCatalogs(maximum_entries=2)
     cache.get(services, "one", "connection", "public")
     cache.get(services, "one", "connection", "public")
@@ -617,3 +617,172 @@ def test_incomplete_domain_saves_still_reject_nonempty_unknown_references(setup,
     rejected = api.put(url, json={"expectedRevision": model["revision"], "name": "Must not persist", "definition": definition})
     assert rejected.status_code == 422, rejected.text
     assert api.get(url).json() == model
+
+
+def test_catalog_selected_namespaces_preserve_composite_order_and_filter_revoked_second_pair():
+    from schemii.schemoo.domain import qualified_relationship_id, legacy_relationship_id
+    profile = SimpleNamespace(revision=1, database="warehouse", owner_id="manager")
+    @contextmanager
+    def use(*args):
+        yield profile
+    column = lambda name: SimpleNamespace(name=name, model_dump=lambda **kwargs:{"name":name,"dataType":"integer","nullable":False})
+    relation = SimpleNamespace(name="same_fk", source_namespace="one", source_table="same", source_columns=("tenant","id"),
+                               target_namespace="two", target_table="same", target_columns=("tenant","id"))
+    seen = []
+    def introspect(connection, namespace):
+        seen.append(namespace)
+        return SimpleNamespace(tables=[SimpleNamespace(name="same", columns=[column("tenant"),column("id")])],
+                               relationships=[relation] if namespace=="one" else [], fingerprint=namespace)
+    grants = {name:{("same","tenant"),("same","id")} for name in ["one","two"]}
+    services = SimpleNamespace(connections=SimpleNamespace(get=lambda *args:profile,use=use),
+        postgres=SimpleNamespace(introspect=introspect,readable_columns=lambda connection,namespace:grants[namespace]))
+    adapter = ModelCatalogs()
+    catalog = adapter.get(services,"viewer","connection","one",namespaces=["one","two"])
+    assert [(table["namespace"],table["name"]) for table in catalog["tables"]] == [("one","same"),("two","same")]
+    relationship = catalog["relationships"][0]
+    assert relationship["columns"] == [{"source":"tenant","target":"tenant"},{"source":"id","target":"id"}]
+    assert relationship["id"] == qualified_relationship_id("one","same","same_fk")
+    assert relationship["id"] != legacy_relationship_id(relationship)
+    assert "sourceColumn" not in relationship
+    assert adapter.get(services,"viewer","connection","one")["relationships"] == []
+    grants["two"].remove(("same","id"))
+    assert adapter.get(services,"viewer","connection","one",namespaces=["two"])["relationships"] == []
+    assert seen == ["one","two","one","one","two"]
+
+
+def test_qualified_model_create_save_patch_and_scalar_domain_ambiguity_are_identity_safe(setup):
+    from schemii.schemoo.service import domain_query
+    from schemii.common.api.errors import ApiProblem
+    api, original, source, calls = setup
+    source["namespace"] = "public"
+    source["tables"].append({"namespace":"other", "name":"people", "columns":[
+        {"name":"id","dataType":"uuid"},{"name":"name","dataType":"integer"}]})
+    source["relationships"] = [{"id":"cross", "name":"cross", "sourceTable":"people", "sourceNamespace":"public",
+        "targetTable":"people", "targetNamespace":"other", "columns":[{"source":"id","target":"id"}]}]
+    get = api.app.state.services.model_catalogs.get
+    requested=[]
+    def get_selected(*args, namespaces=None, **kwargs):
+        requested.append(namespaces)
+        return get(*args,**kwargs)
+    api.app.state.services = replace(api.app.state.services,model_catalogs=SimpleNamespace(get=get_selected))
+    definition = {"root":"stable", "nodes":[{"id":"stable","table":"people","label":"Original"},
+        {"id":"role","namespace":"other","table":"people","label":"Other"}],
+        "edges":[{"id":"old_edge","relationshipId":"cross","source":"stable","target":"role"}], "scopes":[],
+        "exposedFields":[{"table":"stable","column":"name"},{"table":"role","column":"name"}]}
+    response=api.post('/api/v1/schemoo/models',json={"name":"Qualified","connectionId":original["connectionId"],"namespace":"public","definition":definition})
+    assert response.status_code==201,response.text
+    model=response.json(); url=f"/api/v1/schemoo/models/{model['id']}"
+    assert requested[-1]==['other','public']
+    assert model['definition']['nodes'][0]['id']=='stable'
+    assert model['definition']['nodes'][0].get('namespace') is None
+    assert len(model['definition']['sourceContract']['tables'])==2
+    saved=api.put(url,json={'expectedRevision':1,'name':'Renamed','definition':model['definition']})
+    assert saved.status_code==200,saved.text
+    assert api.get(url).json()['definition']==model['definition']
+    hidden=api.patch(url,json={'expectedRevision':2,'hide':[{'table':'role','column':'name'}]})
+    assert hidden.status_code==200,hidden.text
+    assert hidden.json()['definition']['sourceContract']['tables'][1]['columns']==[{'name':'id','dataType':'uuid','nullable':True}]
+    lookup_definition=deepcopy(definition)
+    lookup_definition['scopes']=[{'id':'filter','kind':'conditional','alternatives':[{'id':'choose','inputs':[{'id':'value','type':'text'}],
+        'conditions':[{'table':'stable','column':'id','parameterId':'value'}]}]}]
+    from schemii.schemoo.models import ModelDefinition
+    scoped=SimpleNamespace(definition=ModelDefinition.model_validate(lookup_definition))
+    body=SimpleNamespace(scope_id='filter',alternative_id='choose',parameter_id='value',search='')
+    assert '"other"."people"' in domain_query(source,scoped,body)['sql']
+    source['relationships'][0]['columns'].append({'source':'name','target':'name'})
+    with pytest.raises(ApiProblem,match='explicit domain'):
+        domain_query(source,scoped,body)
+
+
+@pytest.fixture
+def namespace_catalog(setup):
+    """Production cohort adapter over immutable, authorized metadata doubles."""
+    from schemii.common.postgres.models import PostgresColumn
+    api, model, _, _ = setup
+    revisions = {"public": "one", "other": "one"}
+    grants = {name: {("people", "id"), ("people", "name")} for name in revisions}
+    observations = []
+
+    def introspect(profile, namespace):
+        observations.append((profile.id, namespace))
+        return SimpleNamespace(tables=[SimpleNamespace(name="people", columns=[
+            PostgresColumn(name="id", ordinal=1, data_type="uuid", nullable=True),
+            PostgresColumn(name="name", ordinal=2, data_type="text", nullable=True)])],
+            relationships=[], fingerprint=f"{namespace}:{revisions[namespace]}")
+
+    services = replace(api.app.state.services, model_catalogs=ModelCatalogs(),
+        postgres=SimpleNamespace(introspect=introspect, readable_columns=lambda profile, namespace: grants[namespace]))
+    api.app.state.services = services
+    return SimpleNamespace(api=api, model=model, services=services, revisions=revisions,
+                           grants=grants, observations=observations)
+
+
+def test_creation_compares_the_reviewed_namespace_cohort_but_saves_only_selected_dependencies(namespace_catalog):
+    f = namespace_catalog
+    connection = f.model["connectionId"]
+    reviewed = f.api.get("/api/v1/schemoo/catalog", params={
+        "connection_id": connection, "namespace": "public", "namespaces": ["other", "public"]}).json()
+    payload = {"name": "Public selection", "connectionId": connection, "namespace": "public",
+        "definition": DEFINITION, "catalogFingerprint": reviewed["fingerprint"], "catalogNamespaces": reviewed["namespaces"]}
+    f.observations.clear()
+    response = f.api.post("/api/v1/schemoo/models", json=payload)
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert [namespace for _, namespace in f.observations] == ["other", "public"]
+    assert {table["namespace"] for table in created["definition"]["sourceContract"]["tables"]} == {"public"}
+    assert "catalogNamespaces" not in created
+    assert "catalogNamespaces" not in f.api.get(f"/api/v1/schemoo/models/{created['id']}").json()
+    f.revisions["other"] = "changed"
+    plan = f.api.post(f"/api/v1/schemoo/models/{created['id']}/plan", json={"expectedRevision": 1, "explore": EXPLORE})
+    assert plan.status_code == 200 and plan.json()["sourceIssues"] == []
+    rejected = f.api.post("/api/v1/schemoo/models", json=payload)
+    assert rejected.status_code == 409 and rejected.json()["error"]["code"] == "model_source_changed"
+
+
+def test_creation_cohort_preserves_legacy_scope_caps_and_fresh_grant_checks(namespace_catalog):
+    f = namespace_catalog
+    connection = f.model["connectionId"]
+    single = f.api.get("/api/v1/schemoo/catalog", params={"connection_id": connection, "namespace": "public"}).json()
+    base = {"name": "Legacy", "connectionId": connection, "namespace": "public", "definition": DEFINITION,
+            "catalogFingerprint": single["fingerprint"]}
+    assert f.api.post("/api/v1/schemoo/models", json=base).status_code == 201
+    for namespaces in [[], [""] , ["x" * 64], [f"schema_{index}" for index in range(17)],
+                       [f"schema_{index}" for index in range(16)]]:
+        rejected = f.api.post("/api/v1/schemoo/models", json={**base, "catalogNamespaces": namespaces})
+        assert rejected.status_code == 422, rejected.text
+    draft = deepcopy(DEFINITION)
+    draft["nodes"][0]["namespace"] = "other"
+    outside = f.api.post("/api/v1/schemoo/models", json={**base, "definition": draft, "catalogNamespaces": ["public"]})
+    assert outside.status_code == 409 and outside.json()["error"]["code"] == "model_source_changed"
+    reviewed = f.api.get("/api/v1/schemoo/catalog", params={"connection_id": connection, "namespace": "public", "namespaces": ["other"]}).json()
+    f.grants["other"] = set()
+    rejected = f.api.post("/api/v1/schemoo/models", json={**base, "definition": draft,
+        "catalogNamespaces": reviewed["namespaces"], "catalogFingerprint": reviewed["fingerprint"]})
+    assert rejected.status_code == 422 and rejected.json()["error"]["code"] == "invalid_model_source"
+
+
+def namespace_draft(model):
+    draft = deepcopy(model["definition"])
+    draft["nodes"].append({"id": "new_role", "namespace": "other", "table": "people", "label": "Other people"})
+    draft["edges"].append({"id": "cross", "kind": "logical", "source": "people", "target": "new_role",
+                           "columns": [{"source": "id", "target": "id"}]})
+    draft["exposedFields"] = [{"table": node, "column": "name"} for node in ["people", "new_role"]]
+    return draft
+
+
+def test_validation_reads_proposed_namespace_dependencies_without_saving(namespace_catalog):
+    f = namespace_catalog
+    draft = namespace_draft(f.model)
+    body = {"expectedRevision": 1, "definition": draft,
+            "explore": {"root": "people", "fields": [{"table": "new_role", "column": "name"}]}}
+    url = f"/api/v1/schemoo/models/{f.model['id']}"
+    f.observations.clear()
+    response = f.api.post(url + "/validate", json=body)
+    assert response.status_code == 200, response.text
+    assert '"other"."people"' in response.json()["sql"]
+    assert [namespace for _, namespace in f.observations] == ["other", "public"]
+    assert f.api.get(url).json() == f.model
+    f.grants["other"] = set()
+    rejected = f.api.post(url + "/validate", json=body)
+    assert rejected.status_code == 422 and rejected.json()["error"]["code"] == "model_source_drift"
+    assert f.api.get(url).json() == f.model

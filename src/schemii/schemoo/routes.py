@@ -1,6 +1,7 @@
 """Owner-scoped semantic modeling API, composed into the unified server."""
 
 from contextlib import contextmanager
+from typing import Annotated
 from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from pydantic import Field, StrictBool, ValidationError
@@ -17,7 +18,7 @@ from .models import (Contract, ModelCreate, ModelDuplicate, ModelUpdate, ModelPa
                      PreviewCreate, PreviewUpdate, SavedPreview)
 from .store import (ModelInUseError, ModelNotFoundError, ModelConflictError, ModelStorageUnavailableError, ModelLimitError, ModelDocumentLimitError, PreviewNameConflictError)
 from .service import load_model, model_catalog, plan_query, execute_query, domain_query, domain_values_plan, document, patch_model_definition
-from .domain import domain_table
+from .domain import domain_source, definition_namespaces
 from .prototype import analyze_model
 
 router = APIRouter(prefix="/api/v1/schemoo", tags=["schemoo"])
@@ -33,6 +34,9 @@ def _services(request: Request):
 
 class CreateRequest(ModelCreate):
     database: str = Field(default="", max_length=63)
+    catalog_namespaces: list[Annotated[str, Field(min_length=1, max_length=63)]] | None = Field(
+        default=None, min_length=1, max_length=16,
+        description="The schema set returned with catalogFingerprint; creation review only, not saved model scope.")
 
 
 class ModelList(Contract):
@@ -133,11 +137,14 @@ def _scoped_definition(catalog, definition, previous=None, *, creating=False):
 @router.get("/catalog")
 def get_catalog(request: Request, connection_id: str = Query(pattern=r"^pg_[0-9a-f]{32}$"),
                 namespace: str = Query(min_length=1, max_length=63),
+                namespaces: list[Annotated[str, Field(min_length=1, max_length=63)]] | None = Query(default=None, max_length=16),
                 principal: Principal = Depends(get_current_principal)) -> dict:
     with api_errors():
         services = _services(request)
+        if len(set([namespace, *(namespaces or [])])) > 16:
+            raise ApiProblem(422, "model_source_limit", "Choose at most 16 source schemas for one model.")
         return initial_positions(services, principal.user_id, services.model_catalogs.get(
-            services, principal.user_id, connection_id, namespace, fresh=True))
+            services, principal.user_id, connection_id, namespace, fresh=True, **({"namespaces": namespaces} if namespaces else {})))
 
 
 @router.get("/models", response_model=ModelList)
@@ -150,14 +157,24 @@ def list_models(request: Request, principal: Principal = Depends(get_current_pri
 def create_model(body: CreateRequest, request: Request, principal: Principal = Depends(get_current_principal)):
     with api_errors():
         services = _services(request)
-        catalog = services.model_catalogs.get(services, principal.user_id, body.connection_id, body.namespace, fresh=True)
+        try:
+            namespaces = definition_namespaces(body.namespace, document(body.definition))
+            cohort = sorted(set([body.namespace, *(body.catalog_namespaces or namespaces)]))
+            if len(cohort) > 16:
+                raise ValueError("Choose at most 16 source schemas for one model.")
+        except ValueError as error:
+            raise ApiProblem(422, "model_source_limit", str(error)) from error
+        if not set(namespaces).issubset(cohort):
+            raise ApiProblem(409, "model_source_changed", "The model selects a schema outside the reviewed source catalog. Reload sources and review your selection before creating the model.")
+        catalog = services.model_catalogs.get(services, principal.user_id, body.connection_id, body.namespace, fresh=True,
+                                             **({"namespaces": cohort} if cohort != [body.namespace] else {}))
         profile = services.connections.get(principal.user_id, body.connection_id)
         if body.catalog_fingerprint and body.catalog_fingerprint != catalog["fingerprint"]:
             raise ApiProblem(409, "model_source_changed", "The source schema changed while you were choosing sources. Reload sources and review your selection before creating the model.")
         if any(edge.kind == "logical" for edge in body.definition.edges):
             _validate_connections(catalog, body.definition)
         definition = _scoped_definition(catalog, body.definition, creating=True)
-        record = ModelCreate.model_validate({**body.model_dump(), "definition": definition,
+        record = ModelCreate.model_validate({**body.model_dump(exclude={"catalog_namespaces"}), "definition": definition,
                                              "database": catalog["database"],
                                              "catalog_fingerprint": catalog["fingerprint"]})
         return services.models.create(principal.user_id, record,
@@ -187,7 +204,7 @@ def update_model(model_id: str, body: ModelUpdate, request: Request, principal: 
     with api_errors():
         services = _services(request)
         current = load_model(services, principal.user_id, model_id, body.expected_revision)
-        catalog = model_catalog(services, principal.user_id, current, fresh=True)
+        catalog = model_catalog(services, principal.user_id, current, fresh=True, definition=body.definition)
         if any(edge.kind == "logical" for edge in body.definition.edges):
             _validate_connections(catalog, body.definition)
         body = body.model_copy(update={"definition": _scoped_definition(catalog, body.definition, current.definition),
@@ -260,7 +277,8 @@ def validate_model(model_id: str, body: ValidateRequest, request: Request, princ
     with api_errors():
         services = _services(request)
         model = load_model(services, principal.user_id, model_id, body.expected_revision)
-        return plan_query(model_catalog(services, principal.user_id, model), body.definition or model.definition,
+        definition = body.definition or model.definition
+        return plan_query(model_catalog(services, principal.user_id, model, fresh=True, definition=definition), definition,
                           body.explore, model.catalog_fingerprint)
 
 
@@ -314,11 +332,11 @@ def author_domain_values(model_id: str, body: AuthorDomainRequest, request: Requ
     with api_errors():
         services = _services(request)
         model = load_model(services, principal.user_id, model_id, body.expected_revision)
-        catalog = model_catalog(services, principal.user_id, model, fresh=True)
+        catalog = model_catalog(services, principal.user_id, model, fresh=True, definition=body.definition)
         domain = document(body.domain)
         try:
-            table = domain_table(domain, document(body.definition)["nodes"])
+            source = domain_source(domain, document(body.definition)["nodes"])
         except ValueError as error:
             raise ApiProblem(422, "parameter_unbound", str(error)) from error
-        plan = domain_values_plan(catalog, table, domain["column"], domain.get("labelColumn") or domain["column"], body.search)
+        plan = domain_values_plan(catalog, source.get("table", ""), domain["column"], domain.get("labelColumn") or domain["column"], body.search, namespace=source.get("namespace"))
         return execute_query(services, principal.user_id, model, body.console_id, plan, background_tasks)

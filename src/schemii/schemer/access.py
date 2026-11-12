@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from schemii.common.api.errors import ApiProblem
 from schemii.schemoo.store import ModelNotFoundError
+from schemii.schemoo.domain import source_identity, relationship_columns
 from .dashboard_store import DashboardNotFoundError
 
 
@@ -124,25 +125,26 @@ class ReportCatalogs:
     def __init__(self, base, access):
         self.base, self.access = base, access
 
-    def get(self, services, actor, connection_id, namespace, *, fresh=False):
+    def get(self, services, actor, connection_id, namespace, *, fresh=False, namespaces=None):
         # Database GRANT changes do not change a saved profile's revision.
         # Always refresh shared catalogs and intersect with current privileges.
-        catalog = self.base.get(services, actor, connection_id, namespace, fresh=True)
+        catalog = self.base.get(services, actor, connection_id, namespace, fresh=True, **({"namespaces": namespaces} if namespaces else {}))
         with self.access.use(actor, connection_id) as target:
-            readable = services.postgres.readable_columns(target, namespace)
+            readable = {name: services.postgres.readable_columns(target, name) for name in sorted(set([namespace, *(namespaces or [])]))}
         tables = []
         for table in catalog["tables"]:
-            columns = [c for c in table["columns"] if (table["name"], c["name"]) in readable]
+            permissions = readable.get(source_identity({"namespace": namespace}, table)[0], set())
+            columns = [c for c in table["columns"] if (table["name"], c["name"]) in permissions]
             if columns:
                 table["columns"] = columns
-                table["primaryKey"] = table.get("primaryKey", []) if all((table["name"], c) in readable for c in table.get("primaryKey", [])) else []
+                table["primaryKey"] = table.get("primaryKey", []) if all((table["name"], c) in permissions for c in table.get("primaryKey", [])) else []
                 table["uniqueKeys"] = [key for key in table.get("uniqueKeys", [])
-                                       if all((table["name"], c) in readable for c in key)]
+                                       if all((table["name"], c) in permissions for c in key)]
                 tables.append(table)
         catalog["tables"] = tables
         catalog["relationships"] = [r for r in catalog["relationships"]
-            if (r["sourceTable"], r["sourceColumn"]) in readable
-            and (r["targetTable"], r["targetColumn"]) in readable]
+            if all((r[f"{side}Table"], pair[side]) in readable.get(source_identity({"namespace": namespace}, r, side)[0], set())
+                   for side in ("source", "target") for pair in relationship_columns(r))]
         return catalog
 
 
