@@ -33,7 +33,10 @@ test('held consumer binds the fixed representative profile, source mapping and f
     effectiveAllocations: Object.fromEntries(Object.entries(value.profile.allocations).map(([name, allocation]) => [name, { ...allocation, containerId: name, created: 'unit-created', image: 'unit-image' }])) };
   value.application = { id: 'schemii', created: 'unit-created', image: 'unit-image' }; value.source = { id: 'source', created: 'unit-created', image: 'unit-image' };
   value.osRuntimeReceiptFile = join(dir, 'os-runtime.json');
-  await writeSnapshot(value.osRuntimeReceiptFile, { version: 1, origin: LOCAL, containers: ['schemii', 'source'].map(service => ({ service, id: service, image: 'unit-image' })) });
+  await writeSnapshot(value.osRuntimeReceiptFile, { version: 1, origin: LOCAL,
+    fixture: { version: 1, run, nonce, project: `schemii-pressure-${run.slice(9)}`, profile: value.profile, owner, sourceAssetsSha256: 'e'.repeat(64), stockCapacityEligible: false },
+    containers: ['schemii', 'source', 'metadata', 'ingress'].map(service => ({ service, id: service, image: 'unit-image' })) });
+  value.osRuntimeReceiptSha256 = (await readSnapshot(value.osRuntimeReceiptFile, 1024 * 1024, true)).sha256;
   const credentials = { version: 1, run, admin: principal, sourceAdminRole: 'pressure_admin',
     sourceAdminConnection: { host: '127.0.0.19', port: 6543, dbname: 'pressure_source', user: 'pressure_admin', sslmode: 'require', passwordFile: join(dir, 'source.json') },
     appSourceConnection: { host: 'source', port: 5432, database: 'pressure_source', username: 'pressure_source', passwordFile: join(dir, 'source.json') } };
@@ -42,6 +45,8 @@ test('held consumer binds the fixed representative profile, source mapping and f
   await writeSnapshot(credentials.sourceAdminConnection.passwordFile, 'fixture-source-password');
   await writeSnapshot(value.credentialsFile, credentials); await writeSnapshot(value.sourceWitnessConfig, witness); await writeSnapshot(path, value);
   assert.equal((await heldFixture(path, options)).profile.name, 'representative-load-v1');
+  await writeSnapshot(path, { ...value, osRuntimeReceiptSha256: '0'.repeat(64) });
+  await assert.rejects(heldFixture(path, options), /fixture_os_receipt_unqualified/); await writeSnapshot(path, value);
   for (const changed of [{ ...value, profile: { ...value.profile, name: 'pressure-v1' } },
     { ...value, profile: { ...value.profile, metadata: { ...value.profile.metadata, normalMaximum: 2 } } },
     { ...value, heartbeatAt: new Date(Date.now() + 60000).toISOString() }]) {

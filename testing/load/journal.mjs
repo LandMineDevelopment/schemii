@@ -37,7 +37,7 @@ async function boundedBytes(file, maximum) {
     chunks.push(buffer.subarray(0, bytesRead));
   }
 }
-export async function readSnapshot(path, maximumBytes = 64 * 1024 * 1024) {
+export async function readSnapshot(path, maximumBytes = 64 * 1024 * 1024, withIdentity = false) {
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > 128 * 1024 * 1024) throw new Error('invalid_snapshot_budget');
   const directory = await parent(path); let file;
   try {
@@ -51,7 +51,8 @@ export async function readSnapshot(path, maximumBytes = 64 * 1024 * 1024) {
       throw new Error('journal_changed_during_read');
     const check = await parent(path);
     try { if (JSON.stringify(check.chain) !== JSON.stringify(directory.chain)) throw new Error('journal_parent_changed'); } finally { await check.handle.close(); }
-    return JSON.parse(data);
+    const value = JSON.parse(data);
+    return withIdentity ? { value, sha256: hash(data) } : value;
   } finally { await file?.close(); await directory.handle.close(); }
 }
 export async function readFixtureSecret(path, directory) {

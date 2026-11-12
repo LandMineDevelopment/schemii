@@ -62,7 +62,7 @@ async function dispatch(command) {
       const observed = await observation(config.observerFile);
       if (fixture) {
         const privateObservation = await readPrivateJSON(config.observerFile);
-        if (privateObservation.runtimeReceiptSha256 !== fixture.osRuntimeReceiptSha256) throw new Error('fixture_observer_runtime_changed');
+        if (privateObservation.runtimeReceiptSha256 !== fixture.osRuntimeReceiptObjectSha256) throw new Error('fixture_observer_runtime_changed');
       }
       if (observed.appRssBytes / observed.appMemoryLimitBytes >= run.plan.stopRssRatio) throw new Error('memory_stop_threshold');
     }
@@ -73,7 +73,7 @@ async function dispatch(command) {
   if (fixture && Date.parse(fixture.expiresAt) - Date.now() < (run.plan.stages.reduce((sum, stage) => sum + stage.seconds, 0) + (run.plan.idleSeconds || 0) + run.plan.recoverySeconds + 60) * 1000) throw new Error('fixture_hold_too_short');
   run.status = 'running'; await save();
   task = executePlan({ spec: run.plan, receipt, dir, origin: config.origin, binary: config.binary,
-    expectedRuntimeReceiptSha256: fixture?.osRuntimeReceiptSha256,
+    expectedRuntimeReceiptSha256: fixture?.osRuntimeReceiptObjectSha256,
     observerFile: config.observerFile, allowUnobserved: config.allowUnobserved, signal: aborter.signal, abort: () => aborter.abort(),
     onStage: async stages => { run.result = { stages }; await save(); },
     onGenerator: async owner => { run.generatorOwner = { ...run.generatorOwner, ...owner }; await save(); },
@@ -105,7 +105,7 @@ try {
     heartbeat = setInterval(() => {
       if (heartbeatPending) return; heartbeatPending = true;
       void fixtureCommand(fixture, 'heartbeat', attachment).then(() => heldFixture(config.fixtureAuthority)).then(current => {
-        for (const field of ['run', 'nonce', 'owner', 'profile', 'runtimeReceipt', 'osRuntimeReceiptSha256', 'sourceWitnessConfig', 'credentialsFile', 'application', 'source'])
+        for (const field of ['run', 'nonce', 'owner', 'profile', 'runtimeReceipt', 'osRuntimeReceiptSha256', 'osRuntimeReceiptObjectSha256', 'sourceWitnessConfig', 'credentialsFile', 'application', 'source'])
           if (!same(current[field], fixture[field])) throw new Error('held_fixture_identity_changed');
         fixture = current;
       })

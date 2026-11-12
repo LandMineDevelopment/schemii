@@ -266,8 +266,12 @@ export async function heldFixture(path, { readIdentity = processIdentity, now = 
       value.principal?.username !== value.run || value.principal?.run !== value.run || !value.principal?.userId || !value.launcherPath) bad('held_fixture_unqualified');
   qualifiedFixtureRuntime(value);
   if (value.osRuntimeReceiptFile !== `${value.directory}/os-runtime.json`) bad('fixture_os_receipt_required');
-  const osReceipt = await readConfig(value.osRuntimeReceiptFile);
-  if (osReceipt.version !== 1 || osReceipt.origin !== value.canonicalOrigin || !Array.isArray(osReceipt.containers)) bad('fixture_os_receipt_unqualified');
+  const osDocument = await readSnapshot(value.osRuntimeReceiptFile, 1024 * 1024, true), osReceipt = osDocument.value;
+  if (value.osRuntimeReceiptSha256 !== osDocument.sha256 || osReceipt.version !== 1 || osReceipt.origin !== value.canonicalOrigin || !Array.isArray(osReceipt.containers) ||
+      osReceipt.containers.map(item => item.service).sort().join() !== 'ingress,metadata,schemii,source' ||
+      osReceipt.fixture?.version !== 1 || osReceipt.fixture.run !== value.run || osReceipt.fixture.nonce !== value.nonce ||
+      osReceipt.fixture.project !== `schemii-pressure-${value.run.slice(9)}` || !same(osReceipt.fixture.profile, value.profile) ||
+      !same(osReceipt.fixture.owner, value.owner) || !/^[a-f0-9]{64}$/.test(osReceipt.fixture.sourceAssetsSha256 || '') || osReceipt.fixture.stockCapacityEligible !== false) bad('fixture_os_receipt_unqualified');
   for (const [service, identity] of [['schemii', value.application], ['source', value.source]]) {
     const matches = osReceipt.containers.filter(item => item.service === service);
     if (matches.length !== 1 || matches[0].id !== identity?.id || matches[0].image !== identity?.image) bad('fixture_os_receipt_owner_changed');
@@ -282,7 +286,7 @@ export async function heldFixture(path, { readIdentity = processIdentity, now = 
   appSourceConnection.password = await readFixtureSecret(appSourceConnection.passwordFile, value.directory); delete appSourceConnection.passwordFile;
   if (sourceAdminConnection.dbname !== witness.authority.database || sourceAdminConnection.host !== witness.authority.endpoint.host || sourceAdminConnection.port !== witness.authority.endpoint.port ||
       sourceAdminConnection.sslmode !== witness.authority.endpoint.sslmode || appSourceConnection.database !== witness.authority.database || appSourceConnection.username !== witness.authority.role) bad('fixture_source_mapping_changed');
-  return { ...value, rawKind: value.kind, kind: 'schemii-pressure-load-hold', path, osRuntimeReceiptSha256: digest(osReceipt), tag: witness.runId, origin: value.canonicalOrigin, admin,
+  return { ...value, rawKind: value.kind, kind: 'schemii-pressure-load-hold', path, osRuntimeReceiptObjectSha256: digest(osReceipt), tag: witness.runId, origin: value.canonicalOrigin, admin,
     sourceAdminConnection, appSourceConnection, sourceAdminRole: credentials.sourceAdminRole };
 }
 export async function fixtureCommand(authority, action, attachment, { launch = spawn } = {}) {
