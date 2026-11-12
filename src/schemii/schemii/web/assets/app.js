@@ -191,6 +191,8 @@ const elements = {
   deleteTableButton: byId("delete-table-button"),
   catalogStats: byId("catalog-stats"),
   viewsList: byId("views-list"),
+  viewsState: byId("views-state"),
+  viewsContent: byId("views-content"),
   viewsSearch: byId("views-search"),
   viewDetail: byId("view-detail"),
   refreshViewsButton: byId("refresh-views-button"),
@@ -1075,7 +1077,7 @@ function selectedDesignTable() {
 }
 
 function updateDesignControls() {
-  const designWorkspace = isDesignWorkspace();
+  const designWorkspace = isDesignWorkspace() && Boolean(state.design);
   const busy = state.catalogLoading || state.designSubmitting || state.historySubmitting || state.layoutConflict || tableEditor.hasDraft;
   const selected = selectedDesignTable();
   const selectedView = selectedDesignView();
@@ -1097,9 +1099,9 @@ function updateDesignControls() {
   elements.createIndexButton.title = state.indexAuthoring ? "Cancel index selection" : "Create index";
   elements.deleteTableButton.disabled = !selected || busy;
   elements.createViewButton.disabled = !designWorkspace || busy;
-  elements.browseViewsTool.disabled = !designWorkspace || state.catalogLoading;
+  elements.browseViewsTool.disabled = !state.catalog || state.catalogLoading;
   elements.createViewTool.disabled = !designWorkspace || busy;
-  elements.refreshViewsTool.disabled = !designWorkspace || state.catalogLoading;
+  elements.refreshViewsTool.disabled = !state.activeWorkspace || state.catalogLoading;
   elements.deleteViewTool.disabled = !selectedView || busy;
   const deleteViewLabel = selectedView ? `Delete view ${selectedView.name}` : "Delete selected view";
   elements.deleteViewTool.setAttribute("aria-label", deleteViewLabel);
@@ -1274,11 +1276,18 @@ function updateHeader() {
   } else if (!state.readiness.ready) {
     elements.runtimeDot.classList.add("error");
     elements.runtimeStatus.textContent = "Server not ready";
+  } else if (state.catalogLoading || (state.activeWorkspace && !state.catalog && !state.catalogError)) {
+    elements.runtimeDot.classList.add("loading");
+    elements.runtimeStatus.textContent = designWorkspace ? "Loading saved design" : "Loading live catalog";
+  } else if (state.catalogError) {
+    elements.runtimeDot.classList.add("error");
+    elements.runtimeStatus.textContent = state.catalog
+      ? (designWorkspace ? "Saved design refresh failed" : "Live catalog refresh failed")
+      : (designWorkspace ? "Saved design load failed" : "Live catalog load failed");
   } else {
     elements.runtimeDot.classList.add("ready");
     if (state.layoutConflict) elements.runtimeStatus.textContent = "Layout saving stopped · conflict";
     else if (state.layoutSaving) elements.runtimeStatus.textContent = "Saving layout";
-    else if (state.catalogLoading) elements.runtimeStatus.textContent = designWorkspace ? "Loading saved design" : "Loading live catalog";
     else elements.runtimeStatus.textContent = `Ready · ${state.readiness.persistence}`;
   }
   elements.saveLayoutButton.disabled = !state.catalog || state.catalogLoading || state.layoutSaving || state.layoutConflict;
@@ -1288,8 +1297,7 @@ function updateHeader() {
     || workspaceOperations.isMutating();
   elements.refreshCatalogButton.title = designWorkspace ? "Refresh saved design" : "Refresh live catalog";
   elements.refreshCatalogButton.setAttribute("aria-label", elements.refreshCatalogButton.title);
-  elements.refreshViewsButton.disabled = state.catalogLoading;
-  elements.createViewButton.disabled = !designWorkspace || state.catalogLoading || state.designSubmitting || state.layoutConflict;
+  elements.refreshViewsButton.disabled = !state.activeWorkspace || state.catalogLoading;
   elements.reloadConflictButton.disabled = state.catalogLoading;
   elements.applyConnectionLayoutButton.disabled = state.catalogLoading;
   updateDesignControls();
@@ -1338,36 +1346,66 @@ function stateCard(mark, title, copy, actionLabel, onAction, loading = false) {
   });
 }
 
-function renderCatalogState() {
-  replace(elements.catalogState);
+function renderWorkspaceLoadState(container) {
+  replace(container);
   if (!state.startupComplete) {
-    elements.catalogState.append(stateCard("…", "Loading active server state", "Waiting for the session, readiness, connections, and workspaces APIs.", null, null, true));
-    return;
+    container.append(stateCard("…", "Loading active server state", "Waiting for the session, readiness, connections, and workspaces APIs.", null, null, true));
+    return true;
   }
   if (state.runtimeError) {
-    elements.catalogState.append(errorPanel(state.runtimeError, { retryLabel: "Retry server checks", onRetry: bootstrap }));
-    return;
+    container.append(errorPanel(state.runtimeError, { retryLabel: "Retry server checks", onRetry: bootstrap }));
+    return true;
   }
   if (!state.activeWorkspace) {
     const card = stateCard("WS", "Open a schema workspace", "Create a local design or create an editable workspace from PostgreSQL.", "Open workspaces", openWorkspaces);
     const connectionAction = element("button", { className: "ui-button compact", type: "button", text: "Manage connections" });
     connectionAction.addEventListener("click", openConnections);
     card.append(connectionAction);
-    elements.catalogState.append(card);
-    return;
+    container.append(card);
+    return true;
   }
   if (state.catalogLoading) {
-    elements.catalogState.append(stateCard("…", isDesignWorkspace() ? "Loading saved design" : "Loading live catalog", workspaceLabel(state.activeWorkspace), null, null, true));
-    return;
+    container.append(stateCard("…", isDesignWorkspace() ? "Loading saved design" : "Loading live catalog", workspaceLabel(state.activeWorkspace), null, null, true));
+    return true;
   }
   if (state.catalogError) {
-    const panel = errorPanel(state.catalogError, { retryLabel: "Retry catalog", onRetry: refreshCatalog });
+    const panel = errorPanel(state.catalogError, { retryLabel: isDesignWorkspace() ? "Retry saved design" : "Retry catalog", onRetry: refreshCatalog });
+    if (state.catalog) {
+      panel.append(element("p", { text: isDesignWorkspace()
+        ? "Showing the saved design from the last successful load."
+        : "Showing the live catalog from the last successful load." }));
+    }
     if (state.preservedLayout?.workspaceId === state.activeWorkspace.id) {
       panel.append(element("p", { text: "Unsaved table positions remain in this browser and will be reapplied after the live catalog loads." }));
     }
-    elements.catalogState.append(panel);
-    return;
+    container.append(panel);
+    return true;
   }
+  if (!state.catalog) {
+    container.append(stateCard("…", isDesignWorkspace() ? "Loading saved design" : "Loading live catalog", workspaceLabel(state.activeWorkspace), null, null, true));
+    return true;
+  }
+  return false;
+}
+
+function renderViewsWorkspaceState() {
+  renderWorkspaceLoadState(elements.viewsState);
+  const loaded = Boolean(state.catalog);
+  const desired = loaded ? state.catalog.source === "design" : isDesignWorkspace();
+  elements.viewsContent.dataset.catalogLoaded = String(loaded);
+  elements.viewsSourceLabel.textContent = desired ? "Desired schema" : loaded ? "Live PostgreSQL" : "No workspace open";
+  elements.createViewButton.hidden = !desired;
+  elements.viewsSearch.disabled = !loaded;
+  elements.viewDetail.hidden = !loaded;
+  if (!loaded) {
+    replace(elements.viewsList);
+    replace(elements.viewDetail);
+  }
+}
+
+function renderCatalogState() {
+  renderViewsWorkspaceState();
+  if (renderWorkspaceLoadState(elements.catalogState)) return;
   if (state.layoutError && !state.layoutConflict) {
     const panel = errorPanel(state.layoutError, { retryLabel: "Retry layout save", onRetry: saveLayout });
     const reload = element("button", { className: "ui-button compact", type: "button", text: isDesignWorkspace() ? "Reload saved design and layout" : "Reload live catalog and server layout" });
@@ -3065,18 +3103,16 @@ function selectView(view, { historyMode = "push" } = {}) {
 }
 
 function renderViews() {
-  const desired = state.catalog?.source === "design";
+  renderViewsWorkspaceState();
   const view = currentCatalogView();
-  elements.viewsSourceLabel.textContent = desired ? "Desired schema" : "Live PostgreSQL";
-  elements.createViewButton.hidden = !desired;
-  renderViewsList(elements.viewsList, {
+  if (state.catalog) renderViewsList(elements.viewsList, {
     catalog: state.catalog,
     query: elements.viewsSearch.value,
     filter: state.viewFilter,
     selectedName: view?.name || null,
     onSelect: selectView,
   });
-  renderSelectedViewDetail();
+  if (state.catalog) renderSelectedViewDetail();
   updateDesignControls();
 }
 

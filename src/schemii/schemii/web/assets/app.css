@@ -328,6 +328,12 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .inspector-table-savebar .ui-button { min-height: 32px; }
 
 .views-workspace { --accent: var(--purple); display: grid; min-width: 0; grid-template-columns: 250px minmax(0, 1fr); gap: 10px; padding: 58px 12px 12px 68px; background-color: #0b0f15; background-image: linear-gradient(rgba(91, 106, 124, .05) 1px, transparent 1px), linear-gradient(90deg, rgba(91, 106, 124, .05) 1px, transparent 1px); background-size: 24px 24px; }
+.views-content { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 10px; }
+.views-content > .view-detail { flex: 1; }
+.views-state { flex: 0 1 auto; min-height: 0; max-height: 45%; overflow: auto; overflow-wrap: anywhere; }
+.views-state:empty { display: none; }
+.views-state > .state-card { max-width: 100%; }
+.views-content[data-catalog-loaded="false"] > .views-state { max-height: 100%; }
 .views-sidebar, .view-detail { min-width: 0; min-height: 0; overflow: hidden; border: 1px solid #303847; border-radius: 8px; background: #11151c; box-shadow: 0 14px 36px rgba(0, 0, 0, .25); }
 .views-sidebar { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); }
 .views-sidebar > header { display: flex; min-height: 54px; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 11px; border-bottom: 1px solid var(--line); background: #151a22; }

@@ -216,6 +216,106 @@ test("detached workspace survives navigation and keeps its table/view surfaces a
   expect(new URL(page.url()).searchParams.get("view")).toBe(viewName);
 });
 
+test("Views exposes an initial snapshot failure and Retry restores the URL-selected view", async ({ page, request }, testInfo) => {
+  const suffix = randomUUID().slice(0, 8);
+  const workspaceName = `E2E Views load ${testInfo.project.name} ${suffix}`;
+  const viewName = `startup_totals_${suffix.replaceAll("-", "")}`;
+  workspaceNameToCleanup = workspaceName;
+  const workspaceId = await createDetachedWorkspace(page, workspaceName);
+  await seedDesign(request, workspaceId, designFixture(`startup_orders_${suffix.replaceAll("-", "")}`, viewName));
+
+  let pauseSnapshot;
+  const paused = new Promise(resolve => { pauseSnapshot = resolve; });
+  await page.route(new RegExp(`${API_ROOT}/${workspaceId}/design/snapshot$`), route => {
+    pauseSnapshot(route);
+  }, { times: 1 });
+  const navigation = new URLSearchParams({ workspace: workspaceId, layer: "views", view: viewName, viewKind: "view" });
+  await page.goto(`/?${navigation}`);
+  const route = await paused;
+  const status = page.locator("#views-state");
+  await expect(status).toBeVisible();
+  await expect(status).toContainText("Loading saved design");
+  await expect(page.locator("#workspace-title")).toHaveText(workspaceName);
+  await expect(page.locator("#views-source-label")).toHaveText("Desired schema");
+  await expect(page.locator("#runtime-status")).toHaveText("Loading saved design");
+  await expect(page.locator("#views-list")).not.toContainText("No workspace loaded");
+  await expect(page.locator("#create-view-button")).toBeDisabled();
+  await expect(page.locator("#create-view-tool")).toBeDisabled();
+  await expect(page.locator("#create-table-button")).toBeDisabled();
+  await route.fulfill({ status: 503, json: { error: {
+    code: "snapshot_unavailable", message: "Controlled saved design load failure", requestId: "e2e-views-startup-failure",
+  } } });
+  await expect(status).toContainText("Controlled saved design load failure");
+  await expect(page.locator("#runtime-status")).toHaveText("Saved design load failed");
+  await expect(page.locator("#runtime-dot")).toHaveClass(/error/);
+  await status.getByText("Error details", { exact: true }).click();
+  await expect(status.getByText("e2e-views-startup-failure", { exact: true })).toBeVisible();
+  await expect(status.getByText("snapshot_unavailable", { exact: true })).toBeVisible();
+  await expect(page.locator("#create-view-button")).toBeDisabled();
+  await expect(page.locator("#create-view-tool")).toBeDisabled();
+
+  await status.getByRole("button", { name: "Retry saved design", exact: true }).click();
+  await expect(status).toBeEmpty();
+  const selected = page.locator(".view-list-button").filter({ hasText: viewName });
+  await expect(selected).toBeVisible();
+  await expect(selected).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#view-detail .query-story h2")).toHaveText(viewName);
+  await expect(page.locator("#view-detail .query-sql-panel")).toBeVisible();
+  await expect(page.locator("#runtime-status")).toHaveText(/Ready/);
+  await expect(page.locator("#create-view-button")).toBeEnabled();
+  expect(new URL(page.url()).searchParams.get("workspace")).toBe(workspaceId);
+  expect(new URL(page.url()).searchParams.get("layer")).toBe("views");
+  expect(new URL(page.url()).searchParams.get("view")).toBe(viewName);
+});
+
+test("Views keeps the mounted selection through a failed refresh and successful Retry", async ({ page, request }, testInfo) => {
+  const suffix = randomUUID().slice(0, 8);
+  const workspaceName = `E2E Views refresh ${testInfo.project.name} ${suffix}`;
+  const viewName = `refresh_totals_${suffix.replaceAll("-", "")}`;
+  workspaceNameToCleanup = workspaceName;
+  const workspaceId = await createDetachedWorkspace(page, workspaceName);
+  await seedDesign(request, workspaceId, designFixture(`refresh_orders_${suffix.replaceAll("-", "")}`, viewName));
+  const navigation = new URLSearchParams({ workspace: workspaceId, layer: "views", view: viewName, viewKind: "view" });
+  await page.goto(`/?${navigation}`);
+  const detail = page.locator("#view-detail");
+  await expect(detail.locator(".query-story h2")).toHaveText(viewName);
+  await expect(detail.locator(".query-sql-panel")).toBeVisible();
+  await expect(page.locator("#refresh-views-button")).toBeEnabled();
+  await page.evaluate(() => {
+    window.__schemiiRetainedViewButton = document.querySelector(".view-list-button.active");
+    window.__schemiiRetainedViewSql = document.querySelector("#view-detail .query-sql-panel");
+  });
+
+  let pauseSnapshot;
+  const paused = new Promise(resolve => { pauseSnapshot = resolve; });
+  await page.route(new RegExp(`${API_ROOT}/${workspaceId}/design/snapshot$`), route => {
+    pauseSnapshot(route);
+  }, { times: 1 });
+  await page.locator("#refresh-views-button").click();
+  const route = await paused;
+  const status = page.locator("#views-state");
+  await expect(status).toContainText("Loading saved design");
+  await expect(detail.locator(".query-story h2")).toHaveText(viewName);
+  await route.fulfill({ status: 503, json: { error: {
+    code: "snapshot_unavailable", message: "Controlled saved design refresh failure", requestId: "e2e-views-refresh-failure",
+  } } });
+  await expect(status).toContainText("Controlled saved design refresh failure");
+  await expect(status).toContainText("Showing the saved design from the last successful load.");
+  await expect(page.locator("#runtime-status")).toHaveText("Saved design refresh failed");
+  await expect(detail.locator(".query-story h2")).toHaveText(viewName);
+  await expect(detail.locator(".query-sql-panel")).toBeVisible();
+  expect(await page.evaluate(() => (
+    window.__schemiiRetainedViewButton === document.querySelector(".view-list-button.active")
+      && window.__schemiiRetainedViewSql === document.querySelector("#view-detail .query-sql-panel")
+  ))).toBe(true);
+  await status.getByRole("button", { name: "Retry saved design", exact: true }).click();
+  await expect(status).toBeEmpty();
+  await expect(detail.locator(".query-story h2")).toHaveText(viewName);
+  await expect(detail.locator(".query-sql-panel")).toBeVisible();
+  await expect(page.locator(".view-list-button.active")).toContainText(viewName);
+  expect(new URL(page.url()).searchParams.get("view")).toBe(viewName);
+});
+
 test("redo restores a removed view as one fully assembled analyzed surface", async ({ page, request }, testInfo) => {
   const suffix = randomUUID().slice(0, 8);
   const workspaceName = `E2E history ${testInfo.project.name} ${suffix}`;

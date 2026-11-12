@@ -224,9 +224,10 @@
             </div>
             <div class="views-list" id="views-list"></div>
           </aside>
-          <article class="view-detail" id="view-detail">
-            <div class="empty-panel ui-state surface"><span class="ui-state__mark" aria-hidden="true">VIEW</span><strong>No view selected</strong><p>Open a workspace, then select an ordinary or materialized view from its live catalog.</p></div>
-          </article>
+          <div class="views-content" id="views-content" data-catalog-loaded="false">
+            <div class="views-state" id="views-state" role="status" aria-live="polite"></div>
+            <article class="view-detail" id="view-detail" hidden></article>
+          </div>
         </section>
 
         <section class="sql-workspace layer-panel" id="sql-workspace" data-layer-panel="sql" data-change-scope="sql" aria-label="SQL workspace" hidden>
