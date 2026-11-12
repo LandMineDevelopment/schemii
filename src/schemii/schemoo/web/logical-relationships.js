@@ -7,23 +7,61 @@ export function comparableTypes(left, right) {
   return equality.has(left) && equality.has(right) && (left===right || (numeric.has(left)&&numeric.has(right)) || (["text","character varying"].includes(left)&&["text","character varying"].includes(right)));
 }
 
-/** Resolve an edge's join columns without treating model relationships as database FKs. */
+/** Physical identity is a tuple; dots remain literal identifier characters. */
+export function sourceIdentity(source, catalog, side = null) {
+  return JSON.stringify([source?.[side ? `${side}Namespace` : "namespace"] || catalog.namespace || "public",
+    source?.[side ? `${side}Table` : "table"] ?? source?.name ?? ""]);
+}
+export const sameSource = (left, right, catalog) => sourceIdentity(left, catalog) === sourceIdentity(right, catalog);
+export function catalogTable(source, catalog) {
+  return catalog.tables.find(table => sameSource(table, source, catalog));
+}
+export function sourceLabel(source, catalog) {
+  const [namespace, name] = JSON.parse(sourceIdentity(source, catalog));
+  return namespace === (catalog.namespace || "public") ? name : `${namespace}.${name}`;
+}
+export function sourceNodeId(source, catalog) {
+  const [namespace, name] = JSON.parse(sourceIdentity(source, catalog));
+  return namespace === (catalog.namespace || "public") ? name : JSON.stringify([namespace, name]);
+}
+export function relationshipColumns(relationship) {
+  return relationship?.columns ?? (relationship?.sourceColumn && relationship?.targetColumn
+    ? [{source: relationship.sourceColumn, target: relationship.targetColumn}] : []);
+}
+export const mappingLabel = (relationship, side) => relationshipColumns(relationship).map(pair => pair[side]).join(" + ");
+
+/** Legacy IDs resolve only inside the saved default schema; never first-match. */
 export function edgeRelationship(edge, catalog) {
-  return edge.kind === "logical" ? edge : catalog.relationships.find(relation => relation.id === edge.relationshipId);
+  if (edge.kind === "logical") return edge;
+  const exact = catalog.relationships.filter(relation => relation.id === edge.relationshipId);
+  if (exact.length) return exact.length === 1 ? exact[0] : undefined;
+  const matches = catalog.relationships.filter(relation => relation.legacyId === edge.relationshipId
+    && (relation.sourceNamespace || catalog.namespace || "public") === (catalog.namespace || "public")
+    && (relation.targetNamespace || catalog.namespace || "public") === (catalog.namespace || "public"));
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export function validateLogicalRelationship(edge, draft, catalog) {
+  const pairs = relationshipColumns(edge);
+  if (!Array.isArray(pairs) || !pairs.length || pairs.length > 32 || pairs.some(pair => !pair || !pair.source || !pair.target))
+    return "Choose one to 32 complete ordered source/target column pairs.";
+  if ((edge.sourceColumn || edge.targetColumn) && edge.columns
+    && JSON.stringify(pairs) !== JSON.stringify([{source:edge.sourceColumn,target:edge.targetColumn}]))
+    return "Relationship columns conflict with the legacy column pair.";
+  if (["source", "target"].some(side => new Set(pairs.map(pair => pair[side])).size !== pairs.length))
+    return "Relationship mappings require distinct source and target columns.";
   for (const side of ["source", "target"]) {
     const node = draft.nodes.find(node => node.id === edge[side] && !node.derivation);
-    if (!node || !catalog.tables.find(table => table.name === node.table)?.columns.some(column => column.name === edge[`${side}Column`])) {
+    if (!node || pairs.some(pair => !catalogTable(node, catalog)?.columns.some(column => column.name === pair[side])))
       return `Choose an available ${side} object and column.`;
-    }
   }
+  const signature = (value, reverse = false) => JSON.stringify(relationshipColumns(value).map(pair => [pair[reverse ? "target" : "source"], pair[reverse ? "source" : "target"]]).sort());
   if (draft.edges.some(other => other.id !== edge.id && other.kind === "logical" && (
-    (other.source === edge.source && other.target === edge.target && other.sourceColumn === edge.sourceColumn && other.targetColumn === edge.targetColumn) ||
-    (other.source === edge.target && other.target === edge.source && other.sourceColumn === edge.targetColumn && other.targetColumn === edge.sourceColumn)
+    (other.source === edge.source && other.target === edge.target && signature(other) === signature(edge)) ||
+    (other.source === edge.target && other.target === edge.source && signature(other, true) === signature(edge))
   ))) return "This logical relationship already exists. Edit the existing connection.";
-  const columnType = side => {const node=draft.nodes.find(node=>node.id===edge[side]);return catalog.tables.find(table=>table.name===node.table).columns.find(column=>column.name===edge[`${side}Column`]).dataType;};
-  if(!comparableTypes(columnType("source"),columnType("target")))return "Connection columns must have comparable types without casts.";
+  const columnType = (side, column) => catalogTable(draft.nodes.find(node=>node.id===edge[side]),catalog).columns.find(value=>value.name===column).dataType;
+  if (pairs.some(pair => !comparableTypes(columnType("source", pair.source),columnType("target", pair.target))))
+    return "Connection columns must have comparable types without casts.";
   return "";
 }

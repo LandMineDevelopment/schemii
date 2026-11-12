@@ -15,7 +15,7 @@ from functools import cached_property
 import math
 import re
 from uuid import UUID
-from .domain import domain_table
+from .domain import domain_source, source_identity, relationship_columns, resolve_relationship
 from . import derived
 
 
@@ -129,13 +129,18 @@ class _Model:
     def __init__(self, catalog, request):
         if not isinstance(request, dict):
             raise ValueError("Query request must be an object.")
-        self.tables = {table["name"]: {column["name"] for column in table["columns"]} for table in catalog["tables"]}
-        self.column_details = {table["name"]: {column["name"]: column for column in table["columns"]} for table in catalog["tables"]}
-        self.table_details = {table["name"]: table for table in catalog["tables"]}
-        self.nodes = {}
-        for node in _list(request.get("nodes", [{"id": name, "table": name} for name in self.tables]), "Nodes", 100):
+        self.tables = {source_identity(catalog, table): {column["name"] for column in table["columns"]} for table in catalog["tables"]}
+        self.column_details = {source_identity(catalog, table): {column["name"]: column for column in table["columns"]} for table in catalog["tables"]}
+        self.table_details = {source_identity(catalog, table): table for table in catalog["tables"]}
+        self.nodes, self.keys = {}, {}
+        default_nodes = [{"id": name if namespace == catalog.get("namespace", "public") else str((namespace, name)),
+                          "table": name, "namespace": namespace} for namespace, name in self.tables]
+        for node in _list(request.get("nodes", default_nodes), "Nodes", 100):
             key = _id(node.get("id"), "Node ID")
-            if key in self.nodes or not isinstance(node.get("table"), str) or node["table"] not in self.tables:
+            if node.get("namespace") is not None and (not isinstance(node["namespace"], str) or not 1 <= len(node["namespace"]) <= 63):
+                raise ValueError("Source namespaces must be nonempty identifiers of at most 63 characters.")
+            if (key in self.nodes or not isinstance(node.get("table"), str)
+                    or source_identity(catalog, node) not in self.tables):
                 raise ValueError("Model nodes need unique IDs and known physical tables.")
             # Older browser drafts did not persist alias labels. Their stable
             # node ID is the only unambiguous fallback; current drafts carry
@@ -143,7 +148,10 @@ class _Model:
             label = node.get("label", key)
             if not isinstance(label, str) or not label.strip() or len(label.strip()) > 100:
                 raise ValueError("Model object labels must be nonempty text of at most 100 characters.")
+            if node.get("namespace") is not None and (not isinstance(node["namespace"], str) or not 1 <= len(node["namespace"]) <= 63):
+                raise ValueError("Source namespaces must be nonempty identifiers of at most 63 characters.")
             self.nodes[key] = {**node, "label": label.strip()}
+            self.keys[key] = source_identity(catalog, node)
         derived.configure(self)
         catalog_edges = {edge["id"]: edge for edge in catalog.get("relationships", [])}
         if "edges" in request:
@@ -166,24 +174,35 @@ class _Model:
             if logical:
                 if relationship:
                     raise ValueError("Logical relationships cannot reference a foreign key.")
-                edge = dict(item)
+                edge = {**item, "columns": relationship_columns(item)}
                 for side in ("source", "target"):
                     node = item.get(side)
-                    self.validate({"table": node, "column": item.get(f"{side}Column")})
+                    for pair in edge["columns"]:
+                        self.validate({"table": node, "column": pair[side]})
                     edge[f"{side}Table"] = self.nodes[node]["table"]
-                validate_join_types(*(self.column_details[edge[f"{side}Table"]][edge[f"{side}Column"]].get("dataType", "")
-                                      for side in ("source", "target")))
+                    edge[f"{side}Namespace"] = self.keys[node][0]
+                for pair in edge["columns"]:
+                    validate_join_types(*(self.column_details[self.keys[item[side]]][pair[side]].get("dataType", "")
+                                          for side in ("source", "target")))
             else:
-                if item.get("kind", "foreign_key") != "foreign_key" or not isinstance(relationship, str) or relationship not in catalog_edges:
-                    raise ValueError("Edges need a known foreign key or a logical column relationship.")
-                edge = {**catalog_edges[relationship], **item}
+                live = resolve_relationship(catalog, relationship, self.nodes, item)
+                if item.get("kind", "foreign_key") != "foreign_key" or not isinstance(relationship, str) or live is None:
+                    raise ValueError("Edges need a known foreign key with matching qualified source and target tables.")
+                if any(item.get(name) is not None for name in ("columns", "sourceColumn", "targetColumn")):
+                    raise ValueError("Foreign-key relationships cannot override catalog-owned column mappings.")
+                edge = {**item, **live, "id": key, "source": item["source"], "target": item["target"], "enabled": item.get("enabled", True), "columns": relationship_columns(live)}
                 for side in ("source", "target"):
-                    node = item.get(side)
-                    if not isinstance(node, str) or node not in self.nodes or self.nodes[node]["table"] != catalog_edges[relationship][f"{side}Table"]:
-                        raise ValueError("Relationship aliases must match the foreign key's source and target tables.")
-                    self.validate({"table": node, "column": catalog_edges[relationship][f"{side}Column"]})
-                    # Physical FK columns are always owned by the live catalog.
-                    edge[f"{side}Column"] = catalog_edges[relationship][f"{side}Column"]
+                    for pair in edge["columns"]:
+                        self.validate({"table": item[side], "column": pair[side]})
+            if logical:
+                signature = sorted((pair["source"], pair["target"]) for pair in edge["columns"])
+                for other in self.edges.values():
+                    if other.get("kind") != "logical":
+                        continue
+                    reverse = other["source"] == edge["target"] and other["target"] == edge["source"]
+                    if ((other["source"], other["target"]) == (edge["source"], edge["target"]) or reverse) and signature == sorted(
+                            (pair["target"], pair["source"]) if reverse else (pair["source"], pair["target"]) for pair in other["columns"]):
+                        raise ValueError("This logical relationship already exists; edit its ordered mapping.")
             if type(item.get("enabled", True)) is not bool:
                 raise ValueError("Relationship enabled must be a boolean.")
             self.edges[key] = edge
@@ -207,14 +226,14 @@ class _Model:
             if item.get("valueSource") == "today":
                 raise ValueError("Choose either Today or a comparison column, not both.")
             compare = item["compareColumn"]
-            if self.nodes[node].get("derivation") or compare not in self.tables[self.nodes[node]["table"]]:
+            if self.nodes[node].get("derivation") or compare not in self.tables[self.keys[node]]:
                 raise ValueError(f"Unknown physical comparison column on this source: {node}.{compare}.")
-            details = self.column_details[self.nodes[node]["table"]]
+            details = self.column_details[self.keys[node]]
             left_type, right_type = (details[name].get("dataType", "") for name in (column, compare))
             if not comparable_types(left_type, right_type):
                 raise ValueError(f"Comparison columns must have comparable types without casts ({left_type or 'unknown'} and {right_type or 'unknown'}).")
         if item.get("operator") == "range_contains_date":
-            details = self.column_details[self.nodes[node]["table"]].get(column, {})
+            details = self.column_details[self.keys[node]].get(column, {})
             if node in self.derived or details.get("dataType", "").lower() != "daterange":
                 raise ValueError("Contains date requires a PostgreSQL daterange source column.")
         return node
@@ -337,7 +356,7 @@ def validate_definition(catalog: dict, definition: dict) -> dict:
             for item in [*inputs, *alternative.get("conditions", [])]:
                 domain = item.get("domain")
                 if domain:
-                    columns = model.tables.get(domain_table(domain, model.nodes.values()), set())
+                    columns = model.tables.get(source_identity(catalog, domain_source(domain, model.nodes.values())), set())
                     if domain.get("column") not in columns or domain.get("labelColumn") and domain["labelColumn"] not in columns:
                         raise ModelValidationError("The domain references an unknown source column or display label.", scopeId=scope["id"], alternativeId=alternative["id"])
     return {"cycleEdges": cycles}
@@ -611,7 +630,7 @@ def _resolve_scope_participation(
             if domain is not None:
                 if not isinstance(domain, dict) or not isinstance(domain.get("table"), str) or not isinstance(domain.get("column"), str):
                     raise ValueError("Choose a domain value column in the parameter setup.")
-                domain_columns = validated.model.tables.get(domain_table(domain, validated.model.nodes.values()), set())
+                domain_columns = validated.model.tables.get(source_identity(validated.catalog, domain_source(domain, validated.model.nodes.values())), set())
                 label_column = domain.get("labelColumn", "")
                 if not isinstance(label_column, str) or domain["column"] not in domain_columns or (label_column and label_column not in domain_columns):
                     raise ValueError("The parameter domain references an unknown source column or display label.")
@@ -863,8 +882,8 @@ class _PreviewCompiler:
     def relation(self, node: str) -> str:
         if node in self.model.derived:
             return self.compile_aggregate_relation(node)
-        namespace = self.validated.catalog.get("namespace", "public")
-        physical = f"{_identifier(namespace)}.{_identifier(self.model.nodes[node]['table'])}"
+        namespace, table = self.model.keys[node]
+        physical = f"{_identifier(namespace)}.{_identifier(table)}"
         clauses = self.plan.source_filters.get(node, [])
         return "(SELECT * FROM " + physical + " WHERE " + " AND ".join(
             self.compile_predicate(item, None) for item in clauses
@@ -881,14 +900,15 @@ class _PreviewCompiler:
                 visited.add(node)
                 edge = self.model.edges[key]
                 if not edge.get("derived") and (node == edge["source"] or edge.get("kind") == "logical"):
-                    column = edge["sourceColumn"] if node == edge["source"] else edge["targetColumn"]
-                    if not any(set(unique) <= {column} for unique in derived.unique_keys(self.model, node)):
+                    side = "source" if node == edge["source"] else "target"
+                    columns = [pair[side] for pair in relationship_columns(edge)]
+                    if not any(set(unique) <= set(columns) for unique in derived.unique_keys(self.model, node)):
                         relationships.append({
                             "id": key,
                             "fromNode": previous,
                             "toNode": node,
-                            "source": {"node": edge["source"], "label": self.model.nodes[edge["source"]]["label"], "column": edge["sourceColumn"]},
-                            "target": {"node": edge["target"], "label": self.model.nodes[edge["target"]]["label"], "column": edge["targetColumn"]},
+                            "source": {"node": edge["source"], "label": self.model.nodes[edge["source"]]["label"], "column": ", ".join(pair["source"] for pair in relationship_columns(edge)), "columns": [pair["source"] for pair in relationship_columns(edge)]},
+                            "target": {"node": edge["target"], "label": self.model.nodes[edge["target"]]["label"], "column": ", ".join(pair["target"] for pair in relationship_columns(edge)), "columns": [pair["target"] for pair in relationship_columns(edge)]},
                             "path": [{"node": item, "label": self.model.nodes[item]["label"]} for item in [*path_nodes, node]],
                         })
                 queue.append((node, [*path_nodes, node]))
@@ -981,7 +1001,7 @@ class _PreviewCompiler:
                 ]
                 for mapping in mappings:
                     column, target_column = mapping["source"], mapping["target"]
-                    details = self.model.column_details[self.model.nodes[previous]["table"]][target_column]
+                    details = self.model.column_details[self.model.keys[previous]][target_column]
                     # Ordinary equality permits PostgreSQL hash/merge joins for
                     # nonnullable owner keys. Nullable groups need NULL matching.
                     operator = "=" if connection or details.get("nullable") is False else "IS NOT DISTINCT FROM"
@@ -993,8 +1013,8 @@ class _PreviewCompiler:
                 continue
             result.append(
                 f"{join_kind} JOIN {self.relation(node)} AS {names[node]} ON "
-                f"{names[edge['source']]}.{_identifier(edge['sourceColumn'])} = "
-                f"{names[edge['target']]}.{_identifier(edge['targetColumn'])}"
+                + " AND ".join(f"{names[edge['source']]}.{_identifier(pair['source'])} = "
+                               f"{names[edge['target']]}.{_identifier(pair['target'])}" for pair in relationship_columns(edge))
             )
             if join_kind == "LEFT" and (previous == edge["target"] or edge.get("kind") == "logical"):
                 warnings.append(f"Joining {previous} to {node} can repeat {previous} rows and multiply totals.")
@@ -1038,10 +1058,9 @@ class _PreviewCompiler:
                     continue
                 previous, edge_id = self.plan.parents[node]
                 edge = self.model.edges[edge_id]
-                equality = (
-                    f"{names[edge['source']]}.{_identifier(edge['sourceColumn'])} = "
-                    f"{names[edge['target']]}.{_identifier(edge['targetColumn'])}"
-                )
+                equality = " AND ".join(
+                    f"{names[edge['source']]}.{_identifier(pair['source'])} = "
+                    f"{names[edge['target']]}.{_identifier(pair['target'])}" for pair in relationship_columns(edge))
                 source = f"{self.relation(node)} AS {names[node]}"
                 if previous in local_nodes:
                     body.append(f"INNER JOIN {source} ON {equality}")

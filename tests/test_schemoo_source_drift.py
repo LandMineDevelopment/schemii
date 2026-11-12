@@ -78,7 +78,7 @@ def test_scoped_contract_retains_hidden_keys_foreign_keys_alias_filters_and_doma
     rules["scopes"] = [{"id": "filter", "alternatives": [{"conditions": [{"table": "role", "column": "unused", "compareColumn": "parent_id"}],
         "inputs": [{"domain": {"table": "lookup", "column": "code", "labelColumn": "label"}}]}]}]
     selected, relationships = source_dependencies(source, rules)
-    assert selected == {"parent": {"id"}, "child": {"id", "parent_id", "unused"}, "lookup": {"code", "label"}}
+    assert selected == {("public", "parent"): {"id"}, ("public", "child"): {"id", "parent_id", "unused"}, ("public", "lookup"): {"code", "label"}}
     assert relationships == {"fk"}
     contract = catalog_contract(source, rules)
     assert contract["scope"] == "model" and len(contract["tables"]) == 3
@@ -102,8 +102,8 @@ def test_scoped_derived_dependencies_include_operands_groups_connections_conditi
         "outputs": [{"id": "total", "nodeId": "child", "column": "unused", "operand": "id", "conditions": [{"table": "child", "column": "id", "compareColumn": "parent_id"},
             {"table": "child", "column": "unused", "domain": {"nodeId": "child", "column": "unused", "labelColumn": "parent_id"}}]}]}})
     selected, _ = source_dependencies(source, rules)
-    assert selected["child"] == {"id", "parent_id", "unused"}
-    assert "total" not in selected["child"]
+    assert selected[("public", "child")] == {"id", "parent_id", "unused"}
+    assert "total" not in selected[("public", "child")]
 
 
 def test_scoped_hidden_key_and_logical_join_drift_block_but_unselected_columns_do_not():
@@ -127,13 +127,43 @@ def test_incomplete_domain_drafts_do_not_invent_source_dependencies():
     rules["scopes"] = [{"id": "picker", "alternatives": [{"conditions": [
         {"table": "child", "column": "id", "domain": {"table": "", "column": "", "labelColumn": ""}}],
         "inputs": [{"domain": {"table": "", "column": "", "labelColumn": ""}}]}]}]
-    assert source_dependencies(source, rules) == ({"parent": {"id"}, "child": {"id"}}, set())
+    assert source_dependencies(source, rules) == ({("public", "parent"): {"id"}, ("public", "child"): {"id"}}, set())
     domain = rules["scopes"][0]["alternatives"][0]["inputs"][0]["domain"]
     domain.update(table="child", column="parent_id")
-    assert source_dependencies(source, rules)[0]["child"] == {"id", "parent_id"}
+    assert source_dependencies(source, rules)[0][("public", "child")] == {"id", "parent_id"}
     domain.update(column="missing")
     with pytest.raises(ValueError, match="child.missing is unavailable"):
         source_dependencies(source, rules)
     domain.update(table="inaccessible", column="")
     with pytest.raises(ValueError, match="Source inaccessible is unavailable"):
         source_dependencies(source, rules)
+
+
+def test_qualified_composite_dependencies_and_acknowledgement_never_cross_namespaces():
+    from schemii.schemoo.catalog import model_source_contract, source_dependencies
+    source = {"namespace": "one", "tables": [
+        {"namespace": namespace, "name": "same", "primaryKey": ["tenant", "id"], "columns": [
+            {"name": name, "dataType": "integer", "nullable": False} for name in ["tenant", "id", "value", "unselected"]]}
+        for namespace in ["one", "two", "unselected"]],
+        "relationships": [{"id": "fk", "name": "mapping", "sourceNamespace": "one", "sourceTable": "same", "targetNamespace": "two", "targetTable": "same",
+            "columns": [{"source": "tenant", "target": "tenant"}, {"source": "id", "target": "id"}]}]}
+    rules = {"root": "left", "nodes": [{"id": "left", "table": "same"}, {"id": "right", "namespace": "two", "table": "same"}],
+        "edges": [{"id": "role", "relationshipId": "fk", "source": "left", "target": "right"}], "scopes": [],
+        "exposedFields": [{"table": "left", "column": "value"}]}
+    selected, relationships = source_dependencies(source, rules)
+    assert selected == {("one", "same"): {"value", "tenant", "id"}, ("two", "same"): {"tenant", "id"}}
+    assert relationships == {"fk"}
+    rules["sourceContract"] = catalog_contract(source, rules)
+    current = deepcopy(source)
+    current["tables"][2]["columns"][0]["dataType"] = "text"
+    current["tables"][0]["columns"][3]["dataType"] = "text"
+    assert source_drift(current, rules) == []
+    current["tables"][1]["columns"][1]["dataType"] = "bigint"
+    issues = source_drift(current, rules)
+    assert [(issue["namespace"], issue["table"], issue["column"]) for issue in issues] == [("two", "same", "id")]
+    forged = deepcopy(rules)
+    forged["sourceContract"]["tables"][0]["columns"][1]["dataType"] = "bigint"
+    preserved = model_source_contract(current, forged, rules)
+    assert preserved["tables"][1]["columns"][1]["dataType"] == "integer"
+    current["relationships"][0]["columns"][1]["target"] = "value"
+    assert any(issue["kind"] == "changed_relationship" for issue in source_drift(current, rules))

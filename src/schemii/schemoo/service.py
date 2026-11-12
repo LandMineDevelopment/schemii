@@ -7,7 +7,7 @@ from .catalog import source_issues, model_source_contract
 from .models import ModelDefinition, ModelUpdate, ExploreState
 from .store import ModelConflictError
 from .prototype import analyze_model, compile_preview, validate_definition
-from .domain import domain_table
+from .domain import domain_source, source_identity, physical_table, relationship_columns, definition_namespaces
 
 
 def document(value):
@@ -24,8 +24,13 @@ def load_model(services, owner, model_id, expected_revision=None):
     return model
 
 
-def model_catalog(services, owner, model, *, fresh=False):
-    catalog = services.model_catalogs.get(services, owner, model.connection_id, model.namespace, fresh=fresh)
+def model_catalog(services, owner, model, *, fresh=False, definition=None):
+    try:
+        namespaces = definition_namespaces(model.namespace, document(definition or model.definition))
+    except ValueError as error:
+        raise ApiProblem(422, "model_source_limit", str(error)) from error
+    options = {"namespaces": namespaces} if namespaces != [model.namespace] else {}
+    catalog = services.model_catalogs.get(services, owner, model.connection_id, model.namespace, fresh=fresh, **options)
     if catalog["database"] != model.database:
         raise ApiProblem(409, "model_source_changed", "The model's connection now targets a different database.")
     return catalog
@@ -58,16 +63,16 @@ def patch_model_definition(services, owner, model_id, body):
         definition[label] = list(items.values())
     if body.root is not None:
         definition["root"] = body.root
-    catalog = model_catalog(services, owner, current)
+    catalog = model_catalog(services, owner, current, fresh=True, definition=ModelDefinition.model_validate(definition))
     exposed = definition.get("exposedFields")
     if exposed is None and body.hide:
         # Unrestricted exposure becomes an explicit list only when something is
         # hidden. Merely exposing an already available field stays unrestricted.
-        tables = {table["name"]: table["columns"] for table in catalog["tables"]}
+        tables = {source_identity(catalog, table): table["columns"] for table in catalog["tables"]}
         exposed = [{"table": node["id"], "column": column}
                    for node in definition["nodes"]
                    for column in ([output["id"] for output in node["derivation"]["outputs"]]
-                                  if node.get("derivation") else [c["name"] for c in tables.get(node["table"], [])])]
+                                  if node.get("derivation") else [c["name"] for c in tables.get(source_identity(catalog, node), [])])]
     if exposed is not None:
         hidden = {(field.table, field.column) for field in body.hide}
         selected = {(field["table"], field["column"]): field for field in exposed}
@@ -156,7 +161,7 @@ def domain_query(catalog, model, body):
     domain = parameter.get("domain")
     if domain:
         try:
-            table = domain_table(domain, definition["nodes"])
+            source = domain_source(domain, definition["nodes"])
         except ValueError as error:
             raise ApiProblem(422, "parameter_unbound", str(error)) from error
         column = domain["column"]
@@ -166,22 +171,29 @@ def domain_query(catalog, model, body):
         node = next((n for n in definition["nodes"] if n["id"] == (condition or {}).get("table")), None)
         if not node or not condition.get("column"):
             raise ApiProblem(422, "parameter_unbound", "Bind this parameter to a source column before browsing values.")
-        table, column = node["table"], condition["column"]
-        fk = next((r for r in catalog["relationships"] if (r["sourceTable"], r["sourceColumn"]) == (table, column)), None)
-        if parameter["type"] != "source" and fk:
-            table, column = fk["targetTable"], fk["targetColumn"]
-        columns = next((t["columns"] for t in catalog["tables"] if t["name"] == table), [])
+        source, column = node, condition["column"]
+        # A scalar picker cannot infer a composite key or choose between parallel
+        # FKs. Require an explicit domain for either ambiguous situation.
+        matches = [r for r in catalog["relationships"] if source_identity(catalog, r, "source") == source_identity(catalog, source)
+                   and any(pair["source"] == column for pair in relationship_columns(r))]
+        if parameter["type"] != "source" and matches:
+            if len(matches) != 1 or len(relationship_columns(matches[0])) != 1:
+                raise ApiProblem(422, "parameter_domain_ambiguous", "Choose an explicit domain for a composite or ambiguous relationship.")
+            fk = matches[0]
+            source = {"namespace": source_identity(catalog, fk, "target")[0], "table": fk["targetTable"]}
+            column = relationship_columns(fk)[0]["target"]
+        columns = (physical_table(catalog, source) or {}).get("columns", [])
         label = "name" if parameter["type"] != "source" and any(c["name"] == "name" for c in columns) else column
-    return domain_values_plan(catalog, table, column, label, body.search)
+    return domain_values_plan(catalog, source.get("table", ""), column, label, body.search, namespace=source.get("namespace"))
 
 
-def domain_values_plan(catalog, table, column, label, search=""):
+def domain_values_plan(catalog, table, column, label, search="", *, namespace=None):
     """Shared bounded lookup compiler for authoring and saved report inputs."""
     if not table or not column:
         raise ApiProblem(422, "parameter_unbound", "Choose a domain value column in the model parameter setup before browsing values.")
     fields = [{"table": table, "column": c} for c in dict.fromkeys([column, label])]
     fields.append({"table": table, "column": column, "aggregate": "count"})
-    rules = ModelDefinition(root=table, nodes=[{"id": table, "table": table, "label": table}])
+    rules = ModelDefinition(root=table, nodes=[{"id": table, "table": table, "label": table[:100], **({"namespace": namespace} if namespace is not None else {})}])
     plan = plan_query(catalog, rules, ExploreState(root=table, fields=fields))
     if search:
         # Lookup text matches either the displayed label or the stored value.

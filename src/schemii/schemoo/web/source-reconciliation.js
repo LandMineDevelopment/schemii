@@ -1,29 +1,30 @@
+import { sourceIdentity, sourceNodeId, sameSource, relationshipColumns } from "./logical-relationships.js";
 import { catalogContract, importedDraft, MODEL_LIMITS } from "./model-draft.js";
 
-const relationshipFields = ["id","name","sourceTable","sourceColumn","targetTable","targetColumn"];
+const relationshipFields = ["id","name","sourceTable","sourceColumn","targetTable","targetColumn","sourceNamespace","targetNamespace","columns"];
 const edgeKey = (relationshipId, source, target) => JSON.stringify([relationshipId,source,target]);
 
 /** Offer available sources without growing a saved model or its assumptions. */
 export function reconcileSourceCatalog(draft,catalog) {
   const result={tables:[],columns:[],relationships:[],initialized:false};
-  const modeled=new Set(draft.nodes.filter(node=>!node.derivation).map(node=>node.table));
+  const modeled=new Set(draft.nodes.filter(node=>!node.derivation).map(node=>sourceIdentity(node,catalog)));
   const baseline=draft.sourceContract;
-  const priorTables=new Map((baseline?.tables || []).map(table=>[table.name,new Set(table.columns.map(column=>column.name))]));
+  const priorTables=new Map((baseline?.tables || []).map(table=>[sourceIdentity(table,catalog),new Set(table.columns.map(column=>column.name))]));
   const priorRelationships=new Set((draft.edges || []).map(edge=>edge.relationshipId));
   for(const table of catalog.tables || []) {
-    if(!modeled.has(table.name)) result.tables.push(table.name);
-    else for(const column of table.columns) if(!priorTables.get(table.name)?.has(column.name)) result.columns.push(`${table.name}.${column.name}`);
+    if(!modeled.has(sourceIdentity(table,catalog))) result.tables.push(table.name);
+    else for(const column of table.columns) if(!priorTables.get(sourceIdentity(table,catalog))?.has(column.name)) result.columns.push(`${table.name}.${column.name}`);
   }
-  for(const relationship of catalog.relationships || []) if(modeled.has(relationship.sourceTable)&&modeled.has(relationship.targetTable)&&!priorRelationships.has(relationship.id)) result.relationships.push(relationship.id);
+  for(const relationship of catalog.relationships || []) if(modeled.has(sourceIdentity(relationship,catalog,"source"))&&modeled.has(sourceIdentity(relationship,catalog,"target"))&&!priorRelationships.has(relationship.id)) result.relationships.push(relationship.id);
   // Missing legacy baselines are migrated on the server when saved. Never
   // initialize them from the entire catalog, which may exceed model limits.
   if(!baseline) {draft.sourceContract={scope:"model",tables:[],relationships:[]};result.initialized=true;}
   // Physical columns come from the live catalog. Discard obsolete output choices,
   // including alias choices, but preserve predicates and calculations for repair.
-  const liveColumns=new Map((catalog.tables || []).map(table=>[table.name,new Set(table.columns.map(column=>column.name))]));
+  const liveColumns=new Map((catalog.tables || []).map(table=>[sourceIdentity(table,catalog),new Set(table.columns.map(column=>column.name))]));
   const nodes=new Map(draft.nodes.map(node=>[node.id,node]));
   const available=field=>{
-    const node=nodes.get(field.table),columns=liveColumns.get(node?.table);
+    const node=nodes.get(field.table),columns=liveColumns.get(sourceIdentity(node,catalog));
     return !node || node.derivation || !columns || columns.has(field.column);
   };
   if(Array.isArray(draft.exposedFields))draft.exposedFields=draft.exposedFields.filter(available);
@@ -34,21 +35,21 @@ export function reconcileSourceCatalog(draft,catalog) {
 /** Add only explicitly chosen sources/fields; preserve existing roles and rules. */
 export function addSourceSelection(draft,catalog,selection) {
   const imported=importedDraft(catalog,selection),next=structuredClone(draft);
-  const selectedTables=new Set(imported.nodes.map(node=>node.table));
+  const selectedTables=new Set(imported.nodes.map(node=>sourceIdentity(node,catalog)));
   const canonical=new Map();
-  for(const node of next.nodes.filter(node=>!node.derivation)) if(!canonical.has(node.table)||node.id===node.table)canonical.set(node.table,node.id);
+  for(const node of next.nodes.filter(node=>!node.derivation)) if(!canonical.has(sourceIdentity(node,catalog))||node.id===sourceNodeId(node,catalog))canonical.set(sourceIdentity(node,catalog),node.id);
   const ids=new Set(next.nodes.map(node=>node.id));
   for(const node of imported.nodes) {
-    if(canonical.has(node.table))continue;
+    if(canonical.has(sourceIdentity(node,catalog)))continue;
     let id=node.id;for(let suffix=2;ids.has(id);suffix++)id=`${node.id}_${suffix}`;
-    next.nodes.push({...node,id});canonical.set(node.table,id);ids.add(id);
+    next.nodes.push({...node,id});canonical.set(sourceIdentity(node,catalog),id);ids.add(id);
   }
   // Legacy unrestricted models stay unrestricted; explicit models add fields
   // only to the chosen physical occurrence, never every alias.
   if(Array.isArray(next.exposedFields)) {
     const fields=new Set(next.exposedFields.map(field=>JSON.stringify([field.table,field.column])));
     for(const field of imported.exposedFields) {
-      const table=canonical.get(field.table),key=JSON.stringify([table,field.column]);
+      const table=canonical.get(sourceIdentity(imported.nodes.find(node=>node.id===field.table),catalog)),key=JSON.stringify([table,field.column]);
       if(!fields.has(key)) {next.exposedFields.push({...field,table});fields.add(key);}
     }
   }
@@ -56,8 +57,8 @@ export function addSourceSelection(draft,catalog,selection) {
   for(const relationship of catalog.relationships || []) {
     // An explicit field/source addition can offer connections to its selected
     // sources; it must not import unrelated newly discovered relationships.
-    if(!selectedTables.has(relationship.sourceTable)&&!selectedTables.has(relationship.targetTable))continue;
-    const source=canonical.get(relationship.sourceTable),target=canonical.get(relationship.targetTable);
+    if(!selectedTables.has(sourceIdentity(relationship,catalog,"source"))&&!selectedTables.has(sourceIdentity(relationship,catalog,"target")))continue;
+    const source=canonical.get(sourceIdentity(relationship,catalog,"source")),target=canonical.get(sourceIdentity(relationship,catalog,"target"));
     if(!source||!target||tuples.has(edgeKey(relationship.id,source,target)))continue;
     let id=`source_fk_${relationship.id}`,suffix=2;while(edgeIds.has(id))id=`source_fk_${relationship.id}_${suffix++}`;
     next.edges.push({id,relationshipId:relationship.id,source,target,enabled:false});edgeIds.add(id);tuples.add(edgeKey(relationship.id,source,target));
@@ -70,8 +71,8 @@ export function addSourceSelection(draft,catalog,selection) {
 export function acceptSourceIssue(draft,catalog,issue) {
   if(!draft.sourceContract || !issue?.acknowledge)return false;
   if(["changed_primary_key","changed_unique_key","changed_column","removed_column"].includes(issue.kind)) {
-    const current=catalogContract(catalog,"model").tables.find(table=>table.name===issue.table);
-    const index=draft.sourceContract.tables.findIndex(table=>table.name===issue.table);
+    const current=catalogContract(catalog,"model").tables.find(table=>sameSource(table,issue,catalog));
+    const index=draft.sourceContract.tables.findIndex(table=>sameSource(table,issue,catalog));
     if(!current||index<0)return false;
     const saved=draft.sourceContract.tables[index];
     if(issue.kind==="changed_primary_key")saved.primaryKey=[...current.primaryKey];
@@ -93,7 +94,7 @@ export function acceptSourceIssue(draft,catalog,issue) {
     const current=catalogContract(catalog).relationships.find(relationship=>relationship.id===issue.relationshipId);
     const index=draft.sourceContract.relationships.findIndex(relationship=>relationship.id===issue.relationshipId);
     if(!current||index<0)return false;
-    draft.sourceContract.relationships[index]=Object.fromEntries(relationshipFields.map(key=>[key,current[key]||""]));
+    draft.sourceContract.relationships[index]=Object.fromEntries(relationshipFields.filter(key=>key in current).map(key=>[key,structuredClone(current[key])]));
     for(const edge of draft.edges || []) if(edge.relationshipId===issue.relationshipId)edge.enabled=false;
     return true;
   }

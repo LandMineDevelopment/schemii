@@ -1,3 +1,4 @@
+import { catalogTable, sourceIdentity, sameSource, sourceLabel, relationshipColumns, mappingLabel } from "./logical-relationships.js";
 import { columnComparisonIssue } from "./column-comparisons.js";
 import { element } from "#common/dom.js";
 import { createIconButton } from "/assets/common/ui.js";
@@ -23,7 +24,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
   const definition = structuredClone(existing?.derivation || initial?.derivation || { kind: "row", source, groupBy: [], outputs: [] });
   let target = definition.connection?.target || owner?.id || source;
   if (definition.kind === "aggregate" && !definition.connection) definition.connection = {target, columns: definition.groupBy.map(column => ({source:column,target:column}))};
-  const columns = id => catalog.tables.find(t => t.name === physical.find(n => n.id === id)?.table)?.columns || [];
+  const columns = id => catalogTable(physical.find(n => n.id === id), catalog)?.columns || [];
   const dialog = element("dialog", { className: "mf-dialog derived-dialog", attrs: { "aria-label": existing ? "Edit calculated source" : "Add calculated source" } });
   const body = element("div", { className: "derived-body" });
   const error = element("p", { attrs: { role: "alert" }, className: "mf-dialog-error" });
@@ -151,7 +152,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
     // owner-rooted summary. A new source or mapping explicitly opts it in.
     if(existing?.derivation.kind === "aggregate" && !existing.derivation.connection && source===existing.derivation.source && target===source &&
       JSON.stringify(definition.groupBy)===JSON.stringify(existing.derivation.groupBy) && definition.connection?.columns.every(pair=>pair.source===pair.target)) delete savedDefinition.connection;
-    const node = { ...(existing || { id:uid("derived"), x:(parent.x || 0)+340, y:parent.y || 0 }), table:physical.find(n=>n.id===source).table, label:name.value.trim(), derivation:savedDefinition };
+    const node = { ...(existing || { id:uid("derived"), x:(parent.x || 0)+340, y:parent.y || 0 }), table:physical.find(n=>n.id===source).table, namespace:physical.find(n=>n.id===source).namespace, label:name.value.trim(), derivation:savedDefinition };
     onApply(node); dialog.close();
   }); apply.classList.add("primary");
   dialog.append(element("header", { className: "mf-dialog-header" }, [element("div",{},[element("small",{text:"VIRTUAL MODEL SOURCE"}),element("h2",{text:existing ? "Edit calculated source" : "Add calculated source"})]),button("Cancel",()=>dialog.close())]),body,element("footer",{className:"mf-dialog-footer"},[element("div",{},[error,note("Applies to your draft. Save model to keep it between sessions.")]),apply]));

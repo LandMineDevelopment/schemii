@@ -1,3 +1,4 @@
+import { mappingLabel, relationshipColumns, sourceLabel, sameSource } from "./logical-relationships.js";
 import { edgeRelationship, comparableTypes, validateLogicalRelationship } from "./logical-relationships.js";
 import { GraphViewport } from "#common/graph-viewport.js";
 import { isAlias } from "./alias-model.js";
@@ -146,14 +147,14 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
       const self = source.id === target.id;
       const right = self || b.x >= a.x;
       const x1 = a.x + (right ? WIDTH : 0), x2 = b.x + (right && !self ? 0 : WIDTH);
-      const y1 = a.y + port(source, relation.sourceColumn), y2 = b.y + port(target, relation.targetColumn);
+      const y1 = a.y + port(source, relationshipColumns(relation)[0]?.source), y2 = b.y + port(target, relationshipColumns(relation)[0]?.target);
       const bend = Math.max(65, Math.abs(x2 - x1) * 0.45);
       const d = self
         ? `M ${x1} ${y1} C ${x1 + 115} ${y1 - 65}, ${x2 + 115} ${y2 + 65}, ${x2} ${y2}`
         : `M ${x1} ${y1} C ${x1 + (right ? bend : -bend)} ${y1}, ${x2 + (right ? -bend : bend)} ${y2}, ${x2} ${y2}`;
       const cycle = edge.enabled && cycleEdges.has(edge.id), sourceChanged=sourceIssueEdges.has(edge.id);
       const state = !edge.enabled ? "disabled" : cycle ? "cycle" : usedEdges.has(edge.id) ? "current preview path" : "enabled · not in current preview";
-      const label = `${source.label || source.table}.${relation.sourceColumn} to ${target.label || target.table}.${relation.targetColumn}${edge.kind === "logical" ? " · logical relationship" : ""} · ${state}`;
+      const label = `${source.label || source.table}.${mappingLabel(relation,"source")} to ${target.label || target.table}.${mappingLabel(relation,"target")}${edge.kind === "logical" ? " · logical relationship" : ""} · ${state}`;
       const group = svgNode("g", { class: `sc-edge${!edge.enabled ? " sc-disabled" : ""}${cycle ? " sc-cycle" : ""}${sourceChanged ? " sc-source-changed" : ""}${usedEdges.has(edge.id) ? " sc-used" : ""}${selectedEdge === edge.id ? " sc-selected" : ""}`, tabindex: "0", role: "button", "aria-label": label, "data-edge-id": edge.id });
       const title = svgNode("title"); title.textContent = label;
       group.append(title, svgNode("path", { d, class: "sc-edge-hit" }), svgNode("path", { d, class: "sc-edge-line" }));
@@ -181,7 +182,7 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
         if(issue.nodeId)sourceIssueNodes.add(issue.nodeId);
         for(const id of issue.nodeIds || [])sourceIssueNodes.add(id);
         for(const id of issue.edgeIds || [])sourceIssueEdges.add(id);
-        if(issue.table)for(const node of getDraft().nodes)if(node.table===issue.table)sourceIssueNodes.add(node.id);
+        if(issue.table)for(const node of getDraft().nodes)if(sameSource(node,issue,catalog))sourceIssueNodes.add(node.id);
       }
     }
     // Redrawing cards detaches node drag handles, but the host stays mounted.
@@ -202,7 +203,7 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
       card.setAttribute("aria-label", `${node.label || node.table} model source`);
       const header = el("button", "sc-node-header"); header.type = "button";
       header.title = "Select source to inspect. Drag to move; arrow keys move the source.";
-      header.append(el("strong", "sc-node-name", node.label || node.table), el("small", "sc-node-detail", `${node.table}${node.id === draft.root ? " · ROOT" : ""}`));
+      header.append(el("strong", "sc-node-name", node.label || node.table), el("small", "sc-node-detail", `${sourceLabel(node,catalog)}${node.id === draft.root ? " · ROOT" : ""}`));
       if(isAlias(node)) header.append(el("span","sc-alias-badge","ALIAS"));
       if(sourceIssueNodes.has(node.id))header.append(el("span","sc-source-badge","SOURCE CHANGED"));
       if(node.derivation) {

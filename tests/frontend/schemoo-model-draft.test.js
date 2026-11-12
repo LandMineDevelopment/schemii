@@ -85,3 +85,14 @@ test("adding selected fields does not import relationships between unrelated mod
   assert.deepEqual(draft.sourceContract, contract);
   assert.equal(draft.exposedFields.length, 4);
 });
+
+test("qualified source selection preserves duplicate names and every composite dependency",()=>{
+  const catalog={namespace:"one",tables:["one","two"].map(namespace=>({namespace,name:"same.name",primaryKey:["tenant","id"],columns:[column("tenant"),column("id"),column("value")]})),relationships:[{id:"fk",sourceNamespace:"one",sourceTable:"same.name",targetNamespace:"two",targetTable:"same.name",columns:[{source:"tenant",target:"tenant"},{source:"id",target:"id"}]}]};
+  const draft=importedDraft(catalog,[{namespace:"one",table:"same.name",columns:["value"]},{namespace:"two",table:"same.name",columns:[]}]);
+  assert.deepEqual(draft.nodes.map(node=>[node.id,node.namespace,node.table]),[["same.name","one","same.name"],['["two","same.name"]',"two","same.name"]]);
+  assert.equal(draft.edges[0].target,'["two","same.name"]');
+  assert.deepEqual(draft.sourceContract.tables.map(table=>table.columns.map(column=>column.name)),[["tenant","id","value"],["tenant","id"]]);
+  const before=structuredClone(draft);reconcileSourceCatalog(draft,catalog);assert.deepEqual(draft,before);
+  addSourceSelection(draft,catalog,[{namespace:"two",table:"same.name",columns:["value"]}]);
+  assert.equal(draft.nodes.length,2);assert.deepEqual(draft.exposedFields.map(field=>field.table),["same.name",'["two","same.name"]']);
+});

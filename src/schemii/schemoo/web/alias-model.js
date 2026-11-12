@@ -1,6 +1,7 @@
+import { sourceIdentity } from "./logical-relationships.js";
 // Aliases are model occurrences, never new physical tables or copied database objects.
 export function isAlias(node) {
-  return Boolean(node && !node.derivation && node.id !== node.table);
+  return Boolean(node && !node.derivation && node.id !== node.table && node.id !== JSON.stringify([node.namespace,node.table]));
 }
 
 export function suggestedAliasLabel(nodes, source, maximumLength = 100) {
@@ -27,20 +28,20 @@ function stableHash(value) {
 
 export function ensureAliasConnections(draft, catalog) {
   const nodes = draft.nodes || [];
-  const canonical = new Map(nodes.filter(node => !node.derivation && !isAlias(node)).map(node => [node.table, node.id]));
+  const canonical = new Map(nodes.filter(node => !node.derivation && !isAlias(node)).map(node => [sourceIdentity(node,catalog), node.id]));
   const edges = draft.edges ||= [];
   const tuples = new Set(edges.map(edge => edgeKey(edge.relationshipId, edge.source, edge.target)));
   const ids = new Set(edges.map(edge => edge.id));
   let added = 0;
   for (const alias of nodes.filter(isAlias)) {
     for (const relationship of catalog.relationships || []) {
-      const outgoing = relationship.sourceTable === alias.table;
-      const incoming = relationship.targetTable === alias.table;
+      const outgoing = sourceIdentity(relationship,catalog,"source") === sourceIdentity(alias,catalog);
+      const incoming = sourceIdentity(relationship,catalog,"target") === sourceIdentity(alias,catalog);
       if (!outgoing && !incoming) continue;
       // A physical self-FK remains a self-FK on each occurrence, not a guessed
       // cross-role connection. The author can redirect its endpoints explicitly.
-      const source = outgoing ? alias.id : canonical.get(relationship.sourceTable);
-      const target = incoming ? alias.id : canonical.get(relationship.targetTable);
+      const source = outgoing ? alias.id : canonical.get(sourceIdentity(relationship,catalog,"source"));
+      const target = incoming ? alias.id : canonical.get(sourceIdentity(relationship,catalog,"target"));
       if (!source || !target) continue;
       const tuple = edgeKey(relationship.id, source, target);
       if (tuples.has(tuple)) continue;
@@ -94,7 +95,7 @@ export function removeModelNode(draft, id) {
   draft.fields = (draft.fields || []).filter(field => field.table !== id);
   if (draft.exposedFields) draft.exposedFields=draft.exposedFields.filter(field=>field.table!==id);
   if (impact.isRoot) {
-    draft.root = draft.nodes.find(candidate => candidate.id === node.table && candidate.table === node.table)?.id || draft.nodes[0]?.id || "";
+    draft.root = draft.nodes.find(candidate => candidate.table === node.table && candidate.namespace === node.namespace && !isAlias(candidate))?.id || draft.nodes[0]?.id || "";
   }
   if (draft.defaultRoot===id) draft.defaultRoot=draft.root;
   // Never silently loosen a model restriction. Keep the predicate, parameter,

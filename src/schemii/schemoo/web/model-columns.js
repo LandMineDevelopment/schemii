@@ -1,9 +1,10 @@
+import { catalogTable, sourceIdentity, sameSource, sourceLabel, relationshipColumns, mappingLabel } from "./logical-relationships.js";
 /** Resolve authored outputs separately from physical catalog columns. */
 export function nodeColumns(draft, catalog, node) {
   if (!node) return [];
-  if (!node.derivation) return catalog.tables.find(t => t.name === node.table)?.columns || [];
+  if (!node.derivation) return catalogTable(node, catalog)?.columns || [];
   const owner = draft.nodes.find(n => n.id === node.derivation.source);
-  const physical = id => catalog.tables.find(t => t.name === draft.nodes.find(n => n.id === id)?.table)?.columns || [];
+  const physical = id => catalogTable(draft.nodes.find(n => n.id === id), catalog)?.columns || [];
   const keys = node.derivation.kind === "aggregate" ? (node.derivation.groupBy || []).map(name => physical(owner?.id).find(c => c.name === name)).filter(Boolean) : [];
   return [...keys, ...node.derivation.outputs.map(output => ({
     name: output.id, label: output.label,
