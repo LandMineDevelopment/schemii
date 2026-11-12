@@ -110,15 +110,16 @@ def validate_dashboard(services, owner, body):
     from .dashboard_models import base_measures
     from .measures import MeasureGraph
     for tile in body.tiles:
-        MeasureGraph(tile,catalog,definition)
+        graph=MeasureGraph(tile,catalog,definition)
         for fields in (tile_dimensions(tile) + base_measures(tile), tile.detail_fields):
             if fields:
-                plan_query(catalog, definition, ExploreState(root=definition.root, fields=fields,
+                candidate=plan_query(catalog, definition, ExploreState(root=definition.root, fields=fields,
                     reportFilters=tile.report_filters, limit=tile.limit), model.catalog_fingerprint)
+                graph.validate_grain(candidate)
         validate_time_analysis(tile.model_copy(update={"dimensions": tile_dimensions(tile)}) if tile.kind == "pivot" else tile, catalog, definition)
         validate_report_controls(tile, catalog, definition)
         for field in base_measures(tile):
-            if tile.kind in {"bar", "line", "donut"} and field.aggregate not in {"count", "count_distinct"} and not numeric(field.table, field.column):
+            if field in tile.measures and tile.kind in {"bar", "line", "donut"} and field.aggregate not in {"count", "count_distinct"} and not numeric(field.table, field.column):
                 raise ValueError("Charts require numeric measures")
             if field.aggregate in {"sum", "avg"} and not numeric(field.table, field.column):
                 raise ValueError("SUM and AVG measures require numeric fields")

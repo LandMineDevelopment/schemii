@@ -298,3 +298,16 @@ for (const aggregate of ['avg', 'sum']) {
     assert.equal(draft.tiles[0].measures[0].aggregate, 'none');
   });
 }
+
+test('upgrade retains calculation identities and hidden dependencies for explicit repair',()=>{
+  const {dashboard,model,catalog,tile}=data();
+  tile.hiddenMeasures=[{table:'people',column:'removed',aggregate:'sum'}];
+  tile.calculations=[{id:'ratio',label:'Ratio',operation:'divide',left:{output:field('id','count'),scope:'group'},right:{output:tile.hiddenMeasures[0],scope:'source_population'},visible:true}];
+  tile.kpiComparison=null;
+  const before=structuredClone(dashboard),draft=modelUpgradeDraft(dashboard,model);
+  assert.deepEqual(draft.tiles[0].calculations,tile.calculations);
+  const issues=modelUpgradeIssues(draft,model,catalog);
+  assert.ok(issues.some(issue=>/Hidden measure input.*removed/.test(issue.message)));
+  assert.equal(draft.tiles[0].calculations[0].right.output.column,'removed');
+  assert.deepEqual(dashboard,before);
+});

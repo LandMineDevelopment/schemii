@@ -1,7 +1,7 @@
 
 export const calculationRef = item => ({table:'@report',column:item.id,aggregate:'none',kind:'calculated'});
 export const outputKey = item => JSON.stringify([item.table,item.column,item.aggregate || 'none',item.kind || 'value']);
-export const visibleMeasures = tile => [...tile.measures,...(tile.calculations || []).filter(item=>item.visible).map(item=>({...calculationRef(item),label:item.label}))];
+export const visibleMeasures = tile => [...tile.measures,...(tile.calculations || []).filter(item=>item.visible!==false).map(item=>({...calculationRef(item),label:item.label}))];
 const numeric = /^(smallint|integer|bigint|numeric|decimal|real|double precision|int[248]|float[48])(?:\b|\()/i;
 const scopes=[['group','This group / cell'],['source_population','Source-filtered report population · before result filters'],['qualifying_groups','Qualifying groups · after independent result filters, before Top N']];
 export function calculationErrors(tile,outputs) {
@@ -32,6 +32,11 @@ export function calculationErrors(tile,outputs) {
   }
   for(const id of items.keys()) visit(id);
   for(const filter of tile.aggregateFilters || []) if(filter.kind==='calculated' && done.get(filter.column)?.has('qualifying_groups')) errors.push(`${items.get(filter.column)?.label}: this filter would define its own denominator. Use an independent filter or source population.`);
+  const used=new Set((tile.calculations || []).flatMap(item=>[item.left,item.right]).filter(operand=>operand?.output).map(operand=>outputKey(operand.output)));
+  for(const output of [...(tile.sort || []),...(tile.aggregateFilters || [])]) used.add(outputKey(output));
+  if(tile.kpiComparison?.baseline?.output) used.add(outputKey(tile.kpiComparison.baseline.output));
+  for(const field of tile.hiddenMeasures || []) if(![...used].some(key=>JSON.stringify(JSON.parse(key).slice(0,3))===JSON.stringify([field.table,field.column,field.aggregate || 'none']))) errors.push(`Hidden input ${field.column} is unused. Bind it or explicitly remove it.`);
+  for(const item of tile.calculations || []) if(item.visible===false&&!used.has(outputKey(calculationRef(item)))) errors.push(`Hidden calculation ${item.label} is unused. Display it, bind it, or explicitly remove it.`);
   return [...new Set(errors)];
 }
 export function measureEditor(tile,{outputs,onChange,element,modelSelect}) {
@@ -40,11 +45,13 @@ export function measureEditor(tile,{outputs,onChange,element,modelSelect}) {
   const labeled=(text,control)=>element('label',{className:'stack'},[text,control]);
   const input=(label,value,change)=>{const control=element('input',{attrs:{'aria-label':label,maxlength:200}});control.value=value ?? '';control.oninput=()=>change(control.value);return control;};
   const button=(text,fn)=>{const control=element('button',{type:'button',className:'ui-button',text});control.onclick=fn;return control;};
-  const numericOutputs=outputs.filter(output=>output.kind==='calculated' || numeric.test(output.dataType || '') && output.aggregate!=='none');
+  const baseKeys=new Set([...tile.measures,...tile.hiddenMeasures].map(field=>JSON.stringify([field.table,field.column,field.aggregate || "none"])));
+  const numericOutputs=outputs.filter(output=>output.kind==='calculated' || numeric.test(output.dataType || '') && baseKeys.has(JSON.stringify([output.table,output.column,output.aggregate || "none"])));
   function operandControl(item,key,label) {
     item[key] ||= {constant:'0',scope:'group'};const operand=item[key];
-    const choices=[['constant','Numeric constant'],...numericOutputs.filter(output=>output.column!==item.id || output.table!=='@report').map(output=>[outputKey(output),output.label])];
+    const choices=[['constant','Numeric constant'],...numericOutputs.filter(output=>output.kind!=='calculated' || output.column!==item.id).map(output=>[outputKey(output),output.label])];
     const selected=operand.constant != null?'constant':outputKey(operand.output || {});
+    if(!choices.some(([value])=>value===selected)) choices.unshift([selected,'Unavailable input · choose a replacement']);
     const block=element('div',{className:'measure-operand'},[labeled(label,modelSelect(`${item.label || 'Calculation'} ${label}`,choices,selected,value=>{
       if(value==='constant') item[key]={constant:'0',scope:'group'};
       else {const output=numericOutputs.find(output=>outputKey(output)===value);item[key]={output:{table:output.table,column:output.column,aggregate:output.aggregate,kind:output.kind},scope:'group'};}
@@ -63,6 +70,7 @@ export function measureEditor(tile,{outputs,onChange,element,modelSelect}) {
       button(`Remove calculation ${index+1}`,()=>{tile.calculations.splice(index,1);onChange();}),
     ]));
   });
+  for(const message of calculationErrors(tile,outputs)) host.append(element('p',{className:'error-message',attrs:{role:'alert'},text:message}));
   host.append(button('Add calculated measure',()=>{tile.calculations.push({id:crypto.randomUUID(),label:'',operation:'divide',left:{constant:'0',scope:'group'},right:{constant:'1',scope:'group'},visible:true});onChange();}));
   if(tile.kind==='kpi') {
     const enabled=element('input',{attrs:{type:'checkbox','aria-label':'Compare KPI to target or baseline'}});enabled.checked=!!tile.kpiComparison;
@@ -82,9 +90,11 @@ export function chooseConstituent(metadata,onSelect,element) {
   const dialog=element('dialog',{className:'ui-dialog',attrs:{'aria-label':'Choose calculation contributing records'}});
   const close=()=>{dialog.close();dialog.remove();};
   dialog.append(element('h2',{text:`Records for ${metadata.label}`}),element('p',{text:'A composite calculation has separate input populations. Choose the constituent to inspect; its raw rows are not a detail set for the combined ratio or variance.'}));
+  if(!metadata.constituents.length) dialog.append(element('p',{text:'This calculation uses constants and has no raw contributing records.'}));
   for(const operand of metadata.constituents) {
     const output=operand.output;
     const button=element('button',{type:'button',className:'ui-button',text:`${output.aggregate.toUpperCase()} · ${output.table}.${output.column} · ${scopes.find(([id])=>id===operand.scope)?.[1] || operand.scope}`});
+    if(output.kind && output.kind!=="value") {button.disabled=true;button.textContent+=" · combines periods; inspect base period values";}
     button.onclick=()=>{close();onSelect(operand);};dialog.append(button);
   }
   const cancel=element('button',{type:'button',className:'ui-button',text:'Cancel'});cancel.onclick=close;dialog.append(cancel);document.body.append(dialog);dialog.showModal();

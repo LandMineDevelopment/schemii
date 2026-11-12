@@ -32,6 +32,7 @@ export function tileErrors(tile, model, catalog) {
   if (tile.kind !== 'detail' && !count) errors.push('Choose at least one measure.');
   if (['bar', 'line', 'donut'].includes(tile.kind) && !tile.dimensions.length) errors.push('Choose at least one dimension for this chart.');
   if (['kpi', 'donut'].includes(tile.kind) && count !== 1) errors.push('Choose one measure for this view.');
+  if(tile.kind==='kpi' && ((tile.calculations || []).length || tile.kpiComparison) && [...tile.measures,...(tile.hiddenMeasures || [])].some(field=>(field.aggregate || "none")==="none")) errors.push("KPI calculations need explicit aggregations to produce a single complete value.");
   if (tile.kind === 'kpi' && tile.dimensions.length) errors.push('A KPI has no grouping dimensions.');
   if (tile.kind !== 'detail' && !tile.detailFields.length) errors.push('Choose the columns to show when drilling into this tile.');
   if (tileDimensions(tile).length + tile.measures.length > 64 || tile.detailFields.length > 64) errors.push('Choose no more than 64 output columns.');
@@ -98,7 +99,7 @@ export function reportOutputs(tile, model, catalog) {
     return { table: field.table, column: field.column, aggregate: field.aggregate || 'none', kind, label, dataType };
   };
   const outputs = fields.map(field => make(field));
-  if (tile.timeAnalysis) for (const field of tile.measures) {
+  if (tile.timeAnalysis) for (const field of [...tile.measures,...(tile.hiddenMeasures || [])]) {
     if ((tile.timeAnalysis.comparison || 'none') !== 'none') for (const kind of ['comparison', 'change', 'percent_change']) outputs.push(make(field, kind));
     if (tile.timeAnalysis.runningTotal) outputs.push(make(field, 'running_total'));
   }

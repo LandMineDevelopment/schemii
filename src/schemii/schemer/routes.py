@@ -32,6 +32,7 @@ from schemii.schemoo.models import Contract, ScopeSelection
 from schemii.common.api.errors import ApiProblem
 from .dashboard_routes import dashboard_errors
 from .tile_queries import DashboardPlanning, tile_plan
+from .dashboard_models import base_measures
 from .access import prepare_dashboard, owned_report_services
 
 
@@ -116,7 +117,7 @@ async def stream_dashboard(dashboard_id: str, body: DashboardExecutionRequest, r
                 errors.append({"tileId": tile.id, "message": error.message, "code": error.code})
                 continue
             scalar_kpi = (tile.kind == "kpi" and not tile.dimensions
-                          and len(tile.measures) == 1 and tile.measures[0].aggregate != "none")
+                          and all(field.aggregate != "none" for field in base_measures(tile)))
             tiles.append({"tileId": tile.id, "plan": plan, "scalarKpi": scalar_kpi})
         await asyncio.to_thread(planning.check_current)
         return response(services, principal.user_id, model, tiles, errors)
