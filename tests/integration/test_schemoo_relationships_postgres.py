@@ -8,6 +8,7 @@ import uuid
 import psycopg
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict
+from psycopg.rows import dict_row
 from pydantic import SecretStr
 import pytest
 
@@ -102,7 +103,7 @@ def qualified_sources(postgres_metadata):
 
             class ReaderGateway(PsycopgPostgresGateway):
                 def _connect(self, target):
-                    connection = psycopg.connect(dsn, password=password)
+                    connection = psycopg.connect(dsn, password=password, row_factory=dict_row)
                     connection.execute(
                         sql.SQL("SET ROLE {}").format(sql.Identifier(role))
                     )
