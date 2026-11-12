@@ -10,7 +10,7 @@ import { prepareFixtures, cleanupFixtures, prepareOwnedFixtures, heldFixture, fi
 import { executePlan, verifyK6, observation, requireStopped } from './engine.mjs';
 import { loadPath } from './cli.mjs';
 import { disposeRuntime, runtimeSocket, awaitControllerHandoff } from './children.mjs';
-import { openJournal, journalBudget, writeSnapshot } from './journal.mjs';
+import { openJournal, journalBudget, readSnapshot, writeSnapshot } from './journal.mjs';
 import { sampleSource } from './ownership.mjs';
 import { readPrivateJSON, processIdentity } from './runtime.mjs';
 

@@ -42,7 +42,7 @@ journeys disclose their arrival rate and count every actual call separately.
 | ramp | 100, 300, 600, 1,000, 3,000, 6,000, 12,000 | 2m warmup + >=5m hold each | First sustainable/capacity knee |
 | confirm | Selected near-knee stage ×3 | 2m warmup + >=5m hold each | Repeatability, confidence and resource stability |
 | spike | Baseline, 2× selected rate capped at 12,000, 0.1× recovery | 2m, 30s, 1m | Bounded overload and healthy recovery |
-| soak | Selected sustainable rate | 2m warmup + 60m hold | Stable RSS, connections, sessions and jobs |
+| soak | Selected sustainable rate | 2m warmup + explicit 30–60m hold (default 60m) | Stable RSS, connections, sessions and jobs |
 | lifecycle | One owned SQL journey per selected active identity | Actual >=1,800s idle plus recovery | Real retained-session expiry; separate from steady load |
 
 Extend low-volume holds when p99 has too few samples. Report counts rather than
@@ -68,7 +68,8 @@ the retained-account report path remains:
 ```
 
 Repeat plan/prepare with `--recipe confirm --rate KNEE`, `--recipe spike --rate
-KNEE`, or `--recipe soak --rate SUSTAINABLE`. Select workloads explicitly rather
+KNEE`, or `--recipe soak --soak-seconds 1800 --rate SUSTAINABLE`. The bounded soak
+option accepts 1,800–3,600 measured seconds; its default remains 3,600. Select workloads explicitly rather
 than turn an aggregate cheap-read success into query/dashboard user sizing.
 
 ## Workload and identity matrix
@@ -103,8 +104,9 @@ per active user/minute separately from journey arrivals. Exclude paid AI; a loca
 capacity. Preserve snapshot and tile-fairness semantics; do not hide failures with
 retries, skips or explicit cleanup inside a lane that is meant to prove auto expiry.
 The disposable holder's maximum 3,600-second life must include preparation and
-recovery. It cannot contain the full soak recipe, so that dispatch is refused
-until a longer campaign lifecycle is reviewed. The fixture's startup-effective
+recovery. The explicit 1,800-second measured soak plus 120-second warmup can fit
+when sufficient hold time remains; a short remaining lifetime refuses dispatch.
+The default full-hour soak cannot fit this holder and remains refused. The fixture's startup-effective
 configuration receipt also cannot replace the host PID/cgroup observer receipt.
 Collector export/attach certification, tiny qualified smoke and all campaigns
 remain pending. Fixture-only instrumentation overhead is unknown and every report

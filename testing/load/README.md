@@ -126,6 +126,14 @@ managed profiles use one explicit managed owner and are capped at 100 including
 its existing profiles. Variant journeys actually use the selected profile. No limit
 is raised to support the population.
 
+The immutable plan publishes `fixtureTopology` before provisioning. It creates
+only the saved report variants selected by the workload/mix, and models only for
+lanes that use them. SQL-only plans can use 100 private profiles without creating
+unrequested models or dashboards. One report variant can use 100 profiles; a mix
+requiring all three report variants supports at most 33 per owner (99 dashboards).
+An impossible combination is rejected with guidance to reduce profiles or report
+variants. Regenerate plans after a harness upgrade rather than editing their JSON.
+
 The source helper uses the held fixture's separately declared source administrator,
 v2 endpoint/server/fixture proof and same disposable database. It creates one owned
 schema per active identity: 513 ordered IDs with an exact owner nonce, plus optional
@@ -163,6 +171,18 @@ intent stays unknown until complete CSV validation and a later complete source
 cohort release; the missing per-execution ID/acquisition boundary is disclosed and
 does not qualify CSV capacity or exact execution-ID coverage.
 
+Cleanup compares full resource detail with recorded creation state, including
+independent model revisions. Only durable, acknowledged metadata label mutations
+advance that state. It uses the recorded revision for DELETE, with the receiver's
+`expectedRevision` spelling for private/managed profiles, workspaces and dashboards.
+Model cleanup also requires the reviewed optional atomic guards from
+[PR250](https://github.com/LandMineDevelopment/schemii/pull/250): recorded layout and
+explore revisions and absence of saved previews. Qualify only the final reviewed
+image containing both API250 and this caller; older receivers do not supply that
+atomic protection. Drift, unknown updates, saved previews or lost visibility retain
+the changed resource and write an actionable `cleanupState` quarantine in the private
+receipt. They never authorize adopting the latest revision or reporting clean.
+
 The default mix weights are 40% cheap read, 10% catalog, 10% compile, 20% SQL paging,
 10% five-tile report, 5% shared report and 5% metadata label writes. A private
 `--mix-file` may specify unique allowed lanes with positive integer weights totaling
@@ -181,9 +201,12 @@ observation only after a fresh complete same-authority cohort witness proves sou
 release; cleanup history is never pruned. Unobserved work is unknown, never zero.
 
 The holder allows 60–3,600 seconds. Preparation time and recovery consume that
-budget; a dispatch without enough remaining time is refused. The complete
-120-second warmup plus 3,600-second soak cannot fit and remains pending a separately
-reviewed longer campaign lifecycle. No tiny smoke or full campaign has been run
+budget; a dispatch without enough remaining time is refused. Soak plans expose
+`--recipe soak --soak-seconds 1800` for a supported 30-minute measured stage plus
+the unchanged 120-second warmup. The bounded option accepts 1,800–3,600 seconds;
+its 3,600-second default preserves the older one-hour recipe, which cannot fit
+this holder and is refused. No longer holder or manually edited plan is needed
+for a 30-minute candidate. No tiny smoke or full campaign has been run
 for these adapters. The opt-in `SCHEMII_LOAD_ADAPTER_LIVE=1` test consumes an already
 prepared two-identity run (`SCHEMII_LOAD_PREPARED_RUN`); it starts no stack, checks
 exact terminal/recovery and always requests owned cleanup. Real idle execution
@@ -221,7 +244,8 @@ the exact spawned generator/controller process group before reservations release
 
 Run recipes are explicit: `smoke` (6s), `ramp` (each of 100/300/600/1,000/3,000/6,000/
 12,000 calls/min, 2m warmup and 5m measured hold), `confirm` (three near-knee repeats),
-`spike` (bounded 2× burst), and `soak` (2m warmup plus 60m measured hold). Recipes
+`spike` (bounded 2× burst), and `soak` (2m warmup plus explicitly selected 30–60m
+measured hold, default 60m). Recipes
 are immutable within the versioned envelope and stop at the first failed stage.
 Full stress is never a default PR check.
 
