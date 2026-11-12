@@ -76,16 +76,31 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
     reusedDrill = next.started;
     if (next !== detailCache) { releaseDrill(); detailCache = next; unsubscribeDrill = detailCache.subscribe(scheduleDetails); }
     detailSelection = selected;
-    chips.replaceChildren(...selected.dimensions.map(d => element('span', { text: `${d.column}: ${d.value === null ? 'NULL' : d.value}` })));
+    chips.replaceChildren(...(selected.pivot ? [element('span', { text: `Pivot ${selected.pivot.kind.replaceAll('_', ' ')} · complete qualifying scope` })] : []), ...selected.dimensions.map(d => element('span', { text: `${d.column}: ${d.value === null ? 'NULL' : d.value}` })));
     detailPane.hidden = false; pane('details'); renderDetails(); void detailCache.loadMore();
   }
   function footer(host, stream) {
     host.replaceChildren(); if (!stream) return;
     const data = stream.snapshot();
-    host.append(element('span', { className: 'hint', text: `${data.rows.length} cached · ${data.loading ? 'receiving rows' : data.error ? 'interrupted' : data.limitReached ? 'Preview limit reached' : 'end of result'}` }),
-      ...(canExport ? [icon('download', 'Export cached rows as CSV', () => downloadContent(csvContent(data), 'schemer-cached-rows.csv', 'text/csv;charset=utf-8'))] : []));
+    host.append(element('span', { className: 'hint', text: `${data.rows.length} cached · ${data.loading ? 'receiving rows' : data.error ? 'interrupted' : data.limitReached ? 'Preview limit reached' : 'end of result'}` }));
+    if (canExport) {
+      const scope = tile.kind === 'pivot' && stream !== cache ? detailSelection : null;
+      const serialized = scope ? JSON.stringify(scope) : '';
+      const cached = icon('download', tile.kind === 'pivot' && stream === cache ? 'Export cached pivot groups with scope as CSV' : 'Export cached rows as CSV', () => {
+        const scoped = scope ? { ...data, columns: [...data.columns, ...['Pivot scope', 'Row grouping depth', 'Column grouping depth', 'Pivot selection'].map(name => ({ name }))],
+          rows: data.rows.map(row => [...row, scope.pivot.kind, scope.pivot.rowDepth, scope.pivot.columnDepth, serialized]) } : data;
+        downloadContent(csvContent(scoped), 'schemer-cached-rows.csv', 'text/csv;charset=utf-8');
+      });
+      // Preserve exact selection metadata without expanding an otherwise small
+      // cached drill into an unbounded in-memory CSV. Full CSV streams on server.
+      if (serialized.length * data.rows.length > 8 * 1024 * 1024) {
+        cached.disabled = true; cached.title = 'Pivot scope metadata exceeds the cached CSV budget. Use Download full results to stream the exact scope.';
+        host.append(element('small', { className: 'hint', text: cached.title }));
+      }
+      host.append(cached);
+    }
     if (!canExport) return;
-    const download = element('button', { type: 'button', className: 'ui-button', text: 'Download full results', attrs: { title: 'Runs the full query against a fresh snapshot. Results may differ from this preview.' } });
+    const download = element('button', { type: 'button', className: 'ui-button', text: tile.kind === 'pivot' && stream === cache ? 'Download full pivot groups' : 'Download full results', attrs: { title: 'Runs the full query against a fresh snapshot. Results may differ from this preview.' } });
     download.onclick = () => stream.download?.(); download.disabled = !stream.download; host.append(download);
     host.append(element('small', { className: 'export-snapshot-note', text: 'Full download uses a fresh snapshot.' }));
   }

@@ -55,6 +55,12 @@ not a patch. Saved tiles use model field references and compiled report queries.
 There is no raw SQL or source-write tool. A tile's optional filter selections in
 plan_tile, execute_tile or drill_tile apply only to that run; they do not update the
 saved dashboard. Drill requires a separate report grant and one chart-point selection.
+Pivot results are long-form groups with explicit row/column grouping depths; NULL
+values are not totals. Use the returned pivot axes and scope metadata for a cell,
+row, column, subtotal or grand-total drill. Totals cover the complete qualifying
+population before Top N, and may exceed displayed cells. Column-capacity status
+rows are diagnostics, not data. Never sum displayed averages or distinct counts.
+Model summary inputs describe per-owner values, not original raw-child averages.
 get_dashboard returns only exposed filter scope, alternative and input IDs needed
 for parameter_values; never guess internal IDs or browse filters outside that list.
 List dashboards only for navigation; this
@@ -111,9 +117,15 @@ class DrillDimension(Contract):
     column: str = Field(min_length=1, max_length=200)
     value: str | int | float | bool | None
 
+class PivotDrillScope(Contract):
+    kind: Literal["cell", "row", "column", "subtotal", "grand_total"]
+    row_depth: int = Field(strict=True, ge=0, le=4)
+    column_depth: int = Field(strict=True, ge=0, le=3)
+
 class DrillSelection(Contract):
     dimensions: list[DrillDimension] = Field(max_length=64)
-    measure_index: int = Field(ge=0)
+    measure_index: int = Field(strict=True, ge=0)
+    pivot: PivotDrillScope | None = None
 
 class DrillTile(Tile):
     selection: DrillSelection
@@ -253,8 +265,19 @@ def tool_definitions():
              "parameters": provider_schema(ActionBatch.model_json_schema(by_alias=True))}]
 
 
+def _drill_selection_document(selection):
+    # NULL is required dimension data, not an absent optional field. The legacy
+    # compiler rejects an extra pivot key, so omit only that optional metadata.
+    return selection.model_dump(mode="json", by_alias=True,
+        exclude={"pivot"} if selection.pivot is None else set())
+
+
 def validate_action(action):
-    return _ACTION.validate_python(action).model_dump(mode="json", by_alias=True, exclude_none=True)
+    parsed = _ACTION.validate_python(action)
+    document = parsed.model_dump(mode="json", by_alias=True)
+    if parsed.operation == "drill_tile":
+        document["args"]["selection"] = _drill_selection_document(parsed.args.selection)
+    return document
 
 
 def receipt_action(action):
@@ -369,6 +392,8 @@ def _run_tile(bundle, tile_id, selections=None, selection=None):
     dashboard, services, owner = _selected_dashboard(bundle, selections), bundle.services, bundle.owner
     model, plan = tile_plan(services, owner, dashboard, tile_id, selection=selection, fresh=True)
     return {"dashboardId": dashboard.id, "tileId": tile_id,
+            **({"pivot": plan["pivot"], "warnings": plan.get("warnings", [])} if plan.get("pivot") else {}),
+            **({"pivotScope": plan["pivotScope"]} if plan.get("pivotScope") else {}),
             **_sample_plan(bundle, model, plan)}
 
 
@@ -457,7 +482,7 @@ def execute_action(bundle, owner, dashboard_id, action):
         if name == "drill_tile":
             if not current.permissions["drill"]:
                 raise ApiProblem(403, "report_action_forbidden", "This report does not allow detail drill.")
-            selection = args.selection.model_dump(mode="json", by_alias=True)
+            selection = _drill_selection_document(args.selection)
             return _run_tile(current, args.tile_id, selections, selection)
         if name == "execute_tile":
             return _run_tile(current, args.tile_id, selections)

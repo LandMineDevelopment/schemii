@@ -87,6 +87,14 @@ def test_save_checks_exposure_types_and_optional_scope_ownership(monkeypatch):
             {"name": "id", "dataType": "uuid"}, {"name": "secret", "dataType": "text"}]}], "relationships": []})
     tile = {"id": "tile", "title": "People", "kind": "detail", "detailFields": [FIELD]}
     routes.validate_dashboard(services, "alice", create(tiles=[tile]))
+    # Report control validation uses output contracts without asking for runtime
+    # values of required model slicers.
+    aggregate = {"id": "count", "title": "Count", "kind": "aggregate", "measures": [{**FIELD, "aggregate": "count"}],
+                 "sort": [{**FIELD, "aggregate": "count", "direction": "desc"}], "topN": 5,
+                 "aggregateFilters": [{**FIELD, "aggregate": "count", "operator": "gte", "value": 2}]}
+    routes.validate_dashboard(services, "alice", create(tiles=[aggregate]))
+    with pytest.raises(ApiProblem, match="sort output"):
+        routes.validate_dashboard(services, "alice", create(tiles=[{**aggregate, "sort": [{**FIELD, "column": "secret"}]}]))
     routes.validate_dashboard(services, "alice", create(tiles=[tile], optionalFilters=["optional"],
         selections={"optional": {"active": True}}))
     # Saved historical dashboards remain readable, but a new save must explicitly
@@ -396,3 +404,50 @@ def test_dashboard_repairs_and_model_upgrade_are_one_atomic_save(monkeypatch, ch
         assert upgraded["tiles"][0]["detailFields"] == [{**FIELD, "aggregate": "none"}]
         assert client.put(path, json=repaired).json()["error"]["code"] == "dashboard_revision_conflict"
         assert client.get(path).json() == upgraded
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "10", 2147483648])
+def test_topn_requires_a_strict_positive_bounded_integer(value):
+    with pytest.raises(ValidationError):
+        DashboardTile.model_validate({"id": "tile", "title": "People", "kind": "detail", "detailFields": [FIELD], "topN": value})
+
+
+def test_report_controls_roundtrip_independently_of_batch_size_and_reject_bad_predicate_values():
+    body = {"id": "tile", "title": "People", "kind": "aggregate", "measures": [{**FIELD, "aggregate": "count"}],
+            "sort": [{**FIELD, "aggregate": "count", "direction": "desc"}], "topN": 500,
+            "aggregateFilters": [{**FIELD, "aggregate": "count", "operator": "gte", "value": 20}], "limit": 1}
+    tile = DashboardTile.model_validate(body)
+    assert tile.top_n == 500 and tile.limit == 1 and tile.sort[0].nulls == "last"
+    assert DashboardTile.model_validate(tile.model_dump(by_alias=True)) == tile
+    for item in [{"operator": "gt", "value": None}, {"operator": "is_null", "value": 1}, {"operator": "eq", "value": float("nan")}, {"operator": "eq", "value": [1]}]:
+        with pytest.raises(ValidationError):
+            DashboardTile.model_validate({**body, "aggregateFilters": [{**FIELD, "aggregate": "count", **item}]})
+    with pytest.raises(ValidationError, match="unique"):
+        DashboardTile.model_validate({**body, "sort": body["sort"] * 2})
+
+
+@pytest.mark.parametrize("value", [9007199254740993, -9007199254740993, 0.1, -0.125, 1e-8])
+def test_backend_numeric_predicate_json_types_are_not_restricted_by_editor_precision(value):
+    import json
+    from schemii.schemer.dashboard_models import AggregateFilter
+    payload = {**FIELD, "aggregate": "count", "operator": "gte", "value": value}
+    parsed = AggregateFilter.model_validate_json(json.dumps(payload))
+    assert parsed.value == value and type(parsed.value) is type(value)
+    assert json.loads(parsed.model_dump_json(by_alias=True))["value"] == value
+
+
+def test_persisted_pivot_round_trip_keeps_ordered_axes_and_all_total_options():
+    tile = {'id': 'pivot', 'title': 'People pivot', 'kind': 'pivot',
+        'rowDimensions': [{**FIELD, 'column': 'region'}, {**FIELD, 'column': 'team'}],
+        'columnDimensions': [{**FIELD, 'column': 'type'}],
+        'measures': [{**FIELD, 'aggregate': 'count_distinct'}], 'detailFields': [FIELD],
+        'pivotTotals': {'rowSubtotals': False, 'columnSubtotals': True, 'rowTotals': True,
+            'columnTotals': False, 'grandTotal': True, 'maximumColumns': 4, 'maximumRows': 8}}
+    repo = InMemoryDashboardRepository()
+    saved = repo.create('alice', create(tiles=[tile]))
+    wire = saved.model_dump(mode='json', by_alias=True)['tiles'][0]
+    assert [field['column'] for field in wire['rowDimensions']] == ['region', 'team']
+    assert wire['pivotTotals'] == tile['pivotTotals']
+    assert wire['dimensions'] == []
+    wire['rowDimensions'].reverse()
+    assert repo.get('alice', saved.id).tiles[0].row_dimensions[0].column == 'region'

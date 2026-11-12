@@ -64,7 +64,10 @@ def test_year_bucket_drill_uses_the_same_calendar_group(context):
     assert "DATE_TRUNC('YEAR'," in plan['sql']
     assert "AT TIME ZONE 'America/New_York'" in plan['sql']
     assert "CAST(e'2024-01-01' AS DATE)" in plan['sql']
-    assert 'GROUP BY' not in plan['sql']
+    from sqlglot import exp
+    raw = next(node for node in parse_one(plan['sql'], read='postgres').find_all(exp.Subquery) if node.alias == 'contributors')
+    assert raw.this.args.get('group') is None
+    assert 'qualifying_parent' in plan['sql']
 
 
 def test_time_bucket_drill_preserves_zone_and_filters(context):
@@ -75,7 +78,10 @@ def test_time_bucket_drill_preserves_zone_and_filters(context):
     assert "AT TIME ZONE 'America/New_York'" in plan['sql']
     assert "CAST(e'2024-03-10' AS DATE)" in plan['sql']
     assert 'Engineering' in plan['sql']
-    assert 'GROUP BY' not in plan['sql']
+    from sqlglot import exp
+    raw = next(node for node in parse_one(plan['sql'], read='postgres').find_all(exp.Subquery) if node.alias == 'contributors')
+    assert raw.this.args.get('group') is None
+    assert 'qualifying_parent' in plan['sql']
     with pytest.raises(ApiProblem, match='calendar bucket'):
         queries.tile_plan(None, None, dashboard, tile.id, selection={
             'dimensions': [{'table': 'people', 'column': 'created_at', 'value': '2024-03-10T12:00:00Z'},
@@ -115,6 +121,23 @@ def test_timestamp_precision_preserves_timezone_semantics(context, kind, zoned):
     catalog['tables'][0]['columns'][-1]['dataType'] = kind
     _, plan = queries.tile_plan(None, None, dashboard, tile.id)
     assert ("AT TIME ZONE 'America/New_York'" in plan['sql']) is zoned
+
+
+def test_output_predicates_and_topn_wrap_complete_time_windows(context):
+    from schemii.schemer.dashboard_models import ReportSort, AggregateFilter
+    from sqlglot import exp
+    dashboard, tile, _ = timed(context, comparison='previous_period', runningTotal=True)
+    reference = {"table": "people", "column": "id", "aggregate": "count_distinct", "kind": "running_total"}
+    tile.sort = [ReportSort(**reference, direction="desc")]
+    tile.aggregate_filters = [AggregateFilter(**reference, operator="gte", value=10)]
+    tile.top_n = 2
+    _, plan = queries.tile_plan(None, None, dashboard, tile.id)
+    statement = parse_one(plan['sql'], read='postgres')
+    assert statement.args.get('limit') is not None
+    assert '"page_rows"."output_7" >= 10' in plan['sql']
+    windows = list(statement.find_all(exp.Window))
+    assert windows and all(window.find_ancestor(exp.Select).args.get('limit') is None for window in windows)
+    assert '"output_7" DESC NULLS LAST' in plan['sql']
 
 
 def test_calculated_source_types_share_validated_order_independent_model_metadata():

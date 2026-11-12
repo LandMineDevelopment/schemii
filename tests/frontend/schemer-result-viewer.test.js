@@ -36,13 +36,13 @@ class Node {
   submit() { this.submitted = true; }
 }
 function find(root, predicate) { return [root, ...root.children.filter(child => child instanceof Node).flatMap(child => find(child, predicate))].filter(predicate); }
-function fixture({ budget = new cacheModule.CacheBudget(), pending = false, waitForStart = false, timestamp = drillAt, canExport = true } = {}) {
-  const forms = [], requests = [], scheduled = [], gates = [], metadataGates = [], streams = new Map();
+function fixture({ budget = new cacheModule.CacheBudget(), pending = false, waitForStart = false, timestamp = drillAt, canExport = true, kind = 'aggregate', selected } = {}) {
+  const csvs = [], forms = [], requests = [], scheduled = [], gates = [], metadataGates = [], streams = new Map();
   let source = ['original'], dialog;
   const document = { body: new Node('body'), createElement: tag => {
     const node = new Node(tag); if (tag === 'form') forms.push(node); return node;
   } };
-  const tile = { id: 'tile', title: 'Report', kind: 'aggregate', limit: 20 };
+  const tile = { id: 'tile', title: 'Report', kind, limit: 20 };
   const dashboard = { id: 'dashboard', revision: 1, modelId: 'model', selections: {} }, mainGate = deferred();
   const dashboardGroup = new cacheModule.DashboardResultGroup({ start: async emit => {
     emit({ type: 'start', snapshotAt: reportAt, tiles: [{ tileId: tile.id, plan: {} }] });
@@ -53,7 +53,7 @@ function fixture({ budget = new cacheModule.CacheBudget(), pending = false, wait
     createIconButton: ({ label }) => new Node('button', { attrs: { 'aria-label': label } }),
     scrollPosition: () => ({}), restoreScroll() {}, createResultGrid: data => new Node('grid', { data }),
     appendStreamStatus() {}, renderVisualization: (host, _tile, _result, { onDrill }) => { host.onDrill = onDrill; },
-    requestAnimationFrame: callback => scheduled.push(callback), csvContent: () => '', downloadContent() {},
+    requestAnimationFrame: callback => scheduled.push(callback), csvContent: data => { csvs.push(data); return ''; }, downloadContent() {},
   });
   const context = { ...cacheModule, document, streams, dashboard, dashboardGroup, browserBudget: budget, API: '/owned',
     tileStates: new Map(), scheduledCards: new Set(), permissions: { export: canExport, drill: true, edit: false },
@@ -71,11 +71,11 @@ function fixture({ budget = new cacheModule.CacheBudget(), pending = false, wait
   const owner = studioSource.slice(studioSource.indexOf('function getStream('), studioSource.indexOf('\nfunction checkLeave('));
   const expand = studioSource.slice(studioSource.indexOf('function expand('), studioSource.indexOf('\nasync function showTileSql('));
   const handlers = runInNewContext(`${owner}\n${expand}\n({ getStream, expand })`, context);
-  const selection = { dimensions: [{ column: 'group', value: 'HQ' }] }, main = handlers.getStream(tile);
+  const selection = selected || { dimensions: [{ column: 'group', value: 'HQ' }] }, main = handlers.getStream(tile);
   const open = () => { handlers.expand(tile); dialog = document.body.children.at(-1); };
   const nodes = className => find(dialog, node => node.className?.split(/\s+/).includes(className));
   open();
-  return { main, dashboard, dashboardGroup, requests, streams, budget, forms, gates, metadataGates,
+  return { main, dashboard, dashboardGroup, requests, streams, budget, forms, csvs, gates, metadataGates,
     setSource: values => { source = values; }, reopen: open,
     select: () => nodes('expanded-chart-body')[0].onDrill(selection),
     drill: () => handlers.getStream(tile, selection),
@@ -200,5 +200,31 @@ test('freshness: full export discloses a fresh snapshot and uses current revisio
     assert.equal(form.submitted, true); assert.equal(body.expectedRevision, 2); assert.deepEqual(body.selections, f.dashboard.selections);
     assert.equal(body.selection.dimensions[0].value, 'HQ'); assert.equal(f.requests.length, 1);
     assert.equal(earlier.snapshotAt, drillAt); assert.deepEqual(earlier.rows, [['original']]);
+  } finally { await f.finish(); }
+});
+
+test('cached pivot contributor CSV preserves exact grouping selection without mutating cached rows', async () => {
+  const selected = { dimensions: [{ table: 'person', column: 'region', value: null }], measureIndex: 1,
+    pivot: { kind: 'row', rowDepth: 1, columnDepth: 0 } };
+  const f = fixture({ kind: 'pivot', selected });
+  try {
+    await Promise.resolve(); f.select(); const drill = f.drill(); await drill.pending; f.flush();
+    f.button('Export cached rows as CSV').click();
+    assert.deepEqual(Array.from(f.csvs[0].columns.slice(-4), column => column.name), ['Pivot scope', 'Row grouping depth', 'Column grouping depth', 'Pivot selection']);
+    assert.deepEqual(Array.from(f.csvs[0].rows[0].slice(-4)), ['row', 1, 0, JSON.stringify(selected)]);
+    assert.deepEqual(drill.rows, [['original']]);
+    assert.ok(f.button('Export cached pivot groups with scope as CSV'));
+  } finally { await f.finish(); }
+});
+
+test('oversized cached pivot selection metadata offers streaming full CSV without allocating its repeated rows', async () => {
+  const selected = { dimensions: [{ table: 'person', column: 'name', value: 'X'.repeat(1024 * 1024) }], measureIndex: 0,
+    pivot: { kind: 'cell', rowDepth: 1, columnDepth: 1 } };
+  const f = fixture({ kind: 'pivot', selected });
+  try {
+    await Promise.resolve(); f.setSource(Array(10).fill('contributor')); f.select(); await f.drill().pending; f.flush();
+    const cached = f.button('Export cached rows as CSV');
+    assert.equal(cached.disabled, true); assert.match(cached.title, /scope metadata.*budget.*Download full results/);
+    assert.equal(f.csvs.length, 0); assert.ok(f.detailButton('Download full results'));
   } finally { await f.finish(); }
 });

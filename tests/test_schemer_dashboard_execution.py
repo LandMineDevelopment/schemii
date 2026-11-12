@@ -312,7 +312,10 @@ def test_drill_selection_reaches_compiler_and_cannot_inject_fields(dashboard, ac
     plan = result.json() if action == "plan" else json.loads(result.text.splitlines()[0])["tiles"][0]["plan"]
     assert plan["drill"] is True
     assert '"contributors"."field_1" = ' in plan["sql"]
-    assert 'GROUP BY' not in plan["sql"]
+    from sqlglot import exp, parse_one
+    raw = next(node for node in parse_one(plan["sql"], read="postgres").find_all(exp.Subquery) if node.alias == "contributors")
+    assert raw.this.args.get("group") is None
+    assert 'qualifying_parent' in plan["sql"]
     body["selection"]["dimensions"][0]["column"] = "id"
     assert client.post(url + "/" + action, json=body).status_code == 422
     assert client.post(url + "/" + action, json={"expectedRevision": 1, "sql": "SELECT 1"}).status_code == 422
@@ -452,6 +455,30 @@ def test_stream_and_export_revision_checks(dashboard):
     assert not hasattr(console, "target")
 
 
+def test_saved_sort_filter_topn_plan_stream_and_full_export_share_final_sql(dashboard):
+    client, url, console, _ = dashboard
+    path = url.split("/tiles/")[0]
+    current = client.get(path).json()
+    tile = current["tiles"][0]
+    output = {"table": "people", "column": "name", "aggregate": "count_distinct"}
+    tile.update(sort=[{**output, "direction": "desc"}], topN=2,
+                aggregateFilters=[{**output, "operator": "gte", "value": 1}])
+    body = {key: current[key] for key in ["name", "modelId", "modelRevision", "optionalFilters", "selections", "tiles"]}
+    saved = client.put(path, json={**body, "expectedRevision": current["revision"]})
+    assert saved.status_code == 200, saved.text
+    revision = saved.json()["revision"]
+    plan = client.post(url + "/plan", json={"expectedRevision": revision}).json()
+    assert 'DESC NULLS LAST' in plan["sql"] and 'LIMIT 2' in plan["sql"]
+    events = client.post(url + "/executions", json={"expectedRevision": revision})
+    assert events.status_code == 200, events.text
+    assert console.target["statements"] == [plan["sql"]]
+    export = client.post(url + "/export", data={"payload": json.dumps({"expectedRevision": revision})})
+    assert export.status_code == 200, export.text
+    assert console.target["statements"] == [plan["sql"]]
+    assert saved.json()["tiles"][0]["limit"] == 3
+    assert saved.json()["tiles"][0]["topN"] == 2
+
+
 @pytest.mark.parametrize("planning_source", ["managed", "shared"], indirect=True)
 def test_scalar_kpi_priority_is_derived_from_validated_aggregation(planning_source, monkeypatch):
     import asyncio
@@ -470,3 +497,72 @@ def test_scalar_kpi_priority_is_derived_from_validated_aggregation(planning_sour
         Principal(user_id="viewer", authentication_source="local_prototype")))
     assert [(tile["tileId"], tile["scalarKpi"]) for tile in planned] == [("raw", False), ("scalar", True)]
     assert source.console.runs == []
+
+
+def test_pivot_api_preserves_scopes_preview_caps_and_full_long_form_export(setup):
+    client, existing, console, _ = setup
+    source = client.get('/api/v1/schemoo/models/' + existing['modelId']).json()
+    source['definition']['exposedFields'] = None
+    saved_model = client.post('/api/v1/schemoo/models', json={key: source[key] for key in [
+        'name', 'connectionId', 'database', 'namespace', 'definition', 'explore']})
+    assert saved_model.status_code == 201, saved_model.text
+    field = lambda name, aggregate='none': {'table': 'people', 'column': name, 'aggregate': aggregate}
+    tile = {'id': 'pivot', 'title': 'People pivot', 'kind': 'pivot',
+        'rowDimensions': [field('name')], 'columnDimensions': [field('id')],
+        'measures': [field('name', 'count_distinct')], 'detailFields': [field('name')],
+        'pivotTotals': {'maximumColumns': 1, 'maximumRows': 1}, 'topN': 2}
+    response = client.post('/api/v1/schemer/dashboards', json={'name': 'Pivot',
+        'modelId': saved_model.json()['id'], 'modelRevision': 1, 'tiles': [tile]})
+    assert response.status_code == 201, response.text
+    url = '/api/v1/schemer/dashboards/' + response.json()['id'] + '/tiles/pivot'
+    preview = client.post(url + '/plan', json={'expectedRevision': 1})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()['pivot']['export'] == 'bounded matrix preview'
+    assert 'LIMIT 2' in preview.json()['sql']
+    # Transport control uses exact fake records, independent of database oracle tests.
+    values = [None, None, 4, 0, 0, 'data', 2, False, 3]
+    console.page = lambda *args: SimpleNamespace(columns=[ConsoleResultColumn(name=f'c{i}', data_type='text') for i in range(9)],
+        rows=[values], next_cursor=None, truncated=False)
+    full = client.post(url + '/export', data={'payload': json.dumps({'expectedRevision': 1})})
+    assert full.status_code == 200, full.text
+    assert 'Row grouping depth' in full.text and 'Column grouping depth' in full.text
+    assert 'Pivot status' in full.text and '0,0,data,2,False,3' in full.text
+    assert 'pivot_column_count) <= 1' not in console.target['statements'][0]
+    selected = {'dimensions': [], 'measureIndex': 0, 'pivot': {'kind': 'grand_total', 'rowDepth': 0, 'columnDepth': 0}}
+    drilled = client.post(url + '/plan', json={'expectedRevision': 1, 'selection': selected})
+    assert drilled.status_code == 200, drilled.text
+    assert drilled.json()['pivotScope']['kind'] == 'grand_total'
+    assert 'LIMIT' not in drilled.json()['sql']
+    raw = client.post(url + '/export', data={'payload': json.dumps({'expectedRevision': 1, 'selection': selected})})
+    assert raw.status_code == 200, raw.text
+    assert 'Pivot selection' in raw.text and 'grand_total' in console.target['statements'][0]
+    assert 'LIMIT' not in console.target['statements'][0]
+    selected['dimensions'] = [field('id') | {'value': 'forged'}]
+    assert client.post(url + '/plan', json={'expectedRevision': 1, 'selection': selected}).status_code == 422
+
+
+@pytest.mark.parametrize('planning_source', ['shared'], indirect=True)
+@pytest.mark.parametrize('action,denied_permission', [('plan', 'can_drill'), ('stream', 'can_drill'), ('export', 'can_drill'), ('export', 'can_export')])
+def test_pivot_scope_never_bypasses_shared_drill_or_export_grants(planning_source, monkeypatch, action, denied_permission):
+    import asyncio
+    from schemii.common.api.errors import ApiProblem
+    from schemii.schemer import routes
+    source = planning_source
+    source.grant[denied_permission] = False
+    calls = []
+    monkeypatch.setattr(routes, 'tile_plan', lambda *args, **kwargs: calls.append('compiled'))
+    selected = {'dimensions': [], 'measureIndex': 0, 'pivot': {'kind': 'grand_total', 'rowDepth': 0, 'columnDepth': 0}}
+    body = routes.TileRequest(expected_revision=1, selection=selected)
+    principal = Principal(user_id='viewer', authentication_source='local_prototype')
+    operation = {'plan': routes.plan_tile, 'stream': routes.stream_tile, 'export': routes.export_tile}[action]
+    async def payload():
+        return body.model_dump(mode='json', by_alias=True)
+    source.request.headers = {}; source.request.json = payload
+    with pytest.raises(ApiProblem) as denied:
+        if action == 'export':
+            asyncio.run(operation(source.dashboard.id, source.tile['id'], source.request, principal))
+        elif action == 'plan':
+            operation(source.dashboard.id, source.tile['id'], body, source.request, principal)
+        else:
+            asyncio.run(operation(source.dashboard.id, source.tile['id'], body, source.request, principal))
+    assert denied.value.status_code == 403 and calls == [] and source.console.runs == []
