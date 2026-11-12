@@ -1,6 +1,7 @@
 import { createNumberPresentation, decorateNumber, formatKey, sumDecimalText, exactDecimal, numberFormatLegend } from './number-format.js';
 import { visibleMeasures, chooseConstituent } from "./measures.js";
 import { renderPivot, displayedPivot } from './pivot.js';
+import { displayedColumns } from './result-cache.js';
 import { element } from '#common/dom.js';
 import { createResultGrid } from './scroll-results.js';
 import { dimensionLabel, lineSeries, linePath } from './chart-dimensions.js';
@@ -36,20 +37,26 @@ export function visualizationSelection(host, tile, result) {
   const presentationTile = { ...tile, outputMeasureNames: Object.fromEntries(calculated.filter(item => item.index != null).map(item => [item.index, item.displayLabel || item.label])) };
   return { calculated, options, metric, series, tile: presentationTile, preview: chartPreview({ ...presentationTile, measures: series }, result) };
 }
+export function rememberDisplayedVisualization(host, tile, result, present = createNumberPresentation(tile, result)) {
+  const selection = visualizationSelection(host, tile, result);
+  displayedCharts.set(host, { tile, result, selection, present, rowCount: selection.preview.rows.length });
+  return selection;
+}
 export function displayedVisualization(host, tile, result) {
   if (tile.kind === 'pivot') return displayedPivot(host, { ...tile, measures: visibleMeasures(tile) }, result);
   const mounted = displayedCharts.get(host);
   if (mounted) { tile = mounted.tile; result = mounted.result; }
   const { metric, series, preview } = mounted?.selection || visualizationSelection(host, tile, result);
+  const present = mounted?.present || createNumberPresentation(tile, result);
   const visibleRows = preview.rows.slice(0, mounted?.rowCount ?? preview.rows.length);
   if (!result.columns.length) return { ...preview, metric };
-  if (['detail', 'aggregate'].includes(tile.kind)) return { ...preview, rows: visibleRows, metric: 'values' };
+  if (['detail', 'aggregate'].includes(tile.kind)) return { ...preview, columns: displayedColumns(result.columns, present), rows: visibleRows, metric: 'values' };
   const comparison = result.plan?.kpiComparison;
   const indices = tile.kind === 'kpi' ? [0, ...(comparison?.indices || [])] : [...tile.dimensions.map((_, index) => index), ...series.map(item => item.column)];
   const names = comparison ? [comparison.label, 'Absolute variance', 'Percentage variance', `KPI assessment (${({ higher: 'higher is better', lower: 'lower is better', equal: 'exactly at baseline is better' })[comparison.favorable]})`] : [];
   const rows = tile.kind === 'kpi' ? visibleRows.slice(0, 1) : visibleRows;
   return { ...preview, metric, cachedRows: result.rows.length, barGroupIndex: Math.max(0, Math.min(Number(host.dataset.barGroupIndex) || 0, tile.dimensions.length - 1)),
-    columns: indices.map((index, position) => ({ ...result.columns[index], ...(tile.kind === 'kpi' && position ? { name: names[position - 1] } : {}) })), rows: rows.map(row => indices.map(index => row[index])) };
+    columns: displayedColumns(result.columns, present, indices).map((column, position) => ({ ...column, ...(tile.kind === 'kpi' && position ? { name: names[position - 1] } : {}) })), rows: rows.map(row => indices.map(index => row[index])) };
 }
 export function renderVisualization(host, tile, result, { onDrill, compact = false, modelId } = {}) {
   result={...result,rows:result?.rows || [],columns:result?.columns || []};
@@ -64,9 +71,8 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
   };
   if (tile.kind === 'pivot') { renderPivot(host,{...tile,measures:visibleMeasures(tile)},result,{onDrill:onDrill?select:null,compact}); return; }
   const fullResult = result;
-  const selection = visualizationSelection(host, tile, result);
+  const selection = rememberDisplayedVisualization(host, tile, result, present);
   const { options, metric, series, tile: presentationTile, preview } = selection;
-  displayedCharts.set(host, { tile, result, selection, rowCount: preview.rows.length });
   host.dataset.timeMetric = metric;
   tile = { ...presentationTile, formatDimension: (index, value) => formattedDimensions.has(formatKey({ ...originalTile.dimensions[index], kind: 'value' })) ? present(value, index).text : undefined };
   result = preview;

@@ -375,6 +375,54 @@ def test_displayed_pivot_projection_metadata_is_typed_bounded_and_sanitized(repo
     assert service.runtime.calls == [] and report.calls == []
 
 
+@pytest.mark.parametrize("mode", ["automatic", "ask"])
+def test_displayed_raw_values_and_typed_format_semantics_stay_frozen_through_provider_approval(report, monkeypatch, mode):
+    import json
+
+    service, chat, packet = _displayed(report, mode)
+    monkeypatch.setattr(ai_tools, "model_catalog", lambda *a, **kw: pytest.fail("No catalog"))
+    monkeypatch.setattr(ai_tools, "tile_plan", lambda *a, **kw: pytest.fail("No planning"))
+    output = {"table": "@report", "column": "share", "aggregate": "none", "kind": "calculated"}
+    display = {"output": output, "style": "percent", "precision": 1, "currency": None,
+        "percentScale": "fraction", "unit": "", "locale": "en-US", "localeMode": "viewer",
+        "queryUnit": "number", "queryScale": 1, "displayScale": 1, "minimumFractionDigits": 1,
+        "maximumFractionDigits": 1, "rules": [{"operator": "gte", "value": "0.2", "upper": None,
+        "label": "Above goal", "tone": "positive", "symbol": "check"}]}
+    packet["columns"] = [{"name": "Share", "type": "numeric", "output": output, "display": display}]
+    packet["rows"] = [[.25]]
+    turn = _attach(report, service, chat, packet)
+    packet["rows"][0][0] = 99
+    packet["columns"][0]["display"]["percentScale"] = "whole"
+    packet["columns"][0]["display"]["rules"][0]["label"] = "Later"
+    service.run("viewer", chat["id"], turn["turnId"])
+    if mode == "ask":
+        assert service.runtime.calls == [] and report.calls == []
+        approved, actions, rejected = service.approval("viewer", chat["id"], {
+            "pendingId": turn["pending"]["id"], "approved": True,
+            "expectedRevision": turn["revision"]}, report.request)
+        service.run("viewer", chat["id"], approved["turnId"], actions, rejected)
+    evidence = json.loads(service.runtime.calls[0][1][0]["content"])["displayedEvidence"]
+    assert evidence["rows"] == [[.25]]
+    assert evidence["columns"][0]["display"]["percentScale"] == "fraction"
+    assert evidence["columns"][0]["display"]["queryScale"] == 1
+    assert evidence["columns"][0]["display"]["rules"][0]["label"] == "Above goal"
+    assert evidence["columns"][0]["output"] == output
+    assert "Rows retain raw values" in evidence["sampling"]["notice"]
+    assert report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_format_metadata_rejects_oversized_or_untyped_descriptors_without_reflecting_rows(report):
+    service, chat, packet = _displayed(report)
+    packet["columns"][0]["display"] = {"locale": DISPLAYED_SECRET * 1000, "queryScale": True}
+    with pytest.raises(ApiProblem) as problem:
+        _attach(report, service, chat, packet)
+    assert problem.value.code == "ai_displayed_result_invalid"
+    assert DISPLAYED_SECRET not in str(problem.value)
+    assert service.runtime.calls == [] and report.calls == []
+    _assert_private(service, chat["id"])
+
+
 def test_displayed_ask_pauses_before_first_disclosure_and_approval_contains_no_rows(report):
     service, chat, packet = _displayed(report, "ask")
     waiting = _attach(report, service, chat, packet)

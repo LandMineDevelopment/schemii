@@ -82,7 +82,7 @@ class ProjectionNode {
   setAttribute(name, value) { this.attrs[name] = String(value); }
   getAttribute(name) { return this.attrs[name]; }
   addEventListener() {}
-  querySelector() { return null; }
+  querySelector(selector) { return projectionNodes(this).slice(1).find(node => node.tagName === selector) || null; }
   querySelectorAll() { return []; }
 }
 const projectionNodes = root => [root, ...root.children.flatMap(projectionNodes)];

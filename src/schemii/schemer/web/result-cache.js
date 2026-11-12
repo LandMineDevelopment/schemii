@@ -19,6 +19,16 @@ export async function readResultStream(url, body, onFrame, signal, fetcher = fet
 
 const decodedRowBytes = row => JSON.stringify(row).length * 2 + row.length * 32 + 64;
 
+/** Resolve presentation at original query indices before projecting columns.
+ * Descriptors contain semantics only; raw row values never enter this helper. */
+export function displayedColumns(columns, present, indices = columns.map((_, index) => index)) {
+  return indices.map(index => {
+    const display = present.describe(index), ref = display?.output || present(null, index).ref;
+    const output = ref ? { table: ref.table, column: ref.column, aggregate: ref.aggregate || 'none', kind: ref.kind || 'value' } : null;
+    return { ...columns[index], ...(output ? { output } : {}), ...(display ? { display } : {}) };
+  });
+}
+
 /** Deliberate attachment boundary. Navigation keeps using the live cache; AI gets
  * a deep frozen, independently bounded copy with no cursor or query capability. */
 export function freezeDisplayedResult(result, provenance, { maxRows = 100, maxBytes = 256 * 1024 } = {}) {
@@ -31,7 +41,8 @@ export function freezeDisplayedResult(result, provenance, { maxRows = 100, maxBy
     cacheTruncated: Boolean(result.limitReached), chartTruncated: Boolean(result.visualTruncated),
     clientSampleTruncated: Boolean(result.rows.length),
     ...(result.projection ? { projection: result.projection } : {}),
-    columns: result.columns.map(column => ({ name: String(column.name), type: String(column.dataType || column.type || 'unknown') })), rows: [] });
+    columns: result.columns.map(column => ({ name: String(column.name), type: String(column.dataType || column.type || 'unknown'),
+      ...(column.output ? { output: column.output } : {}), ...(column.display ? { display: column.display } : {}) })), rows: [] });
   const bytes = () => new TextEncoder().encode(JSON.stringify(attachment)).length;
   if (bytes() + 1 > maxBytes) throw new Error('Displayed column or filter metadata exceeds the attachment limit. Choose fewer fields.');
   for (const row of result.rows.slice(0, maxRows)) {

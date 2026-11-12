@@ -2,7 +2,7 @@ import { createNumberPresentation, decorateNumber } from './number-format.js';
 import { scrollPosition, restoreScroll, createResultGrid, appendStreamStatus } from './scroll-results.js';
 import { element } from '#common/dom.js';
 import { createIconButton, downloadContent } from '#common/ui.js';
-import { renderVisualization, displayedVisualization } from './visualizations.js';
+import { renderVisualization, displayedVisualization, rememberDisplayedVisualization } from './visualizations.js';
 import { csvContent } from './report-state.js';
 function icon(name, label, callback) { const button = createIconButton({ icon: name, label, className: 'ui-button' }); button.onclick = callback; return button; }
 function requestTime(value) {
@@ -42,6 +42,7 @@ function gridInteractions(host, result) {
   viewport.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.matches('td:not(.drill-mark)')) { event.preventDefault(); event.target.click(); } });
 }
 export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh, onExplain, canExport = true, canDrill = true, canViewSql = true }) {
+  const detailTile = { ...tile, kind: 'detail', dimensions: [], measures: [] };
   const dialog = element('dialog', { className: 'expanded-dialog', attrs: { 'aria-label': tile.title } });
   const chartPane = element('section', { className: 'expanded-chart-pane' });
   const chartBody = element('div', { className: 'expanded-chart-body' });
@@ -117,7 +118,8 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
   function renderDetails() {
     if (!dialog.isConnected || !detailCache) return;
     const position = scrollPosition(detailBody), data = detailCache.snapshot();
-    const present=createNumberPresentation({...tile,kind:'detail',dimensions:[],measures:[]},data);
+    const present=createNumberPresentation(detailTile,data);
+    rememberDisplayedVisualization(detailBody, detailTile, data, present);
     detailBody.replaceChildren(createResultGrid(data,(row,index)=>{[...row.querySelectorAll('td')].forEach((cell,column)=>decorateNumber(cell,present(data.rows[index][column],column)));})); gridInteractions(detailBody, data); appendStreamStatus(detailBody, data); restoreScroll(detailBody, position);
     detailStatus.textContent = `Model detail rows · ${data.rows.length} cached${data.plan?.warnings?.some(w => w.includes('repeat') || w.includes('DISTINCT')) ? ' · Related or repeated rows may differ from the measure count' : ''}`;
     detailFreshness.textContent = reusedDrill && data.snapshotAt
@@ -135,7 +137,7 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
   chartActions.append( icon('refresh', 'Refresh tile', () => { dialog.close(); onRefresh(); }), icon('close', 'Close expanded tile', () => dialog.close()));
   if (canViewSql) detailActions.append(icon('sql', 'Show detail SQL', () => { if (detailCache?.plan) openSql(detailCache.plan, 'Detail rows · SQL'); }));
   if (onExplain) detailActions.append(icon('assistant', 'Explain displayed detail rows', () => {
-    if (detailCache) { void onExplain(detailCache, detailCache.snapshot()); dialog.close(); }
+    if (detailCache) { void onExplain(detailCache, displayedVisualization(detailBody, detailTile, detailCache.snapshot())); dialog.close(); }
   }));
   detailActions.append(icon('refresh', 'Refresh detail rows', () => { if (detailSelection) selectDrill(detailSelection, { refresh: true }); }), icon('close', 'Close detail rows', () => { releaseDrill(); detailPane.hidden = true; pane('chart'); }));
   chartPane.append(element('header', { className: 'expanded-pane-header' }, [element('div', {}, [chartTitle, chartStatus]), chartActions]), chartBody, chartFooter);

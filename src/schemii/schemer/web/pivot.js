@@ -1,4 +1,5 @@
 import { createNumberPresentation, decorateNumber, numberFormatLegend } from './number-format.js';
+import { displayedColumns } from './result-cache.js';
 import { element } from '#common/dom.js';
 import { pivotDefaults } from './dashboard-state.js';
 
@@ -76,7 +77,7 @@ function action(node, label, invoke) {
 export function displayedPivot(host, tile, result) {
   const mounted = displayedPivots.get(host);
   const view = mounted || { tile, result, matrix: pivotMatrix(tile, result), first: 0, end: 50 };
-  const { matrix } = view;
+  const { matrix } = view, present = view.present || createNumberPresentation(view.tile, view.result);
   tile = view.tile; result = view.result;
   const rowAxes = tile.rowDimensions.length, columnAxes = tile.columnDimensions.length;
   const offset = rowAxes + columnAxes + tile.measures.length;
@@ -94,7 +95,7 @@ export function displayedPivot(host, tile, result) {
   return { ...result, projection, cachedRows: result.rows.length,
     visualTruncated: Boolean(result.visualTruncated || projection.rowStart || projection.rowEnd < projection.rowGroups),
     partial: Boolean(matrix.partial || matrix.rowsOmitted),
-    columns: [...Array.from({ length: offset }, (_, index) => result.columns[index]), ...metadata.map(name => ({ name })), { name: 'Pivot scope' }], rows: selected };
+    columns: [...displayedColumns(result.columns.slice(0, offset), present), ...metadata.map(name => ({ name })), { name: 'Pivot scope' }], rows: selected };
 }
 export function renderPivot(host, tile, result, { onDrill, compact = false } = {}) {
   host.replaceChildren();

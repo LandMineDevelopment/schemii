@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import * as cacheModule from '../../src/schemii/schemer/web/result-cache.js';
 import { ResultCache, DashboardResultGroup, CacheBudget, readResultStream } from '../../src/schemii/schemer/web/result-cache.js';
+import { createNumberPresentation, decorateNumber } from '../../src/schemii/schemer/web/number-format.js';
 const startFrame = { type: 'start', plan: { outputLabels: ['Readable ID'] }, snapshotAt: '2026-09-20T00:00:00Z' };
 const rows = values => ({ type: 'rows', columns: [{ name: 'output_1' }], rows: values.map(value => [value]) });
 const complete = { type: 'complete', limitReached: false };
@@ -120,6 +121,7 @@ function viewerFixture({ budget = new CacheBudget(), result = 'pending' } = {}) 
   const getStream = runInNewContext(`${getStreamSource}\ngetStream`, context);
   const find = (root, predicate) => [root, ...root.children.filter(child => child instanceof ViewerElement).flatMap(child => find(child, predicate))].filter(predicate);
   const openExpanded = runInNewContext(`${viewerSource.replace(/^import .*;\n/gm, '').replaceAll('export function ', 'function ')}\nopenExpanded`, {
+    createNumberPresentation, decorateNumber, rememberDisplayedVisualization() {},
     document, element: (tag, options, children) => new ViewerElement(tag, options, children),
     createIconButton: ({ label }) => new ViewerElement('button', { attrs: { 'aria-label': label } }),
     scrollPosition: () => ({}), restoreScroll: () => {}, createResultGrid: data => new ViewerElement('grid', { data }),
@@ -414,4 +416,38 @@ test('displayed KPI includes only the first visible value and all target/varianc
   assert.deepEqual(displayed.columns.map(item => item.name), ['Share', 'Goal', 'Absolute variance', 'Percentage variance', 'KPI assessment (higher is better)']);
   const frozen = cacheModule.freezeDisplayedResult(displayed, { pane: 'main' });
   assert.equal(frozen.displayedRows, 1); assert.equal(frozen.cachedRows, 2); assert.deepEqual(frozen.rows[0], [25, 10, 15, 150, 'favorable']);
+});
+
+test('projected column semantics retain stable outputs, actual currency/locale/rules and every time percent offset', async () => {
+  const { displayedVisualization } = await import('../../src/schemii/schemer/web/visualizations.js');
+  const output = { table: 'facts', column: 'amount', aggregate: 'sum', kind: 'value' };
+  const tile = { kind: 'bar', dimensions: [{ table: 'facts', column: 'month' }], measures: [output], formatLocale: 'de-DE', numberFormats: [{ output,
+    style: 'currency', currency: 'EUR', precision: 2, unit: 'net', percentScale: 'auto', rules: [{ operator: 'gt', value: '100', label: 'Above goal', tone: 'positive', symbol: 'check' }] }], timeAnalysis: { comparison: 'previous_period', runningTotal: true } };
+  const result = { snapshotAt: startFrame.snapshotAt, columns: ['Month', 'Current', 'Previous', 'Absolute', 'Percent', 'Running'].map(name => ({ name, dataType: 'numeric' })), rows: [['2026-01', '9007199254740993.10', 17, 23, 35.5, 73]] };
+  const currency = displayedVisualization({ dataset: {} }, tile, result), frozen = cacheModule.freezeDisplayedResult(currency, { pane: 'main' });
+  assert.deepEqual(frozen.columns[1].output, output); assert.equal(frozen.columns[1].display.currency, 'EUR'); assert.equal(frozen.columns[1].display.locale, 'de-DE');
+  assert.equal(frozen.columns[1].display.minimumFractionDigits, 2); assert.equal(frozen.columns[1].display.maximumFractionDigits, 2);
+  assert.equal(frozen.columns[1].display.rules[0].label, 'Above goal'); assert.equal(frozen.rows[0][1], '9007199254740993.10');
+  tile.numberFormats[0].rules[0].label = 'Later'; tile.numberFormats[0].currency = 'USD';
+  assert.equal(frozen.columns[1].display.currency, 'EUR'); assert.equal(frozen.columns[1].display.rules[0].label, 'Above goal');
+  assert.equal(Object.isFrozen(frozen.columns[1].display.rules[0]), true);
+  const percent = displayedVisualization({ dataset: { timeMetric: 'percent' } }, tile, result);
+  assert.deepEqual(percent.rows, [['2026-01', 35.5]]);
+  assert.equal(percent.columns[1].output.kind, 'percent_change'); assert.equal(percent.columns[1].display.style, 'percent'); assert.equal(percent.columns[1].display.queryScale, 100);
+  assert.throws(() => cacheModule.freezeDisplayedResult(currency, {}, { maxBytes: 300 }), /metadata exceeds/);
+});
+
+test('calculated percent and KPI baseline/variance keep raw fractions and explicit percentage-point presentation', async () => {
+  const { displayedVisualization } = await import('../../src/schemii/schemer/web/visualizations.js');
+  const output = { table: '@report', column: 'ratio', aggregate: 'none', kind: 'calculated' };
+  const tile = { kind: 'kpi', dimensions: [], measures: [], calculations: [{ id: 'ratio', operation: 'divide', visible: true }],
+    formatLocale: 'en-US', numberFormats: [{ output, style: 'percent', precision: 1, currency: null, percentScale: 'fraction', unit: '', rules: [] }] };
+  const result = { snapshotAt: startFrame.snapshotAt, columns: ['Ratio', 'Goal', 'Absolute', 'Percent', 'Status'].map(name => ({ name, dataType: name === 'Status' ? 'text' : 'numeric' })), rows: [[.4, .25, .15, 60, 'favorable']],
+    plan: { calculatedMeasures: [{ id: 'ratio', index: 0, output, unit: 'number', scale: 1 }], kpiComparison: { label: 'Goal', favorable: 'higher', indices: [1, 2, 3, 4], baselineUnit: 'number', baselineScale: 1, absoluteUnit: 'number', absoluteScale: 1 } } };
+  const frozen = cacheModule.freezeDisplayedResult(displayedVisualization({ dataset: {} }, tile, result), { pane: 'main' });
+  assert.deepEqual(frozen.rows, [[.4, .25, .15, 60, 'favorable']]);
+  assert.deepEqual(frozen.columns.map(column => column.display?.output.kind), ['calculated', 'kpi_baseline', 'kpi_absolute', 'kpi_percent', undefined]);
+  assert.equal(frozen.columns[0].display.percentScale, 'fraction'); assert.equal(frozen.columns[0].display.queryScale, 1);
+  assert.equal(frozen.columns[1].display.style, 'percent'); assert.equal(frozen.columns[2].display.unit, 'percentage points');
+  assert.equal(frozen.columns[2].display.displayScale, 100); assert.equal(frozen.columns[2].display.queryScale, 1); assert.equal(frozen.columns[3].display.queryScale, 100);
 });

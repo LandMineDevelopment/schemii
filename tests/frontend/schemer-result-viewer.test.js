@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import * as cacheModule from '../../src/schemii/schemer/web/result-cache.js';
-import { renderVisualization, displayedVisualization } from '../../src/schemii/schemer/web/visualizations.js';
+import { renderVisualization, displayedVisualization, rememberDisplayedVisualization } from '../../src/schemii/schemer/web/visualizations.js';
 
 const reportAt = '2026-10-13T12:00:00Z', drillAt = '2026-10-13T12:01:00Z', refreshedAt = '2026-10-13T12:02:00Z';
 const displayTime = value => new Date(value).toLocaleString(undefined, { timeZoneName: 'short' });
@@ -54,7 +54,7 @@ function fixture({ budget = new cacheModule.CacheBudget(), pending = false, wait
     createNumberPresentation, decorateNumber, document, element: (tag, options, children) => new Node(tag, options, children),
     createIconButton: ({ label }) => new Node('button', { attrs: { 'aria-label': label } }),
     scrollPosition: () => ({}), restoreScroll() {}, createResultGrid: data => new Node('grid', { data }),
-    appendStreamStatus() {}, renderVisualization: (host, _tile, _result, { onDrill }) => { host.onDrill = onDrill; },
+    appendStreamStatus() {}, rememberDisplayedVisualization() {}, renderVisualization: (host, _tile, _result, { onDrill }) => { host.onDrill = onDrill; },
     requestAnimationFrame: callback => scheduled.push(callback), csvContent: data => { csvs.push(data); return ''; }, downloadContent() {},
   });
   const context = { ...cacheModule, document, streams, dashboard, dashboardGroup, browserBudget: budget, API: '/owned',
@@ -243,17 +243,20 @@ test('actual expanded Explain actions freeze calculated main evidence and the se
   const document = { body: new PaintedNode('body'), createElement: tag => new PaintedNode(tag), createElementNS: (_ns, tag) => new PaintedNode(tag), createTextNode: text => new PaintedNode('#text', { text }) };
   globalThis.document = document; globalThis.Node = PaintedNode;
   t.after(() => { globalThis.document = oldDocument; globalThis.Node = oldNode; });
-  const tile = { id: 'calculated', title: 'Share', kind: 'bar', dimensions: [{ table: 'sales', column: 'region' }], measures: [], calculations: [{ id: 'share', visible: true }] };
+  const output = { table: '@report', column: 'share', aggregate: 'none', kind: 'calculated' };
+  const tile = { id: 'calculated', title: 'Share', kind: 'bar', dimensions: [{ table: 'sales', column: 'region' }], measures: [], detailFields: [{ table: 'sales', column: 'amount', aggregate: 'none' }],
+    calculations: [{ id: 'share', operation: 'divide', visible: true }], formatLocale: 'en-US', numberFormats: [{ output, style: 'percent', percentScale: 'fraction', precision: 1, unit: '', rules: [] }] };
   const context = { dashboardId: 'dashboard', dashboardRevision: 1, modelId: 'model', modelRevision: 1, tileId: tile.id, pane: 'main', selections: {} };
   let mainStarts = 0, detailStarts = 0;
-  const main = new cacheModule.ResultCache({ start: async emit => { mainStarts++; emit({ type: 'start', snapshotAt: reportAt, plan: { calculatedMeasures: [{ id: 'share', index: 1, label: 'Share' }] } }); emit({ type: 'rows', columns: [{ name: 'Region' }, { name: 'Share' }], rows: [['East', .25]] }); emit(complete); } });
+  const main = new cacheModule.ResultCache({ start: async emit => { mainStarts++; emit({ type: 'start', snapshotAt: reportAt, plan: { calculatedMeasures: [{ id: 'share', index: 1, label: 'Share', output, unit: 'number', scale: 1 }] } }); emit({ type: 'rows', columns: [{ name: 'Region', dataType: 'text' }, { name: 'Share', dataType: 'numeric' }], rows: [['East', .25]] }); emit(complete); } });
   main.displayContext = context;
-  const detail = new cacheModule.ResultCache({ start: async emit => { detailStarts++; emit({ type: 'start', snapshotAt: drillAt, plan: {} }); emit({ type: 'rows', columns: [{ name: 'Detail amount' }], rows: [[73.125]] }); emit(complete); } });
+  const detail = new cacheModule.ResultCache({ start: async emit => { detailStarts++; emit({ type: 'start', snapshotAt: drillAt, plan: {} }); emit({ type: 'rows', columns: [{ name: 'Detail amount', dataType: 'numeric' }], rows: [[73.125]] }); emit(complete); } });
   const selection = { dimensions: [{ table: 'sales', column: 'region', value: 'East' }], measureIndex: 0 };
   detail.displayContext = { ...context, pane: 'drill', drillSelection: selection };
   const expanded = runInNewContext(`${viewerSource.replace(/^import .*;\n/gm, '').replaceAll('export function ', 'function ')}\nopenExpanded`, {
     document, element: (tag, options, children) => new PaintedNode(tag, options, children), createIconButton: ({ label }) => new PaintedNode('button', { attrs: { 'aria-label': label } }),
     scrollPosition: () => ({}), restoreScroll() {}, createResultGrid: data => new PaintedNode('grid', { data }), appendStreamStatus() {},
+    createNumberPresentation, decorateNumber, rememberDisplayedVisualization,
     renderVisualization: (host, current, data, options) => { host.onDrill = options.onDrill; renderVisualization(host, current, data, options); }, displayedVisualization,
     requestAnimationFrame: callback => scheduled.push(callback), csvContent() {}, downloadContent() {},
   });
@@ -261,12 +264,14 @@ test('actual expanded Explain actions freeze calculated main evidence and the se
   const open = () => { expanded({ tile, modelId: 'model', cache: main, createDrillCache: () => detail, onRefresh() {}, onExplain: (cache, data) => attachments.push(cacheModule.freezeDisplayedResult(data, cache.displayContext)) }); return document.body.children.at(-1); };
   let dialog = open(); find(dialog, node => node.attributes['aria-label'] === 'Explain displayed result')[0].click();
   assert.deepEqual(attachments[0].rows, [['East', .25]]); assert.equal(attachments[0].pane, 'main'); assert.equal(mainStarts, 1);
+  assert.equal(attachments[0].columns[1].display.percentScale, 'fraction'); assert.deepEqual(attachments[0].columns[1].output, output);
   main.rows[0][1] = 99; assert.equal(attachments[0].rows[0][1], .25); assert.equal(Object.isFrozen(attachments[0].rows[0]), true);
   dialog = open(); find(dialog, node => node.className === 'expanded-chart-body')[0].onDrill(selection);
   await detail.pending; while (scheduled.length) scheduled.shift()();
   find(dialog, node => node.attributes['aria-label'] === 'Explain displayed detail rows')[0].click();
   assert.deepEqual(attachments[1].rows, [[73.125]]); assert.equal(attachments[1].pane, 'drill'); assert.equal(attachments[1].snapshotAt, drillAt);
   assert.deepEqual(attachments[1].drillSelection, selection); assert.equal(mainStarts, 1); assert.equal(detailStarts, 1);
+  assert.equal(attachments[1].columns[0].display.style, 'number'); assert.equal(attachments[1].columns[0].output.column, 'amount');
   assert.equal('plan' in attachments[0], false); assert.equal('controller' in attachments[1], false);
   main.dispose(); detail.dispose();
 });

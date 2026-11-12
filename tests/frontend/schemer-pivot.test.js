@@ -95,7 +95,7 @@ test('bounded row window keeps scrolling usable with fixed 44px rows and does no
 });
 
 test('displayed pivot uses the mounted sparse window, axis headers and explicit NULL-versus-total scopes', () => {
-  const config = tile(), data = result([record(null, 'A', 23.5, 7), record(null, null, 101.25, 19, 0, 0), record(null, null, 33.75, 11, 1, 0)], { snapshotAt: '2026-11-12T00:00:00Z' });
+  const config = tile({ formatLocale: 'en-US', numberFormats: [{ output: { ...field('amount', 'avg'), kind: 'value' }, style: 'currency', currency: 'USD', precision: 2, unit: '', rules: [] }] }), data = result([record(null, 'A', 23.5, 7), record(null, null, 101.25, 19, 0, 0), record(null, null, 33.75, 11, 1, 0)], { snapshotAt: '2026-11-12T00:00:00Z' });
   const view = mounted(config, data), captured = displayedPivot(view.host, config, data);
   assert.deepEqual(captured.columns.map(item => item.name), ['Region', 'Category', 'Average amount', 'Distinct customers', 'Row grouping depth', 'Column grouping depth', 'Pivot record type', 'Column group count', 'Preview row cap reached', 'Qualifying source groups', 'Pivot scope']);
   const scopes = new Map(captured.rows.map(row => [row.at(-1), row]));
@@ -103,6 +103,8 @@ test('displayed pivot uses the mounted sparse window, axis headers and explicit 
   assert.deepEqual(scopes.get('row'), [...data.rows[2], 'row']);
   assert.deepEqual(scopes.get('grand_total'), [...data.rows[1], 'grand_total']);
   assert.equal(captured.projection.rowAxes, 1); assert.equal(captured.projection.columnAxes, 1);
+  assert.equal(captured.columns[2].display.currency, 'USD'); assert.equal(captured.columns[2].output.aggregate, 'avg');
+  assert.ok(view.nodes().some(node => node.tag === 'td' && node.textContent === '$23.50'));
   const frozen = freezeDisplayedResult(captured, { pane: 'main' }); data.rows[0][2] = 999;
   assert.equal(frozen.rows.find(row => row.at(-1) === 'cell')[2], 23.5); assert.equal(Object.isFrozen(frozen.projection), true);
   const many = result(Array.from({ length: 180 }, (_, i) => record(`R${String(i).padStart(3, '0')}`, 'A', 1000 + i, 2000 + i)), { snapshotAt: data.snapshotAt });
