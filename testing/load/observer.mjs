@@ -7,6 +7,7 @@ import { processIdentity, cgroupIdentity, processRole, readPrivateJSON, writePri
 import { fresh, sourceEvidence, observeOwnership } from './ownership.mjs';
 import { credentials } from '../harness/store.mjs';
 import { HTTPClient } from './http.mjs';
+import { isDeepStrictEqual as same } from 'node:util';
 
 const finite = value => Number.isFinite(value) && value >= 0;
 const failure = error => ['ENOENT', 'ESRCH'].includes(error.code) || error.message === 'process_exited' ? 'process_exited' :
@@ -122,7 +123,7 @@ export function combineObservation(receipt, containers, internal, { previous = n
       output.status = 'unavailable'; output.reason = 'owned_observation_unavailable'; return output;
     }
     const old = previous?.ownership;
-    if (old && (old.runId !== ownership.runId || JSON.stringify(old.source.authority) !== JSON.stringify(ownership.source.authority) ||
+    if (old && (old.runId !== ownership.runId || !same(old.source.authority, ownership.source.authority) ||
         old.source.captured.some(value => !ownership.source.captured.some(current => JSON.stringify(current) === JSON.stringify(value))) ||
         ['executions', 'jobs'].some(key => (old.work[key] || []).some(value => !(ownership.work[key] || []).some(current => current.id === value.id))))) {
       output.status = 'unavailable'; output.reason = 'owned_authority_or_journal_changed'; return output;
@@ -130,7 +131,7 @@ export function combineObservation(receipt, containers, internal, { previous = n
     output.ownership = ownership;
     output.ownedBackends = ownership.source.ownedBackends;
     output.activeJobs = ownership.work.activeJobs;
-    output.qualification.runOwnedBackends = 'captured_pid_start_database_role_application';
+    output.qualification.runOwnedBackends = 'bound_server_and_complete_captured_rechecks';
     output.qualification.activeJobs = ownership.work.jobScope;
   }
   const apis = app.processes.filter(process => process.role === 'api');

@@ -271,20 +271,32 @@ connects as the exact source role to observe its own `pg_stat_activity`; no
 administrator or author fallback is permitted. Its separate application name
 excludes its own connection. Pre-existing metadata backends are outside this scope.
 
-All configuration/receipt JSON must be mode 0600, in mode-0700 directories. The
-provisioning receipt contains `version: 1`, `status: "ready"` and matching `runId`,
-`kind`, `exclusiveToRun`, `database`, `role`, and `applicationName` fields. It is
+All configuration/receipt JSON must be current-user-owned regular files, mode
+0600, in owned mode-0700 directories. The reader walks ancestors through no-follow
+directory descriptors, rejects unsafe ownership/writable ancestors and symlinks,
+opens leaves nonblocking, and checks identity before/after a bounded read. FIFOs,
+devices, replacements and parent aliases cannot supply input or create output.
+The provisioning receipt contains `version: 2`, `status: "ready"` and matching `runId`,
+`kind`, `exclusiveToRun`, `database`, `role`, `applicationName`, `endpoint` and
+`server` fields. It is
 evidence from the provisioner, not a declaration to fabricate for borrowed roles.
 The source config contains the private connection secret:
 
 ```json
 {
-  "version": 1, "runId": "load_0123456789abcdef",
+  "version": 2, "runId": "load_0123456789abcdef",
   "authority": {
     "kind": "exclusive_source_role", "exclusiveToRun": true,
     "database": "disposable_database", "role": "disposable_run_role",
     "applicationName": "schemii",
-    "provisioningReceipt": "/private/load/provisioning-private.json"
+    "provisioningReceipt": "/private/load/provisioning-private.json",
+    "endpoint": {"host": "127.0.0.1", "port": 5432, "sslmode": "require"},
+    "server": {
+      "address": "127.0.0.1", "port": 5432,
+      "postmasterStart": "2026-11-11T09:00:00.000000+00:00",
+      "databaseOid": 100,
+      "fixtureId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
   },
   "connection": {
     "host": "127.0.0.1", "port": 5432,
@@ -302,14 +314,33 @@ Before source traffic, initialize a **new** ledger and require an empty baseline
   --output /private/load/source-private.json
 ```
 
-The fixed read-only, timeout-bounded query reads only PID, backend start, database,
-role, application and state. It excludes query text and source rows. Each captured
+The provisioner sets the disposable database COMMENT to exactly
+`schemii-load:<fixtureId>` using a unique 64-hex fixture ID. It records the actual
+server address/port, PostgreSQL postmaster-start timestamp (UTC, six fractional
+digits), and database OID. Fixed catalog reads under the source role verify all
+these fields on every sample before reading activity. No control-system function,
+extra table, grant or administrator fallback is needed. The declared endpoint
+must exactly match host/port/TLS mode in the connection. Endpoint changes, fixture
+replacement, restart, missing marker or unknown actual identity require a new
+provisioned run; neither baseline nor previous captures may be silently rebound.
+
+Fixed read-only, timeout-bounded activity queries read PID, backend start, database,
+role, application and state. They exclude query text and source rows. Each captured
 backend retains its exact PID plus UTC microsecond start and full target identity.
-Idle backends remain live. Scope change, PID reuse, denied visibility and monitor
-failure invalidate evidence; a failed owned ledger cannot be retried into success.
+Discovery uses the exact run labels, then **every captured PID** is rechecked
+without database/role/application filters. Changed labels or unknown visibility
+invalidate evidence. A fully visible newer backend-start distinguishes a reused
+PID from the old incarnation; the new run-owned incarnation remains live if found.
+Idle backends remain live. Scope change, denied visibility and monitor failure
+invalidate evidence; a failed owned ledger cannot be retried into success.
 Foreign evidence is preserved. A bounded file lock serializes observer/recovery
 samples. More than 10,000 live/captured identities stops observation. Sampling
 proves release of captured sessions, not sessions entirely between samples.
+The v2 ledger carries `serverIdentity`, matching `authority.server`, and complete
+`capturedChecks` with `present`, `absent`, or `pid_reused` per PID/start identity
+(the last includes `observedBackendStart`). `releaseVerified` requires nonempty
+captures, complete rechecks and no live captured identity. Version-1 source
+evidence is deliberately rejected; it cannot establish endpoint/disappearance proof.
 The host monitor uses one separate read-only source connection at a time per
 ledger; it does not consume or appear in the application's admission counters.
 
@@ -352,7 +383,7 @@ bounded observation strategy. Observer reads remain outside offered stage totals
 
 Recovery records a private creation intent before a fresh authenticated read and
 managed-read SELECT. It journals the execution before paging, checks one exact
-value plus backend identity and terminal state, witnesses that retained backend,
+value plus backend and actual server/fixture identity and terminal state, witnesses that retained backend,
 closes the exact result, and requires independent disappearance. Failed creation
 retains its intent; unknown execution IDs are never guessed. Known failed probes
 cancel only their recorded execution. Probe calls are outside stage arrival rates.

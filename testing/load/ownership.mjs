@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { isDeepStrictEqual as same } from 'node:util';
 import { HTTPClient } from './http.mjs';
 import { readPrivateJSON, writePrivateJSON } from './runtime.mjs';
 
@@ -13,23 +14,41 @@ const id = (value, prefix) => typeof value === 'string' && new RegExp(`^${prefix
 export function fresh(value, now = Date.now()) {
   return Number.isFinite(Date.parse(value?.at)) && now - Date.parse(value.at) <= 15000 && Date.parse(value.at) <= now + 5000;
 }
-export function sourceEvidence(value, runId, now = Date.now()) {
-  if (value?.version !== 1 || value.status !== 'available' || !fresh(value, now) || !/^load_[a-f0-9]{16}$/.test(runId || '') || value.authority?.runId !== runId ||
+const timestamp = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00$/.test(value) && Number.isFinite(Date.parse(value));
+const backendKey = value => `${value.pid}/${value.backendStart}`;
+const backendIdentity = value => ({ pid: value.pid, backendStart: value.backendStart, database: value.database, role: value.role, applicationName: value.applicationName });
+export function sourceEvidence(value, runId, now = Date.now(), expectedAuthority = null) {
+  const endpoint = value?.authority?.endpoint, server = value?.serverIdentity;
+  if (value?.version !== 2 || value.status !== 'available' || !fresh(value, now) || !/^load_[a-f0-9]{16}$/.test(runId || '') || value.authority?.runId !== runId ||
       value.authority.kind !== 'exclusive_source_role' || value.authority.exclusiveToRun !== true ||
       typeof value.authority.database !== 'string' || !value.authority.database || typeof value.authority.role !== 'string' || !value.authority.role ||
       value.authority.applicationName !== 'schemii' || typeof value.authority.provisioningReceipt !== 'string' || !value.authority.provisioningReceipt.startsWith('/') ||
-      value.method !== 'independent_pg_stat_activity_exact_role_database_application_pid_start' ||
+      !endpoint || typeof endpoint.host !== 'string' || !endpoint.host || !Number.isSafeInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535 ||
+      !['require', 'verify-ca', 'verify-full'].includes(endpoint.sslmode) ||
+      !server || typeof server.address !== 'string' || !server.address || !Number.isSafeInteger(server.port) || server.port < 1 || server.port > 65535 ||
+      !Number.isSafeInteger(server.databaseOid) || server.databaseOid < 1 || !timestamp(server.postmasterStart) || !/^[a-f0-9]{64}$/.test(server.fixtureId || '') ||
+      !same(server, value.authority.server) || (expectedAuthority && !same(expectedAuthority, value.authority)) ||
+      value.method !== 'bound_server_discovery_and_captured_pid_start_recheck' ||
       !Array.isArray(value.captured) || !Array.isArray(value.live) || value.captured.length > 10000 ||
-      value.ownedBackends !== value.live.length) throw new Error('owned_source_observation_unavailable');
-  const keys = new Set();
+      !Array.isArray(value.capturedChecks) || value.capturedChecks.length !== value.captured.length ||
+      value.ownedBackends !== value.live.length || value.releaseVerified !== (value.captured.length > 0 && value.live.length === 0)) throw new Error('owned_source_observation_unavailable');
+  const keys = new Map();
   for (const backend of value.captured) {
-    if (!Number.isSafeInteger(backend.pid) || backend.pid < 1 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00$/.test(backend.backendStart) || !Number.isFinite(Date.parse(backend.backendStart)) ||
+    if (!Number.isSafeInteger(backend.pid) || backend.pid < 1 || !timestamp(backend.backendStart) ||
         backend.database !== value.authority.database || backend.role !== value.authority.role ||
-        backend.applicationName !== value.authority.applicationName || keys.has(backend.pid)) throw new Error('owned_source_identity_invalid');
-    keys.add(backend.pid);
+        backend.applicationName !== value.authority.applicationName || keys.has(backendKey(backend)) || !same(backend, backendIdentity(backend))) throw new Error('owned_source_identity_invalid');
+    keys.set(backendKey(backend), backend);
   }
-  if (value.live.some(backend => !value.captured.some(captured => JSON.stringify(captured) === JSON.stringify(backend))) ||
+  if (value.live.some(backend => !same(keys.get(backendKey(backend)), backend)) ||
       new Set(value.live.map(backend => backend.pid)).size !== value.live.length) throw new Error('uncaptured_source_identity');
+  const live = new Set(value.live.map(backendKey)), checked = new Set();
+  for (const check of value.capturedChecks) {
+    const key = backendKey(check);
+    if (!same(keys.get(key), backendIdentity(check)) || checked.has(key) || !['present', 'absent', 'pid_reused'].includes(check.status) ||
+        (check.status === 'present') !== live.has(key) ||
+        (check.status === 'pid_reused' && (!timestamp(check.observedBackendStart) || check.observedBackendStart <= check.backendStart))) throw new Error('owned_source_recheck_invalid');
+    checked.add(key);
+  }
   return value;
 }
 export async function sampleSource(configPath, outputPath, { launch = spawn, python = resolve('.venv/bin/python') } = {}) {
@@ -44,7 +63,8 @@ export async function sampleSource(configPath, outputPath, { launch = spawn, pyt
     child.once('close', code => { clearTimeout(timer); code === 0 ? accept() : reject(new Error('source_monitor_unavailable')); });
   });
   const config = await readPrivateJSON(configPath);
-  return sourceEvidence(await readPrivateJSON(outputPath), config.runId);
+  if (config.version !== 2 || !same(config.authority.endpoint, Object.fromEntries(['host', 'port', 'sslmode'].map(key => [key, config.connection[key]])))) throw new Error('source_endpoint_changed');
+  return sourceEvidence(await readPrivateJSON(outputPath), config.runId, Date.now(), { runId: config.runId, ...config.authority });
 }
 
 export async function observeOwnedWork(receipt, workload, { origin, clientFactory = options => new HTTPClient(options), clock = () => performance.now() } = {}) {
@@ -95,7 +115,8 @@ export async function observeOwnedWork(receipt, workload, { origin, clientFactor
   } finally { for (const client of clients.values()) client.close(); }
 }
 
-export const recoverySQL = "SELECT 1 AS value, pg_backend_pid() AS pid, to_char(backend_start AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US') || '+00:00' AS backend_start, current_database() AS database, current_user AS role, current_setting('application_name') AS application_name FROM pg_stat_activity WHERE pid = pg_backend_pid()";
+const utcSQL = expression => `pg_catalog.to_char(${expression} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || '+00:00'`;
+export const recoverySQL = `SELECT 1 AS value, a.pid AS pid, ${utcSQL('a.backend_start')} AS backend_start, pg_catalog.current_database() AS database, current_user AS role, a.application_name AS application_name, pg_catalog.inet_server_addr()::text AS server_address, pg_catalog.inet_server_port() AS server_port, ${utcSQL('pg_catalog.pg_postmaster_start_time()')} AS postmaster_start, d.oid::bigint AS database_oid, pg_catalog.shobj_description(d.oid, 'pg_database') AS fixture_marker FROM pg_catalog.pg_stat_activity AS a CROSS JOIN pg_catalog.pg_database AS d WHERE a.pid = pg_catalog.pg_backend_pid() AND d.datname = pg_catalog.current_database()`;
 export async function ownedRecovery({ receipt, config, origin, journal, monitor, onExecution = async () => {},
   clientFactory = options => new HTTPClient(options), sleep = delay, clock = () => performance.now() }) {
   const account = receipt.accounts.find(value => value.username === config.username);
@@ -128,25 +149,27 @@ export async function ownedRecovery({ receipt, config, origin, journal, monitor,
         !id(execution.results[0].id, 'res')) throw new Error('recovery_terminal_failed');
     result = execution.results[0].id;
     const page = await client.json('GET', `/api/v1/common/query-executions/${execution.id}/results/${result}`);
-    const columns = ['value', 'pid', 'backend_start', 'database', 'role', 'application_name'];
+    const columns = ['value', 'pid', 'backend_start', 'database', 'role', 'application_name', 'server_address', 'server_port', 'postmaster_start', 'database_oid', 'fixture_marker'];
     if (page.executionId !== execution.id || page.resultId !== result || page.nextCursor !== null || page.truncated !== false ||
         JSON.stringify(page.columns?.map(value => value.name)) !== JSON.stringify(columns) || page.rows?.length !== 1 ||
-        page.rows[0]?.length !== 6 || page.rows[0][0] !== 1) throw new Error('recovery_exact_result_failed');
-    const [, pid, backendStart, database, role, applicationName] = page.rows[0];
+        page.rows[0]?.length !== 11 || page.rows[0][0] !== 1) throw new Error('recovery_exact_result_failed');
+    const [, pid, backendStart, database, role, applicationName, address, port, postmasterStart, databaseOid, fixtureMarker] = page.rows[0];
     const captured = sourceEvidence(await monitor(), receipt.tag);
+    const fixtureId = typeof fixtureMarker === 'string' && /^schemii-load:[0-9a-f]{64}$/.test(fixtureMarker) ? fixtureMarker.slice('schemii-load:'.length) : null;
+    if (!same(captured.serverIdentity, { address, port, postmasterStart, databaseOid, fixtureId })) throw new Error('recovery_source_server_mismatch');
     const backend = captured.live.find(value => value.pid === pid && value.backendStart === backendStart &&
       value.database === database && value.role === role && value.applicationName === applicationName);
     if (!backend) throw new Error('recovery_source_acquisition_unwitnessed');
-    await writePrivateJSON(journal, { ...intent, executionId: execution.id, resultId: result, backend, status: 'witnessed' });
+    await writePrivateJSON(journal, { ...intent, executionId: execution.id, resultId: result, backend, authority: captured.authority, status: 'witnessed' });
     await client.json('DELETE', `/api/v1/common/query-executions/${execution.id}/results/${result}`, undefined, 204); closed = true;
     let released;
     do {
-      released = sourceEvidence(await monitor(), receipt.tag);
+      released = sourceEvidence(await monitor(), receipt.tag, Date.now(), captured.authority);
       if (!released.live.length) break;
       await sleep(100);
     } while (clock() - started < 10000);
-    if (released.live.length || !released.captured.some(value => JSON.stringify(value) === JSON.stringify(backend))) throw new Error('recovery_source_not_released');
-    await writePrivateJSON(journal, { ...intent, executionId: execution.id, resultId: result, backend, status: 'verified', at: new Date().toISOString() });
+    if (!released.releaseVerified || !released.captured.some(value => same(value, backend))) throw new Error('recovery_source_not_released');
+    await writePrivateJSON(journal, { ...intent, executionId: execution.id, resultId: result, backend, authority: captured.authority, status: 'verified', at: new Date().toISOString() });
     return { verified: true, authenticatedRead: true, exactSelectTerminal: true, capturedBackendReleased: true };
   } finally {
     try {

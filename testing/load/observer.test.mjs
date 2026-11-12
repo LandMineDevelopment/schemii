@@ -80,10 +80,11 @@ test('API identity distinguishes the verified worker from shells, unknown sideca
 });
 test('run-owned source/job gauges require fresh qualified independent evidence and never aggregate substitution', async t => {
   const f = await fixture(t), app = await sampleContainer(f.container, f), now = Date.now(), runId = 'load_0123456789abcdef';
+  const server = { address: '127.0.0.1', port: 5432, postmasterStart: '2026-11-11T09:00:00.000000+00:00', databaseOid: 100, fixtureId: 'a'.repeat(64) };
   const owned = { version: 1, at: new Date(now).toISOString(), status: 'available', runId,
-    source: { version: 1, at: new Date(now).toISOString(), status: 'available',
-      method: 'independent_pg_stat_activity_exact_role_database_application_pid_start',
-      authority: { runId, kind: 'exclusive_source_role', exclusiveToRun: true, database: 'owned', role: 'owned', applicationName: 'schemii', provisioningReceipt: '/private/provisioned.json' }, live: [], captured: [], ownedBackends: 0 },
+    source: { version: 2, at: new Date(now).toISOString(), status: 'available',
+      method: 'bound_server_discovery_and_captured_pid_start_recheck', serverIdentity: server, capturedChecks: [], releaseVerified: false,
+      authority: { runId, kind: 'exclusive_source_role', exclusiveToRun: true, database: 'owned', role: 'owned', applicationName: 'schemii', provisioningReceipt: '/private/provisioned.json', endpoint: { host: '127.0.0.1', port: 5432, sslmode: 'require' }, server }, live: [], captured: [], ownedBackends: 0 },
     work: { version: 1, at: new Date(now).toISOString(), status: 'available', runId, activeJobs: 0, jobScope: 'immutable_adapter_creates_no_jobs' } };
   const value = combineObservation(receipt, { schemii: app }, internal(now), { now, ownership: owned });
   assert.equal(value.ownedBackends, 0); assert.equal(value.activeJobs, 0); assert.equal(value.qualification.capacityEligible, false);

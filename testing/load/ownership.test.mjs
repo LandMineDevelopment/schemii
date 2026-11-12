@@ -13,10 +13,13 @@ const workspaceId = `ws_${'c'.repeat(32)}`, consoleId = `con_${'d'.repeat(32)}`;
 const account = { username: 'private-account', userId: 'private-user', cookie: 'private-cookie' };
 const receipt = () => ({ version: 1, tag: runId, accounts: [{ ...account }], executions: [], jobs: [] });
 const backend = { pid: 101, backendStart: '2026-11-11T10:00:00.000000+00:00', database: 'owned-db', role: 'owned-role', applicationName: 'schemii' };
-const source = (live = [backend]) => ({ version: 1, at: new Date().toISOString(), status: 'available',
-  method: 'independent_pg_stat_activity_exact_role_database_application_pid_start',
-  authority: { kind: 'exclusive_source_role', exclusiveToRun: true, runId, database: backend.database, role: backend.role, applicationName: 'schemii', provisioningReceipt: '/private/provisioned.json' },
-  captured: [backend], live, ownedBackends: live.length });
+const server = { address: '127.0.0.1', port: 5432, postmasterStart: '2026-11-11T09:00:00.000000+00:00', databaseOid: 100, fixtureId: 'a'.repeat(64) };
+const source = (live = [backend]) => ({ version: 2, at: new Date().toISOString(), status: 'available',
+  method: 'bound_server_discovery_and_captured_pid_start_recheck',
+  authority: { kind: 'exclusive_source_role', exclusiveToRun: true, runId, database: backend.database, role: backend.role, applicationName: 'schemii', provisioningReceipt: '/private/provisioned.json',
+    endpoint: { host: '127.0.0.1', port: 5432, sslmode: 'require' }, server }, serverIdentity: server,
+  captured: [backend], capturedChecks: [{ ...backend, status: live.length ? 'present' : 'absent' }],
+  live, ownedBackends: live.length, releaseVerified: live.length === 0 });
 async function directory(t) {
   const dir = await mkdtemp(join(tmpdir(), 'schemii-owned-observation-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir;
 }
@@ -86,19 +89,20 @@ test('job observation uses exact receipt owner/workspace/id, and rejects unknown
   await assert.rejects(observeOwnedWork(r, 'report-1', { clientFactory: workClient({ job: { ...job, status: 'completed' } }).factory }));
 });
 
-function recoveryFixture({ wrongRow = false, wrongStart = false, leak = false, missingCapture = false, terminal = 'succeeded' } = {}) {
+function recoveryFixture({ wrongRow = false, wrongStart = false, leak = false, missingCapture = false, terminal = 'succeeded', releasedSample = null, pageServer = server } = {}) {
   const calls = []; let closed = false, time = 0;
   const execution = { id: executionId, status: terminal, completedStatementIndexes: [0], results: [{ id: resultId }] };
   return { calls, closed: () => closed, clock: () => time, sleep: async ms => { time += ms; },
-    monitor: async () => source(missingCapture ? [] : closed && !leak ? [] : [backend]),
+    monitor: async () => closed && releasedSample ? releasedSample : source(missingCapture ? [] : closed && !leak ? [] : [backend]),
     factory: () => ({ close() {}, json: async (method, path, body, status) => {
       calls.push({ method, path, body, status });
       if (path.endsWith('/auth/me')) return { user: { id: account.userId, username: account.username } };
       if (method === 'POST') { assert.equal(status, 201); return execution; }
       if (method === 'DELETE') { closed = true; return {}; }
       if (path.endsWith(resultId)) return { executionId, resultId, nextCursor: null, truncated: false,
-        columns: ['value', 'pid', 'backend_start', 'database', 'role', 'application_name'].map(name => ({ name })),
-        rows: [[wrongRow ? 2 : 1, backend.pid, wrongStart ? backend.backendStart.replace('.000000', '.000001') : backend.backendStart, backend.database, backend.role, backend.applicationName]] };
+        columns: ['value', 'pid', 'backend_start', 'database', 'role', 'application_name', 'server_address', 'server_port', 'postmaster_start', 'database_oid', 'fixture_marker'].map(name => ({ name })),
+        rows: [[wrongRow ? 2 : 1, backend.pid, wrongStart ? backend.backendStart.replace('.000000', '.000001') : backend.backendStart, backend.database, backend.role, backend.applicationName,
+          pageServer.address, pageServer.port, pageServer.postmasterStart, pageServer.databaseOid, `schemii-load:${pageServer.fixtureId}`]] };
       return execution;
     } }) };
 }
@@ -121,6 +125,35 @@ test('wrong rows, wrong terminal, unobserved acquisition and stranded backend fa
       clientFactory: f.factory, clock: f.clock, sleep: f.sleep }));
     assert.notEqual((await readPrivateJSON(journal)).status, 'verified'); assert(f.closed());
   }
+});
+test('review238 counterexamples cannot verify release through sourceEvidence or ownedRecovery', async t => {
+  const dir = await directory(t);
+  const legacy = { ...source([]), version: 1, method: 'independent_pg_stat_activity_exact_role_database_application_pid_start' };
+  const renamed = { ...source([]), capturedChecks: [{ ...backend, status: 'present' }] };
+  const missingRechecks = { ...source([]), capturedChecks: [] };
+  const retargeted = structuredClone(source([]));
+  retargeted.authority.endpoint = { host: '192.0.2.77', port: 6543, sslmode: 'require' };
+  retargeted.serverIdentity = { ...server, address: '192.0.2.77', fixtureId: 'b'.repeat(64) };
+  retargeted.authority.server = retargeted.serverIdentity;
+  // A self-consistent new source cannot replace the acquired source authority.
+  assert.equal(sourceEvidence(retargeted, runId).ownedBackends, 0);
+  for (const value of [legacy, renamed, missingRechecks, retargeted]) {
+    assert.throws(() => sourceEvidence(value, runId, Date.now(), source().authority));
+    const f = recoveryFixture({ releasedSample: value }), journal = join(dir, `negative-${[legacy, renamed, missingRechecks, retargeted].indexOf(value)}.json`);
+    await assert.rejects(ownedRecovery({ receipt: receipt(), config: recoveryConfig, journal, monitor: f.monitor, clientFactory: f.factory }));
+    assert.notEqual((await readPrivateJSON(journal)).status, 'verified');
+  }
+  const f = recoveryFixture({ pageServer: { ...server, databaseOid: 101 } });
+  await assert.rejects(ownedRecovery({ receipt: receipt(), config: recoveryConfig, journal: join(dir, 'wrong-actual-target.json'), monitor: f.monitor, clientFactory: f.factory }), /server_mismatch/);
+});
+test('complete captured rechecks distinguish a legitimate newer PID incarnation from a live old backend', () => {
+  const reused = { ...source([]), capturedChecks: [{ ...backend, status: 'pid_reused', observedBackendStart: '2026-11-11T11:00:00.000000+00:00' }] };
+  assert(sourceEvidence(reused, runId).releaseVerified);
+  assert.throws(() => sourceEvidence({ ...reused, capturedChecks: [{ ...reused.capturedChecks[0], observedBackendStart: backend.backendStart }] }, runId));
+  const next = { ...backend, backendStart: '2026-11-11T11:00:00.000000+00:00' };
+  const occupied = { ...reused, captured: [backend, next], live: [next], ownedBackends: 1, releaseVerified: false,
+    capturedChecks: [...reused.capturedChecks, { ...next, status: 'present' }] };
+  assert.equal(sourceEvidence(occupied, runId).ownedBackends, 1);
 });
 test('passive idle and aggregate handles cannot pass the engine recovery gate', () => {
   const zero = Object.fromEntries(['retainedSessions', 'openCursors', 'ownedBackends', 'activeJobs', 'ordinaryPermits', 'retainedPermits'].map(key => [key, 0]));
