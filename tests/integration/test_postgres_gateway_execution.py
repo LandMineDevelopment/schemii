@@ -736,15 +736,24 @@ def test_real_mixed_schema_proven_success_protected_unknown_and_opaque_drift_den
     save(f, desired)
     unknown = review(f)
     assert not unknown.apply_capable and unknown.compatibility.unknown_reasons
-    # Policies use a catalog dependency class outside the modeled relation graph.
-    # They must yield an explicit unknown boundary, never false completeness.
+    # A policy referencing another relation retains an unknown preservation
+    # boundary, even though its owner-to-target dependency edge is captured.
     with source.connect() as connection:
         connection.execute(sql.SQL("DROP FUNCTION {}.dynamic_reference()").format(q))
         connection.execute(
             sql.SQL(
-                "CREATE POLICY protected_policy ON {}.ordinary USING (id > 0)"
-            ).format(q)
+                "CREATE POLICY protected_policy ON {}.ordinary "
+                "USING (EXISTS (SELECT 1 FROM {}.partitioned AS protected "
+                "WHERE protected.id = ordinary.id))"
+            ).format(q, q)
         )
+    policy_catalog = f.gateway.introspect(f.profile, namespace)
+    assert not policy_catalog.safety.dependency_complete
+    assert any(
+        (edge.source.namespace, edge.source.name, edge.target.namespace, edge.target.name)
+        == (namespace, "ordinary", namespace, "partitioned")
+        for edge in policy_catalog.safety.dependencies
+    )
     policy_review = review(f)
     assert not policy_review.apply_capable
     assert any(
