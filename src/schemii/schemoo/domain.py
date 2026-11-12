@@ -36,7 +36,7 @@ def parameter_domain(catalog, definition, alternative, parameter):
                                  if item["id"] == saved["id"]), None)
             if relationship is None:
                 raise ValueError("The parameter lookup foreign key was removed. Choose an explicit domain before saving.")
-        else:
+        elif contract.get("scope") != "model":
             relationship = next((item for item in catalog.get("relationships", [])
                                  if (item["sourceTable"], item["sourceColumn"]) == (table, column)), None)
         if relationship:

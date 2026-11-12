@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
 import { importedDraft, defaultSourceSelection } from "../../src/schemii/schemoo/web/model-draft.js";
-import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
+import { splitDraft, inheritAliasExposure } from "../../src/schemii/schemoo/web/model-state.js";
 import { addSourceSelection } from "../../src/schemii/schemoo/web/source-reconciliation.js";
 import { ensureAliasConnections } from "../../src/schemii/schemoo/web/alias-model.js";
 
@@ -29,6 +29,26 @@ test("the visible add-table action preserves unrelated relationships and alias e
   assert.deepEqual(draft.edges.map(edge => edge.relationshipId), ["selected"]);
   assert.deepEqual(draft.exposedFields.filter(field => field.table === "d").map(field => field.column), ["id", "name"]);
   assert.equal(draft.exposedFields.some(field => field.table === "alias_b"), false);
+});
+
+test("creating an alias adds candidates only for that occurrence, not existing aliases", () => {
+  const source = catalog(), draft = importedDraft(source);
+  draft.nodes.push({ id: "old_a", table: "a", label: "Old A" }, { id: "old_b", table: "b", label: "Old B" });
+  source.relationships = [
+    { id: "related", sourceTable: "a", sourceColumn: "id", targetTable: "d", targetColumn: "id" },
+    { id: "unrelated", sourceTable: "b", sourceColumn: "id", targetTable: "c", targetColumn: "id" },
+  ];
+  const app = readFileSync(new URL("prototype.js", web), "utf8");
+  const action = app.slice(app.indexOf("function addAlias("), app.indexOf("function addTable("));
+  runInNewContext(`${action}\naddAlias('a', 'New A');`, {
+    draft, catalog: source, inheritAliasExposure, ensureAliasConnections,
+    crypto: { randomUUID: () => "11223344556677889900" }, canvas: { placeNode() {} },
+    selected: null, refreshForms() {}, changed() {}, inspectSelection() {}, $: () => ({}),
+  });
+  assert.deepEqual(draft.edges.map(edge => [edge.relationshipId, edge.source, edge.target]), [
+    ["related", "alias_112233445566", "d"],
+  ]);
+  assert.equal(draft.exposedFields.some(field => field.table === "old_a" || field.table === "old_b"), false);
 });
 
 class Element {

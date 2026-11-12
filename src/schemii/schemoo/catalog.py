@@ -107,7 +107,7 @@ def initial_positions(services, owner, catalog):
     return catalog
 
 
-def source_dependencies(catalog, definition):
+def source_dependencies(catalog, definition, *, previous=None):
     """Resolve authored fields and implicit join/grain inputs to physical columns.
 
     Client contract entries are never an input to dependency discovery. Aliases
@@ -118,6 +118,23 @@ def source_dependencies(catalog, definition):
     nodes = {node["id"]: node for node in definition.get("nodes", [])}
     relationships = {relationship["id"]: relationship for relationship in catalog.get("relationships", [])}
     selected, used_relationships = {}, set()
+
+    def implicit_bindings(value):
+        source_nodes = {node["id"]: node for node in (value or {}).get("nodes", [])}
+        bindings = {}
+        for scope in (value or {}).get("scopes", []):
+            for option in scope.get("alternatives", []):
+                for parameter in option.get("inputs", []):
+                    predicate = next((item for item in option.get("conditions", [])
+                                      if parameter.get("id") and item.get("parameterId") == parameter["id"]), {})
+                    node_id = predicate.get("table")
+                    bindings[(scope.get("id"), option.get("id"), parameter.get("id"))] = (
+                        parameter.get("type"), parameter.get("domain"), node_id,
+                        predicate.get("column"), source_nodes.get(node_id, {}).get("table"))
+        return bindings
+
+    prior_bindings = implicit_bindings(previous)
+    current_bindings = implicit_bindings(definition)
 
     def table_columns(table):
         if table not in tables or not tables[table].get("columns"):
@@ -192,7 +209,13 @@ def source_dependencies(catalog, definition):
                 if parameter.get("domain"):
                     domain(parameter["domain"])
                     continue
-                lookup = parameter_domain(catalog, definition, alternative, parameter)
+                key = (scope.get("id"), alternative.get("id"), parameter.get("id"))
+                # Only a new or deliberately rebound parameter discovers a new
+                # implicit domain. An unchanged saved no-FK binding stays local.
+                lookup_definition = definition
+                if previous is not None and prior_bindings.get(key) != current_bindings.get(key):
+                    lookup_definition = {**definition, "sourceContract": None}
+                lookup = parameter_domain(catalog, lookup_definition, alternative, parameter)
                 domain(lookup)
                 if lookup and lookup.get("relationshipId"):
                     used_relationships.add(lookup["relationshipId"])
@@ -222,9 +245,9 @@ def source_dependencies(catalog, definition):
     return selected, used_relationships
 
 
-def catalog_contract(catalog, definition=None):
+def catalog_contract(catalog, definition=None, *, previous=None):
     """Schema-only baseline, scoped server-side for new model writes."""
-    selected, relationships = source_dependencies(catalog, definition) if definition is not None else (None, None)
+    selected, relationships = source_dependencies(catalog, definition, previous=previous) if definition is not None else (None, None)
     return {
         "scope": "model" if selected is not None else "catalog",
         "tables": [{"name": table["name"], "primaryKey": list(table.get("primaryKey", [])),
@@ -251,7 +274,7 @@ def model_source_contract(catalog, definition, previous=None):
     # Only the server's prior contract may pin an implicit lookup identity.
     # Client omissions cannot suppress dependencies during initial creation.
     dependency_definition = {**definition, "sourceContract": (previous or {}).get("sourceContract")}
-    current = catalog_contract(catalog, dependency_definition)
+    current = catalog_contract(catalog, dependency_definition, previous=previous)
     prior = (previous or {}).get("sourceContract") or {}
     proposed = definition.get("sourceContract") or {}
     prior_tables = {table["name"]: table for table in prior.get("tables", [])}
