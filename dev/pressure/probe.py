@@ -403,11 +403,11 @@ class Probe:
         )
 
     def client(self, origin: str = LOCAL):
-        import httpx
-
         check(origin in {LOCAL, PREVIEW}, "canonical_https_only")
+        import httpx2
+
         verify = ssl._create_unverified_context() if origin == LOCAL else True
-        return httpx.Client(
+        return httpx2.Client(
             base_url=origin,
             verify=verify,
             follow_redirects=False,

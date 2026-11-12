@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import builtins
 from types import SimpleNamespace
 
 import pytest
@@ -63,12 +64,35 @@ def test_lifespan_protocol_accepts_only_fixed_controller_confirmation(
         p.operation("restart-daemon")
 
 
-def test_noncanonical_public_origin_and_arbitrary_source_sql_are_rejected_before_io():
+def test_noncanonical_public_origin_and_arbitrary_source_sql_are_rejected_before_io(
+    monkeypatch,
+):
+    original_import = builtins.__import__
+
+    def reject_client_import(name, *args, **kwargs):
+        assert name not in {"httpx", "httpx2"}, (
+            "Invalid origins must fail before client loading"
+        )
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_client_import)
     probe = p.Probe.__new__(p.Probe)
     with pytest.raises(Refused, match="canonical_https_only"):
         probe.client("http://localhost:8000")
     with pytest.raises(Refused, match="fixed_source_statement"):
         probe.execute(None, {}, {}, "DROP DATABASE retained")
+
+
+@pytest.mark.parametrize("origin", [p.LOCAL, p.PREVIEW])
+def test_canonical_clients_use_the_declared_dependency_without_connecting(origin):
+    import httpx2
+
+    probe = p.Probe.__new__(p.Probe)
+    with probe.client(origin) as client:
+        assert isinstance(client, httpx2.Client)
+        assert str(client.base_url) == origin
+        assert client.headers["Origin"] == origin
+        assert client.follow_redirects is False
 
 
 def test_failed_external_source_sample_never_reuses_old_success(tmp_path, monkeypatch):

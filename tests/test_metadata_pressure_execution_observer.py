@@ -343,15 +343,26 @@ def test_ack_does_not_evict_unknown_or_unfinished_work(tmp_path):
     assert observer.losses == 1
 
 
-def test_cleanup_worker_order_is_unchanged_by_observer(tmp_path):
+@pytest.mark.parametrize("already_closed", [False, True])
+def test_cleanup_worker_order_is_unchanged_by_observer(tmp_path, already_closed):
     wrapper, observer, base, _ = fixture(tmp_path)
     declare(observer)
     asyncio.run(invoke(wrapper))
     identifier = observer.operations["1" * 32]["receipts"][0]["id"]
     order = []
     base.cancel = lambda *args: order.append("cancel")
-    base.get_owned = lambda *args: NS(results=[NS(id="actual-result")])
-    base.close_result = lambda *args: order.append("close")
+    base.get_owned = lambda *args: NS(
+        results=[NS(id="retired-result"), NS(id="actual-result")]
+    )
+    closed = {"retired-result"}
+    if already_closed:
+        closed.add("actual-result")
+
+    def close_result(*args):
+        assert args[-1] == "actual-result"
+        order.append("close")
+
+    base.close_result = close_result
 
     async def run():
         async def worker():
@@ -360,11 +371,12 @@ def test_cleanup_worker_order_is_unchanged_by_observer(tmp_path):
             order.append("joined")
 
         await streaming._cleanup(
-            base, ACTOR, NS(id=identifier), asyncio.create_task(worker())
+            base, ACTOR, NS(id=identifier), asyncio.create_task(worker()), closed
         )
 
     asyncio.run(run())
-    assert order == ["cancel", "joined", "close"]
+    assert order == ["cancel", "joined"] + ([] if already_closed else ["close"])
+    assert closed == {"retired-result", "actual-result"}
 
 
 def test_actual_csv_asgi_send_failure_retains_capture_and_closes_native_iterator(

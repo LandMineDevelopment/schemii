@@ -2459,7 +2459,7 @@ def begin(
     check(ingress["image"] == images["ingress"], "retained_ingress_image")
     interpreter = primary / ".venv/bin/python"
     check(interpreter.is_file(), "prepared_probe_interpreter_required")
-    command([str(interpreter), "-c", "import psycopg,httpx"], timeout=5)
+    command([str(interpreter), "-c", "import psycopg,httpx2"], timeout=5)
     check(
         (root / "testing/load/source_monitor.py").is_file(),
         "source_monitor_dependency_missing",

@@ -324,7 +324,7 @@ class Runtime:
             )
             return '{"status":"exported"}'
         if argv[0] != "docker":
-            assert argv[1:] == ["-c", "import psycopg,httpx"]
+            assert argv[1:] == ["-c", "import psycopg,httpx2"]
             return ""
         args = argv[1:]
         if args == ["context", "show"]:
