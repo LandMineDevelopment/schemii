@@ -74,10 +74,10 @@ test("summary grouping and model connection are separate and protect both endpoi
 
 test("summary mapping suggestions follow one explicit FK without choosing between roles",()=>{
   const draft={nodes:[{id:"people",table:"people"},{id:"certs",table:"cert"}],edges:[{source:"certs",target:"people",relationshipId:"person_fk",enabled:false}]};
-  const catalog={tables:[{name:"people",primaryKey:["id"]}],relationships:[{id:"person_fk",sourceColumn:"person_id",targetColumn:"id"}]};
+  const catalog={tables:[{name:"people",primaryKey:["id"]}],relationships:[{id:"person_fk",sourceTable:"cert",targetTable:"people",sourceColumn:"person_id",targetColumn:"id"}]};
   assert.deepEqual(suggestSummaryConnection(draft,catalog,"certs","people"),[{source:"person_id",target:"id"}]);
   assert.deepEqual(suggestSummaryConnection(draft,catalog,"people","people"),[{source:"id",target:"id"}]);
   draft.edges.push({source:"certs",target:"people",relationshipId:"approver_fk"});
-  catalog.relationships.push({id:"approver_fk",sourceColumn:"approver_id",targetColumn:"id"});
+  catalog.relationships.push({id:"approver_fk",sourceTable:"cert",targetTable:"people",sourceColumn:"approver_id",targetColumn:"id"});
   assert.deepEqual(suggestSummaryConnection(draft,catalog,"certs","people"),[]);
 });

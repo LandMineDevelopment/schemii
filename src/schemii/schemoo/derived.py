@@ -5,7 +5,6 @@ before connecting the result to a model object. Definitions contain references,
 never arbitrary SQL fragments. Older owner-rooted summaries retain their grain.
 """
 
-from collections import deque
 from datetime import date
 import math
 from uuid import UUID
@@ -19,9 +18,9 @@ NUMERIC_TYPES = {"smallint", "integer", "bigint", "decimal", "numeric", "real", 
 
 
 def unique_keys(model, source):
-    table = model.table_details[model.nodes[source]["table"]]
+    table = model.table_details[model.keys[source]]
     keys = [key for key in table.get("uniqueKeys", []) if key and all(
-        model.column_details[table["name"]].get(column, {}).get("nullable") is False for column in key)]
+        model.column_details[model.keys[source]].get(column, {}).get("nullable") is False for column in key)]
     if table.get("primaryKey"):
         keys.append(table["primaryKey"])
     return keys
@@ -46,7 +45,7 @@ def validate_conditions(model, output, owner, kind):
         if condition.get("compareColumn") is not None:
             model.validate(condition)
             continue
-        details = model.column_details[model.nodes[node]["table"]][column]
+        details = model.column_details[model.keys[node]][column]
         data_type = details.get("dataType", details.get("data_type", "")).lower().split("(")[0].strip()
         if condition.get("valueSource") == "today":
             if data_type and data_type != "date" and not data_type.startswith("timestamp"):
@@ -92,7 +91,7 @@ def validate_conditions(model, output, owner, kind):
 def configure(model):
     """Validate derived definitions and add internal owner associations."""
     model.derived = {}
-    model.columns = {key: set(model.tables[node["table"]]) for key, node in model.nodes.items()}
+    model.columns = {key: set(model.tables[model.keys[key]]) for key, node in model.nodes.items()}
     for key, node in model.nodes.items():
         if not node.get("derivation"):
             continue
@@ -100,7 +99,7 @@ def configure(model):
         source = definition["source"]
         if source not in model.nodes or model.nodes[source].get("derivation"):
             raise ValueError("Choose a physical model object as the calculation source; nested derived sources are not supported yet.")
-        if node["table"] != model.nodes[source]["table"]:
+        if model.keys[key] != model.keys[source]:
             raise ValueError("A derived source must reference its calculation source's physical table.")
         groups = definition["groupBy"]
         outputs = definition["outputs"]
@@ -124,8 +123,8 @@ def configure(model):
             if not any(set(key).issubset(targets) for key in unique_keys(model, target)):
                 raise ValueError("The summary connection must include the target's complete primary key or a nonnullable unique key.")
             for item in mappings:
-                source_type = type_family(model.column_details[model.nodes[source]["table"]][item["source"]])
-                target_type = type_family(model.column_details[model.nodes[target]["table"]][item["target"]])
+                source_type = type_family(model.column_details[model.keys[source]][item["source"]])
+                target_type = type_family(model.column_details[model.keys[target]][item["target"]])
                 if source_type and target_type and source_type != target_type:
                     raise ValueError("Summary connection columns must have compatible data types.")
         elif definition["kind"] == "aggregate":
@@ -148,7 +147,7 @@ def configure(model):
             if operation in ARITHMETIC and output.get("operand"):
                 numeric_columns.append(output["operand"])
             for column in numeric_columns:
-                details = model.column_details[model.nodes[contributor]["table"]].get(column, {})
+                details = model.column_details[model.keys[contributor]].get(column, {})
                 kind = details.get("dataType", details.get("data_type", "")).lower().split("(")[0].strip()
                 if kind and kind not in NUMERIC_TYPES:
                     raise ValueError(f"{operation} requires numeric columns; {model.nodes[contributor]['label']}.{column} has type {kind}.")
@@ -169,22 +168,6 @@ def attach(model):
         if edge_id in model.edges:
             raise ValueError("Relationship IDs cannot collide with derived-source associations.")
         source = definition["source"]
-        routes, queue = {source: None}, deque([source])
-        while queue:
-            previous = queue.popleft()
-            for node, _ in model.graph[previous]:
-                if node not in routes and node not in model.derived:
-                    routes[node] = previous
-                    queue.append(node)
-        for output in definition["outputs"]:
-            contributor = output.get("nodeId", source)
-            allowed = {source}
-            if contributor in routes:
-                while contributor != source:
-                    allowed.add(contributor)
-                    contributor = routes[contributor]
-            if any(condition["table"] not in allowed for condition in output.get("conditions", [])):
-                raise ValueError("Calculated-field conditions must use sources on the owner's path to that output; a condition cannot add a separate relationship branch.")
         groups = definition["groupBy"]
         connection = definition.get("connection")
         target = connection["target"] if connection else source
@@ -192,9 +175,19 @@ def attach(model):
         model.edges[edge_id] = {"id": edge_id, "source": key, "target": target,
                                 "sourceColumn": mapping["source"] if mapping else groups[0] if groups else "",
                                 "targetColumn": mapping["target"] if mapping else groups[0] if groups else "",
+                                "columns": connection["columns"] if connection else [{"source": column, "target": column} for column in groups],
                                 "derived": True, "enabled": True}
         model.graph[key].append((target, edge_id))
         model.graph[target].append((key, edge_id))
+    # Finish the graph before validating dependencies: the model's cached blocks
+    # must describe every relationship, including these leaf associations.
+    for definition in model.derived.values():
+        source = definition["source"]
+        for output in definition["outputs"]:
+            contributor = output.get("nodeId", source)
+            allowed = model.possible_path_nodes(source, contributor)
+            if any(condition["table"] not in allowed for condition in output.get("conditions", [])):
+                raise ValueError("Calculated-field conditions must use sources on the owner's path to that output; a condition cannot add a separate relationship branch.")
 
 
 def expression(output, value, operand, identifier, literal):

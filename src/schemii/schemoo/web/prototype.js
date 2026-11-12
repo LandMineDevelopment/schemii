@@ -1,3 +1,4 @@
+import { catalogTable, sourceIdentity, sameSource, sourceLabel, mappingLabel, relationshipColumns } from "./logical-relationships.js";
 import { edgeRelationship, validateLogicalRelationship } from "./logical-relationships.js";
 import { requestJson } from "#common/http.js";
 import { element } from "#common/dom.js";
@@ -18,14 +19,14 @@ import { createQueryPlanView, parseQueryPlan } from "#common/query-plan.js";
 import { confirmAction } from "#common/confirmation.js";
 import { formatElapsed } from "#common/elapsed-time.js";
 import { readExecution } from "/assets/common/query-execution.js";
-import { openModelLibrary, confirmModelDeletion, refreshModelLibraryActions } from "./model-library.js";
+import { openModelLibrary, confirmModelDeletion, refreshModelLibraryActions, openSourceSelection } from "./model-library.js";
 import { createPreviewLibrary } from "./preview-library.js";
 import { installProductNavigation } from "#common/product-navigation.js";
 import { nodeColumns } from "./model-columns.js";
 import { openDerivedSource } from "./derived-dialog.js";
 import { repetitionDiagnostics, repetitionNotice, summarySeed } from "./repetition.js";
 import { conditionSummary } from "./derived-conditions.js";
-import { reconcileSourceCatalog, acceptSourceIssue } from "./source-reconciliation.js";
+import { reconcileSourceCatalog, acceptSourceIssue, addSourceSelection } from "./source-reconciliation.js";
 import { createModelAssistant } from "#common/model-assistant.js";
 
 const $ = id => document.getElementById(id), API = "/api/v1/schemoo";
@@ -83,11 +84,21 @@ function sourceIssueNotice(issue) {
 }
 function sourceAdditionText() {
   const parts=[];
-  if(sourceAdditions.tables.length)parts.push(`${sourceAdditions.tables.length} new table${sourceAdditions.tables.length===1?"":"s"}`);
-  if(sourceAdditions.columns.length)parts.push(`${sourceAdditions.columns.length} new column${sourceAdditions.columns.length===1?"":"s"}`);
-  if(sourceAdditions.relationships.length)parts.push(`${sourceAdditions.relationships.length} new connection${sourceAdditions.relationships.length===1?"":"s"} (disabled)`);
+  if(sourceAdditions.tables.length)parts.push(`${sourceAdditions.tables.length} available source${sourceAdditions.tables.length===1?"":"s"}`);
+  if(sourceAdditions.columns.length)parts.push(`${sourceAdditions.columns.length} available field${sourceAdditions.columns.length===1?"":"s"}`);
+  if(sourceAdditions.relationships.length)parts.push(`${sourceAdditions.relationships.length} available connection${sourceAdditions.relationships.length===1?"":"s"} (add explicitly)`);
   return parts.join(" · ");
 }
+const addSources = element("button", {type:"button",className:"ui-button",text:"Add sources and fields"});
+$("graph-status").after(addSources);
+addSources.onclick = async () => {
+  if(!catalog || saveBlocked())return;
+  const currentDraft=draft,currentCatalog=catalog;
+  await openSourceSelection(currentCatalog,(selection,selectedCatalog)=>{
+    if(draft!==currentDraft || catalog!==currentCatalog || saveBlocked())throw new Error("The model changed. Close this dialog and review its sources again.");
+    sourceAdditions=addSourceSelection(draft,selectedCatalog,selection);catalog=selectedCatalog;refreshForms();changed({structure:true});
+  });
+};
 function currentSourceIssues(){return diagnostics.issues || diagnostics.sourceIssues || [];}
 function renderObjectSourceIssues(){
   $("object-source-issues")?.remove();
@@ -95,7 +106,7 @@ function renderObjectSourceIssues(){
   const node=draft.nodes.find(candidate=>candidate.id===selected.node);
   const edge=draft.edges.find(candidate=>candidate.id===selected.edge);
   const relevant=currentSourceIssues().filter(issue=>
-    (node&&(issue.nodeId===node.id||(issue.nodeIds||[]).includes(node.id)||issue.table===node.table))||
+    (node&&(issue.nodeId===node.id||(issue.nodeIds||[]).includes(node.id)||sameSource(issue,node,catalog)))||
     (edge&&(issue.edgeId===edge.id||(issue.edgeIds||[]).includes(edge.id)||(issue.relationshipId && issue.relationshipId===edge.relationshipId))));
   if(!relevant.length)return;
   const section=element("section",{className:"editor-section source-change-section",attrs:{id:"object-source-issues"}},[helpHeading("Source changes","drift"),...relevant.map(sourceIssueNotice)]);
@@ -187,37 +198,37 @@ function renderFields() {
   renderPreviewFields($("fields"), { draft, catalog, onChange: changed });
 }
 function editLogicalRelationship(existing, source) {
-  const nodes = draft.nodes.filter(node => !node.derivation && catalog.tables.some(table => table.name === node.table));
-  if (!nodes.length) return;
-  const value = existing ? {...existing} : {id:`logical_${crypto.randomUUID().replaceAll("-", "")}`,kind:"logical",relationshipId:null,source:source || nodes[0].id,target:nodes.find(node => node.id !== source)?.id || nodes[0].id,sourceColumn:"",targetColumn:"",cardinality:"many_to_many",enabled:true};
-  const host = $("selection-inspector");
-  selected = existing ? {edge:existing.id} : null;
-  maximizeQuery(false); $("inspector").hidden=true; $("table-inspector").hidden=false; $("alias-tools").hidden=true;
-  $("table-inspector-title").textContent="Logical relationship"; $("table-inspector-kind").textContent="MODEL CONNECTION";syncInspectorTools();
-  const render = () => {
-    disposeSelects(host); host.replaceChildren(element("h3",{text:existing ? "Edit logical relationship" : "Add logical relationship"}),element("p",{className:"hint",text:"Join two columns by equality. This relationship belongs to the model and does not create a database constraint. Query traversal follows the model’s starting object."}));
-    for (const side of ["source","target"]) {
-      host.append(labeled(side === "source" ? "From object" : "To object", modelSelect(`${side} object`,nodes.map(node=>[node.id,node.label]),value[side],id=>{value[side]=id;value[`${side}Column`]="";render();})));
-      host.append(labeled("Column",modelSelect(`${side} column`,[["","Choose column"],...columns(value[side]).map(column=>[column.name,column.name])],value[`${side}Column`],column=>{value[`${side}Column`]=column;})));
-    }
-    const error=element("p",{className:"warning",attrs:{role:"alert"}});
-    const save=element("button",{type:"button",className:"ui-button primary",text:existing ? "Save relationship" : "Add relationship"});
-    save.onclick=()=>{error.textContent=validateLogicalRelationship(value,draft,catalog);if(error.textContent)return;if(existing)Object.assign(existing,value);else draft.edges.push(value);selected={edge:value.id};refreshForms();changed();inspectSelection();};
-    const cancel=element("button",{type:"button",className:"ui-button",text:"Cancel"});cancel.onclick=()=>{refreshForms();if(!existing)panel("model");};
-    host.append(error,element("div",{className:"actions"},[save,cancel]));
-  };
-  render(); host.scrollIntoView({block:"nearest"});
+  const nodes=draft.nodes.filter(node=>!node.derivation && catalogTable(node,catalog));
+  if(!nodes.length)return;
+  const value=existing ? structuredClone(existing) : {id:`logical_${crypto.randomUUID().replaceAll("-", "")}`,kind:"logical",source:source || nodes[0].id,target:nodes.find(node=>node.id!==source)?.id || nodes[0].id,columns:[{source:"",target:""}],enabled:true};
+  value.columns=relationshipColumns(value).map(pair=>({...pair}));delete value.sourceColumn;delete value.targetColumn;
+  const host=$("selection-inspector");selected=existing?{edge:existing.id}:null;
+  maximizeQuery(false);$("inspector").hidden=true;$("table-inspector").hidden=false;$("alias-tools").hidden=true;
+  $("table-inspector-title").textContent="Logical relationship";$("table-inspector-kind").textContent="MODEL CONNECTION";syncInspectorTools();
+  const render=()=>{
+    disposeSelects(host);host.replaceChildren(element("h3",{text:existing?"Edit logical relationship":"Add logical relationship"}),element("p",{className:"hint",text:"Map ordered source and target columns. Every pair must match by equality; no database constraint is created."}));
+    for(const side of ["source","target"])host.append(labeled(side==="source"?"From object":"To object",modelSelect(`${side} object`,nodes.map(node=>[node.id,`${node.label} · ${sourceLabel(node,catalog)}`]),value[side],id=>{value[side]=id;for(const pair of value.columns)pair[side]="";render();})));
+    value.columns.forEach((pair,index)=>{
+      const row=element("fieldset",{className:"relationship-column-pair"},[element("legend",{text:`Column pair ${index+1}`})]);
+      for(const side of ["source","target"])row.append(labeled(side==="source"?"Source column":"Target column",modelSelect(`${side} column ${index+1}`,[["","Choose column"],...columns(value[side]).map(column=>[column.name,column.name])],pair[side],column=>{pair[side]=column;})));
+      if(value.columns.length>1){const remove=element("button",{type:"button",className:"ui-button",text:`Remove pair ${index+1}`});remove.onclick=()=>{value.columns.splice(index,1);render();};row.append(remove);}host.append(row);
+    });
+    const add=element("button",{type:"button",className:"ui-button",text:"Add column pair"});add.disabled=value.columns.length>=32;add.onclick=()=>{value.columns.push({source:"",target:""});render();};
+    const error=element("p",{className:"warning",attrs:{role:"alert"}}),save=element("button",{type:"button",className:"ui-button primary",text:existing?"Save relationship":"Add relationship"});
+    save.onclick=()=>{error.textContent=validateLogicalRelationship(value,draft,catalog);if(error.textContent)return;if(existing){delete existing.sourceColumn;delete existing.targetColumn;Object.assign(existing,value);}else draft.edges.push(value);selected={edge:value.id};refreshForms();changed();inspectSelection();};
+    const cancel=element("button",{type:"button",className:"ui-button",text:"Cancel"});cancel.onclick=()=>{refreshForms();if(!existing)panel("model");};host.append(add,error,element("div",{className:"actions"},[save,cancel]));
+  };render();host.scrollIntoView({block:"nearest"});
 }
 function renderRelationships() {
   const cycles = new Set(diagnostics.cycleEdges || []);
   $("relationship-count").textContent = `${draft.edges.filter(e => e.enabled).length} / ${draft.edges.length}`;
   const add = element("button",{type:"button",className:"ui-button",text:"Add logical relationship"});
-  add.onclick=()=>{canvas.startConnection();$("inspector").hidden=true;$("table-inspector").hidden=true;syncInspectorTools();};
+  add.onclick=()=>editLogicalRelationship(null,selected?.node);
   $("relationships").replaceChildren(add,...draft.edges.map(e => {
-    const r = edgeRelationship(e, catalog);
+    const r = edgeRelationship(e, catalog,draft.nodes);
     const checkbox = element("input", { attrs: { type: "checkbox", "aria-label": `Enable ${e.id}` } }); checkbox.checked = e.enabled;
     checkbox.onchange = () => { e.enabled = checkbox.checked; changed(); };
-    const label = element("button", { className: "edge-name", type: "button", text: `${name(e.source)}.${r?.sourceColumn || "missing FK"} → ${name(e.target)}.${r?.targetColumn || "missing FK"}${cycles.has(e.id) ? " · CYCLE" : ""}` });
+    const label = element("button", { className: "edge-name", type: "button", text: `${name(e.source)}.${mappingLabel(r,"source") || "missing FK"} → ${name(e.target)}.${mappingLabel(r,"target") || "missing FK"}${cycles.has(e.id) ? " · CYCLE" : ""}` });
     label.onclick = () => { selected = { edge: e.id }; inspectSelection(); };
     return element("div", { className: `relationship${cycles.has(e.id) ? " cyclic" : ""}` }, [checkbox,label]);
   }));
@@ -229,8 +240,8 @@ function renderNodeConnections() {
   const edges=draft.edges.filter(e=>e.source===selected.node || e.target===selected.node);
   host.replaceChildren(element("h3",{text:`Connections · ${edges.length}`}),element("p",{className:"hint",text:"Toggle each connection independently. Dashed lines are disabled; red lines belong to a cycle."}));
   for(const edge of edges) {
-    const relation=edgeRelationship(edge, catalog);
-    const text=`${name(edge.source)}.${relation?.sourceColumn || "missing FK"} → ${name(edge.target)}.${relation?.targetColumn || "missing FK"}`;
+    const relation=edgeRelationship(edge, catalog,draft.nodes);
+    const text=`${name(edge.source)}.${mappingLabel(relation,"source") || "missing FK"} → ${name(edge.target)}.${mappingLabel(relation,"target") || "missing FK"}`;
     const enabled=element("input",{attrs:{type:"checkbox","aria-label":`Enable connection ${text}`}}); enabled.checked=edge.enabled;
     enabled.onchange=()=>{edge.enabled=enabled.checked;changed();};
     const edit=element("button",{type:"button",className:"edge-name",text:`${text}${cycles.has(edge.id)?" · CYCLE":""}`});
@@ -277,11 +288,12 @@ function renderSelection() {
       }
       host.append(element("section",{attrs:{id:"table-columns"}}));renderTableColumns();return;
     }
-    host.append(helpHeading(isAlias(node)?"Alias table":"Model table", "aliases"),element("p", { className: "hint", text: `Physical source: ${node.table}` }));
-    if (!catalog.tables.some(t => t.name === node.table)) {
+    host.append(helpHeading(isAlias(node)?"Alias table":"Model table", "aliases"),element("p", { className: "hint", text: `Physical source: ${sourceLabel(node,catalog)}` }));
+    if (!Boolean(catalogTable(node,catalog))) {
       host.append(element("p", { className:"warning", text:"This source table is unavailable. Choose its intended replacement; columns and relationships will be validated, not guessed." }),
-        modelSelect("Replacement source table", [["", "Choose replacement source"], ...catalog.tables.map(t => [t.name,t.name])], "", value => {
-          if (!value) return; node.table=value; ensureAliasConnections(draft,catalog); refreshForms(); changed();
+        modelSelect("Replacement source table", [["", "Choose replacement source"], ...catalog.tables.map(t => [sourceIdentity(t,catalog),sourceLabel(t,catalog)])], "", value => {
+          if (!value) return; const [namespace,table]=JSON.parse(value);node.table=table;node.namespace=namespace;ensureAliasConnections(draft,catalog,new Set([node.id])); refreshForms(); changed();
+
         }));
     }
     const label = element("input", { attrs: { "aria-label": "Object label", maxlength: 100 } }); label.value = node.label;
@@ -300,7 +312,7 @@ function renderSelection() {
       alias.hidden = true; aliasForm.hidden = false; aliasName.focus(); aliasName.select();
     };
     host.append(labeled("Business label",label),alias,aliasForm,element("p",{className:"hint",text:"Aliases have their own available foreign-key connections. Enable only the paths needed for this role."}));
-    const missingSource=!catalog.tables.some(t=>t.name===node.table);
+    const missingSource=!Boolean(catalogTable(node,catalog));
     if(!node.derivation) host.append(icon("delete",`${missingSource ? "Remove missing object" : "Remove from model"} ${node.label}`,()=>{
       const impact=aliasImpact(draft,node.id);
       if(!confirm(`Remove model object “${node.label}”? This removes ${impact.connections} connections and ${impact.fields} selected output fields. ${impact.bindings} filter conditions will need a new source binding. ${impact.isRoot?"Another available object becomes the starting object. ":""}The physical table or view and its data are not deleted.`))return;
@@ -313,26 +325,26 @@ function renderSelection() {
     host.append(calculation,element("section",{attrs:{id:"table-columns"}}), element("div",{attrs:{id:"node-connections"}})); renderTableColumns(); renderNodeConnections();
   } else if (selected?.edge) {
     const edge = draft.edges.find(e => e.id === selected.edge); if (!edge) return;
-    const r = edgeRelationship(edge, catalog);
+    const r = edgeRelationship(edge, catalog,draft.nodes);
     if (edge.kind === "logical") {
-      host.append(element("h3",{text:"Logical relationship"}),element("p",{className:"hint",text:`${name(edge.source)}.${edge.sourceColumn} = ${name(edge.target)}.${edge.targetColumn}`}),element("p",{className:"hint",text:"Model equality join; no database constraint is created."}),icon("edit","Edit logical relationship",()=>editLogicalRelationship(edge)),icon("delete","Delete logical relationship",()=>{if(!confirm("Remove this logical relationship from the model?"))return;draft.edges=draft.edges.filter(other=>other.id!==edge.id);selected=null;refreshForms();changed();}));
+      host.append(element("h3",{text:"Logical relationship"}),element("p",{className:"hint",text:`${name(edge.source)}.${mappingLabel(edge,"source")} = ${name(edge.target)}.${mappingLabel(edge,"target")}`}),element("p",{className:"hint",text:"Model equality join; no database constraint is created."}),icon("edit","Edit logical relationship",()=>editLogicalRelationship(edge)),icon("delete","Delete logical relationship",()=>{if(!confirm("Remove this logical relationship from the model?"))return;draft.edges=draft.edges.filter(other=>other.id!==edge.id);selected=null;refreshForms();changed();}));
       const enabled=element("input",{attrs:{type:"checkbox","aria-label":"Relationship enabled"}});enabled.checked=edge.enabled;enabled.onchange=()=>{edge.enabled=enabled.checked;changed();};host.append(labeled("Enabled",enabled));
       return;
     }
     if (!r) {
       const source=draft.nodes.find(n=>n.id===edge.source),target=draft.nodes.find(n=>n.id===edge.target);
-      const replacements=catalog.relationships.filter(relation=>relation.sourceTable===source?.table && relation.targetTable===target?.table && !draft.edges.some(other=>other.id!==edge.id && other.relationshipId===relation.id && other.source===edge.source && other.target===edge.target));
+      const replacements=catalog.relationships.filter(relation=>sourceIdentity(relation,catalog,"source")===sourceIdentity(source,catalog) && sourceIdentity(relation,catalog,"target")===sourceIdentity(target,catalog) && !draft.edges.some(other=>other.id!==edge.id && other.relationshipId===relation.id && other.source===edge.source && other.target===edge.target));
       host.append(element("p", { className:"warning", text:"This foreign key is no longer present. Choose a compatible replacement or remove this relationship. Your model has been preserved." }),
-        modelSelect("Replacement foreign key", [["","Choose replacement foreign key"],...replacements.map(relation=>[relation.id,`${relation.sourceTable}.${relation.sourceColumn} → ${relation.targetTable}.${relation.targetColumn}`])],"",value=>{
+        modelSelect("Replacement foreign key", [["","Choose replacement foreign key"],...replacements.map(relation=>[relation.id,`${relation.sourceNamespace || catalog.namespace}.${relation.sourceTable} (${mappingLabel(relation,"source")}) → ${relation.targetNamespace || catalog.namespace}.${relation.targetTable} (${mappingLabel(relation,"target")})`])],"",value=>{
           if(!value)return;edge.relationshipId=value;refreshForms();changed();
         }),
         icon("delete", "Remove missing relationship", () => { if(!confirm("Remove this missing relationship from the model? No database objects or data will be changed."))return;draft.edges = draft.edges.filter(e => e.id !== edge.id); selected = null; refreshForms(); changed(); }));
       if(!replacements.length)host.append(element("p",{className:"hint",text:"No unused foreign key connects these physical source tables. Repair missing tables first or remove this connection."}));
       return;
     }
-    host.append(helpHeading("Relationship role", "aliases"),element("p", { className: "hint", text: `${r.sourceColumn} → ${r.targetColumn}. Endpoints must be occurrences of the FK's physical tables.` }));
+    host.append(helpHeading("Relationship role", "aliases"),element("p", { className: "hint", text: `${mappingLabel(r,"source")} → ${mappingLabel(r,"target")}. Endpoints must be occurrences of the FK's physical tables.` }));
     for (const side of ["source","target"]) {
-      const select = modelSelect(`${side} occurrence`, draft.nodes.filter(n => !n.derivation && n.table === r[`${side}Table`]).map(n => [n.id,n.label]), edge[side], value => {
+      const select = modelSelect(`${side} occurrence`, draft.nodes.filter(n => !n.derivation && sourceIdentity(n,catalog) === sourceIdentity(r,catalog,side)).map(n => [n.id,n.label]), edge[side], value => {
         const next={...edge,[side]:value};
         if(draft.edges.some(e=>e.id!==edge.id && e.relationshipId===edge.relationshipId && e.source===next.source && e.target===next.target)) {
           showError("That connection is already available. Toggle the existing connection instead.");renderSelection();return;
@@ -414,46 +426,28 @@ function renderTableColumns() {
     host.append(row);
   }
 }
-function addAlias(table, label, source = draft.nodes.find(n => n.table === table)) {
-  const copy = { id: `alias_${crypto.randomUUID().replaceAll("-","").slice(0,12)}`, table, label };
+function addAlias(table, label, source = draft.nodes.find(n => n.id === table && n.table === table && sourceIdentity(n,catalog) === sourceIdentity({table},catalog))) {
+  const copy = { id: `alias_${crypto.randomUUID().replaceAll("-","").slice(0,12)}`, table, label, ...(source?.namespace?{namespace:source.namespace}:{}) };
   canvas?.placeNode(copy, source);
-  draft.nodes.push(copy); inheritAliasExposure(draft, source?.id, copy.id); ensureAliasConnections(draft,catalog); selected={node:copy.id}; refreshForms(); changed();
+  draft.nodes.push(copy); inheritAliasExposure(draft, source?.id, copy.id); ensureAliasConnections(draft,catalog,new Set([copy.id])); selected={node:copy.id}; refreshForms(); changed();
   inspectSelection();
   $("table-pane").scrollTop=0;
 }
-function addTable(table) {
-  if (draft.nodes.some(node => !node.derivation && node.id === table && node.table === table)) {
-    showError(`“${table}” is already in this model.`); return;
-  }
-  const source = catalog.tables.find(candidate => candidate.name === table);
-  if (!source) { showError(`“${table}” is not available from this source.`); return; }
-  const position = catalog.positions?.find(candidate => candidate.name === table);
-  const node = { id: table, table, label: table,
-    ...(Number.isFinite(position?.x) && Number.isFinite(position?.y) ? { x: position.x, y: position.y } : {}) };
-  draft.nodes.push(node);
-  const canonical = new Map(draft.nodes.filter(candidate => !candidate.derivation && candidate.id === candidate.table)
-    .map(candidate => [candidate.table, candidate.id]));
-  const tuples = new Set(draft.edges.map(edge => JSON.stringify([edge.relationshipId, edge.source, edge.target])));
-  const ids = new Set(draft.edges.map(edge => edge.id));
-  for (const relationship of catalog.relationships) {
-    const sourceId = canonical.get(relationship.sourceTable), targetId = canonical.get(relationship.targetTable);
-    if (!sourceId || !targetId) continue;
-    const tuple = JSON.stringify([relationship.id, sourceId, targetId]);
-    if (tuples.has(tuple)) continue;
-    let id = `source_fk_${relationship.id}`, suffix = 2;
-    while (ids.has(id)) id = `source_fk_${relationship.id}_${suffix++}`;
-    draft.edges.push({ id, relationshipId: relationship.id, source: sourceId, target: targetId, enabled: false });
-    ids.add(id); tuples.add(tuple);
-  }
-  ensureAliasConnections(draft, catalog);
-  selected = { node: node.id }; diagnostics = {}; refreshForms(); changed({ structure: true }); inspectSelection();
-  $("table-pane").scrollTop = 0;
+function addTable(identity) {
+  const source=catalog.tables.find(table=>sourceIdentity(table,catalog)===identity);
+  if(!source){showError("This source is no longer available. Reload sources and choose it again.");return;}
+  if(draft.nodes.some(node=>!node.derivation && sameSource(node,source,catalog))){showError(`“${sourceLabel(source,catalog)}” is already in this model.`);return;}
+  try{addSourceSelection(draft,catalog,[{table:source.name,...(source.namespace?{namespace:source.namespace}:{}),columns:source.columns.map(column=>column.name)}]);}
+  catch(error){showError(error.message);return;}
+  const node=draft.nodes.find(node=>!node.derivation && sameSource(node,source,catalog));
+  ensureAliasConnections(draft,{...catalog,relationships:catalog.relationships.filter(relationship=>["source","target"].some(side=>sourceIdentity(relationship,catalog,side)===identity))});
+  selected={node:node.id};diagnostics={};refreshForms();changed({structure:true});inspectSelection();$("table-pane").scrollTop=0;
 }
 function renderAliasTools() {
   const host = $("alias-tools"); disposeSelects(host);
   host.replaceChildren(element("h3", { text: "Add table or view" }));
   let table = "";
-  const existingSource = () => draft.nodes.find(node => !node.derivation && node.table === table);
+  const existingSource = () => draft.nodes.find(node => !node.derivation && sourceIdentity(node,catalog) === table);
   const alias = element("input", { attrs: { type: "checkbox", "aria-label": "Add as alias" } });
   const aliasName = element("input", { attrs: { "aria-label": "Alias name", maxlength: 100 } });
   const nameField = labeled("Alias name", aliasName);
@@ -469,17 +463,20 @@ function renderAliasTools() {
     hint.textContent = existing ? "This source is already in the model, so it will be added as an alias."
       : "Choose Add as alias to give this source a separate role, even when it is not yet in the model.";
   };
-  const source = modelSelect("Table to add", [["", "Choose a table or view"], ...catalog.tables.map(t => [t.name, t.name])], table, value => {
+  const source = modelSelect("Table to add", [["", "Choose a table or view"], ...catalog.tables.map(t => [sourceIdentity(t,catalog),sourceLabel(t,catalog)])], table, value => {
     table = value;
     alias.checked = Boolean(existingSource());
-    aliasName.value = nextAliasLabel(existingSource() || { table, label: table });
+    aliasName.value = nextAliasLabel(existingSource() || {label:sourceLabel(catalog.tables.find(source=>sourceIdentity(source,catalog)===table),catalog)});
     update();
   });
   alias.onchange = update;
   aliasName.oninput = update;
   create.onclick = () => {
     if (create.disabled) return;
-    if (existingSource() || alias.checked) addAlias(table, aliasName.value.trim(), existingSource());
+    if (existingSource() || alias.checked) {
+      const physical=catalog.tables.find(source=>sourceIdentity(source,catalog)===table);
+      addAlias(physical.name,aliasName.value.trim(),existingSource() || {table:physical.name,namespace:physical.namespace});
+    }
     else addTable(table);
   };
   host.append(labeled("Database table or view", source), labeled("Add as alias", alias), nameField, hint, create);
@@ -541,7 +538,7 @@ async function compile(ticket) {
   }
   const count = diagnostics.cycleEdges?.length || 0;
   const additions=sourceAdditionText(),sourceIssues=currentSourceIssues();
-  $("graph-status").textContent = sourceIssues.length ? `${sourceIssues.length} source change${sourceIssues.length===1?"":"s"} need${sourceIssues.length===1?"s":""} review` : count ? `${count} connections belong to cycles · resolve before running` : additions || `${draft.nodes.length} objects · cycle-free model`;
+  $("graph-status").textContent = sourceIssues.length ? `${sourceIssues.length} source change${sourceIssues.length===1?"":"s"} need${sourceIssues.length===1?"s":""} review` : count ? `${count} connections belong to cycles · previews need unambiguous paths` : additions || `${draft.nodes.length} objects · cycle-free model`;
   $("graph-status").classList.toggle("has-cycles",count > 0);
   renderRelationships(); renderParameterValues($("parameter-values"), filterOptions());refreshFilterNavigation();
   renderObjectSourceIssues();
@@ -635,7 +632,7 @@ const tooltips = {
   "show-query": "Inspect the generated SQL and the last preview's rows.",
   "sql-tab": "SQL compiled from the selected fields, model rules, and report filters.",
   "results-tab": "Rows from your last read-only preview. Changed selections require another run.",
-  run: "Run a read-only preview of up to 100 rows. Required active parameters must have values and the model must be cycle-free.",
+  run: "Run a read-only preview of up to 100 rows. Required active parameters must have values and participating sources must have unambiguous connection paths.",
   fit: "Zoom and center to show all model objects.",
 };
 for (const [id, text] of Object.entries(tooltips)) $(id).dataset.uiTooltip = text;
@@ -700,7 +697,7 @@ async function loadModel(id) {
   let nextModel, nextCatalog;
   try {
     nextModel = await requestJson(`${API}/models/${encodeURIComponent(id)}`);
-    nextCatalog = await requestJson(`${API}/catalog?connection_id=${encodeURIComponent(nextModel.connectionId)}&namespace=${encodeURIComponent(nextModel.namespace)}`,{timeoutMs:MODEL_EXECUTION_TIMEOUT_MS});
+    nextCatalog = await requestJson(`${API}/catalog?connection_id=${encodeURIComponent(nextModel.connectionId)}&namespace=${encodeURIComponent(nextModel.namespace)}${[...new Set([...nextModel.definition.nodes.map(node=>node.namespace),...(nextModel.definition.sourceContract?.tables || []).map(table=>table.namespace),...nextModel.definition.scopes.flatMap(scope=>scope.alternatives.flatMap(option=>[...option.inputs,...option.conditions].map(value=>value.domain?.namespace)))].filter(Boolean))].map(namespace=>`&namespaces=${encodeURIComponent(namespace)}`).join("")}`,{timeoutMs:MODEL_EXECUTION_TIMEOUT_MS});
   } catch (error) { $("workbench").inert=!model; throw error; }
   if (ticket !== catalogTicket) return;
   model=nextModel; catalog=nextCatalog; draft=joinModel(model); initialLayout=undefined; selected=null; plan=null; diagnostics={}; conflicted=false;
@@ -725,7 +722,7 @@ async function loadModel(id) {
   refreshForms();canvas.render();initialLayout=splitDraft(draft).layout;changed();$("workbench").inert=false;
   void previewLibrary.load(model.id);
   void assistant.modelChanged();
-  if (model.catalogFingerprint !== catalog.fingerprint && !sourceAdditionText()) showError("The source schema changed. Your model is preserved. Review the labeled source changes before saving. Reload never replaces your model with a fresh import.");
+  if (model.definition.sourceContract?.scope !== "model" && model.catalogFingerprint !== catalog.fingerprint && !sourceAdditionText()) showError("The source schema changed. Your model is preserved. Review the labeled source changes before saving. Reload never replaces your model with a fresh import.");
   return true;
 }
 

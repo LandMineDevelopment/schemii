@@ -26,3 +26,15 @@ test("logical summary lookups use actual keys rather than author cardinality",()
   assert.equal(summaryLookup(draft,catalog,"facts","hier").status,"multiplying");
   catalog.tables[1].uniqueKeys=[["child_id"]];assert.equal(summaryLookup(draft,catalog,"facts","hier").status,"many_to_one");
 });
+
+test("qualified duplicate names and ordered composite mappings validate every pair", () => {
+  const catalog={namespace:"one",tables:["one","two"].map(namespace=>({namespace,name:"same.name",primaryKey:["tenant","id"],columns:[{name:"tenant",dataType:"integer"},{name:"id",dataType:"integer"},{name:"label",dataType:"text"}]})),relationships:[]};
+  const draft={nodes:[{id:"left",table:"same.name"},{id:"right",namespace:"two",table:"same.name"}],edges:[]};
+  const edge={id:"composite",kind:"logical",source:"left",target:"right",columns:[{source:"tenant",target:"tenant"},{source:"id",target:"id"}]};
+  assert.equal(validateLogicalRelationship(edge,draft,catalog),"");
+  draft.edges.push(edge);
+  assert.match(validateLogicalRelationship({...edge,id:"reverse",source:"right",target:"left",columns:[...edge.columns].reverse()},draft,catalog),/already exists/);
+  assert.match(validateLogicalRelationship({...edge,columns:[edge.columns[0],edge.columns[0]]},draft,catalog),/distinct/);
+  assert.match(validateLogicalRelationship({...edge,columns:[edge.columns[0],{source:"id",target:"label"}]},draft,catalog),/comparable/);
+  assert.match(validateLogicalRelationship({...edge,sourceColumn:"tenant",targetColumn:"tenant"},draft,catalog),/conflict/);
+});
