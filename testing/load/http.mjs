@@ -18,8 +18,9 @@ export class HTTPClient {
       rejectUnauthorized: origin !== LOCAL }); this.pending = new Set();
   }
   async request({ method = 'GET', path, body = undefined, oracle = null, slowMs = 0,
-    disconnectAfterBytes = 0, signal, onHeaders = () => {}, validate = () => {}, operation = 'http' }) {
+    disconnectAfterBytes = 0, signal, onHeaders = () => {}, validate = () => {}, operation = 'http', fixtureOperation = null }) {
     apiPath(path);
+    if (fixtureOperation !== null && (typeof fixtureOperation !== 'string' || !/^[a-f0-9]{32}$/.test(fixtureOperation) || method !== 'POST' || !/^\/api\/v1\/schemer\/(dashboards\/[A-Za-z0-9_-]+\/(executions\/stream|tiles\/[A-Za-z0-9_-]+\/export)|query\/(stream|export))$/.test(path))) throw new ProtocolFailure('invalid_fixture_operation');
     const startedAt = performance.now(), payload = body === undefined ? undefined : JSON.stringify(body);
     let status = 0, complete = false, valid = false, timing = {}, responseCookie, failure = null;
     this.accounting?.sent(operation);
@@ -29,6 +30,7 @@ export class HTTPClient {
           // AuthenticationMiddleware requires same-origin mutations even for
           // login. Use the validated destination, including the preview host.
           headers: { Origin: this.origin, ...(this.cookie ? { Cookie: this.cookie } : {}),
+            ...(fixtureOperation ? { 'X-Schemii-Fixture-Operation': fixtureOperation } : {}),
             ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}) } }, resolve);
         this.pending.add(req); req.once('close', () => this.pending.delete(req));
         req.on('error', reject);

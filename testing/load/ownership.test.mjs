@@ -10,6 +10,7 @@ import { observation, executePlan } from './engine.mjs';
 import { plan } from './plan.mjs';
 import { openJournal } from './journal.mjs';
 import { combineObservation } from './observer.mjs';
+import { fixtureExecutions } from './fixtures.mjs';
 
 const runId = 'load_0123456789abcdef', executionId = `cex_${'a'.repeat(32)}`, resultId = `res_${'b'.repeat(32)}`;
 const workspaceId = `ws_${'c'.repeat(32)}`, consoleId = `con_${'d'.repeat(32)}`;
@@ -23,6 +24,68 @@ const source = (live = [backend]) => ({ version: 2, at: new Date().toISOString()
     endpoint: { host: '127.0.0.1', port: 5432, sslmode: 'require' }, server }, serverIdentity: server,
   captured: [backend], capturedChecks: [{ ...backend, status: live.length ? 'present' : 'absent' }],
   live, ownedBackends: live.length, releaseVerified: live.length === 0 });
+
+test('private fixture channel binds fixed artifacts, serializes concurrent commands and rejects replacement or gaps', async () => {
+  const run = 'pressure_' + 'a'.repeat(32), nonce = 'b'.repeat(64), directory = '/private/owned';
+  const binding = { run, nonce, authorityFile: `${directory}/authority.json`, attachmentFile: `${directory}/attachment.json`, application: { id: 'c'.repeat(64) } };
+  const authority = { kind: 'launcher_owned_disposable_pressure', status: 'held', run, nonce, directory, application: binding.application,
+    stockCapacityEligible: false, heartbeatAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString() };
+  const calls = []; let current;
+  const read = async path => {
+    if (path === binding.authorityFile) return authority;
+    if (path === binding.attachmentFile) return { status: 'attached', run, nonce };
+    assert.equal(path, `${directory}/execution-observation.json`);
+    return { version: 1, run, nonce, containerId: binding.application.id, containerStartedAt: '2026-11-12T00:00:00Z', observation: current };
+  };
+  const control = async (_authority, action, attachment, options) => {
+    assert.equal(action, 'executions'); assert.equal(attachment, binding.attachmentFile);
+    calls.push(['stdin', options.executionRequest.declare[0]?.operation]);
+    current = { version: 1, run, command: 'd'.repeat(32), at: new Date().toISOString(), losses: 0, operations: options.executionRequest.declare, instrumentation: { stockCapacityEligible: false } };
+    calls.push(['read']); return { status: 'observed', command: current.command, executionObservationFile: `${directory}/execution-observation.json` };
+  };
+  await Promise.all(['1', '2'].map(operation => fixtureExecutions(binding, { declare: [{ operation }], acknowledge: [] }, { read, control })));
+  assert.deepEqual(calls.map(value => value[0]), ['stdin', 'read', 'stdin', 'read']);
+  for (const changed of [{ ...binding, nonce: 'foreign' }, { ...binding, application: { id: 'foreign' } }, { ...binding, attachmentFile: '/arbitrary/path' }]) {
+    await assert.rejects(fixtureExecutions(changed, undefined, { read, control }));
+  }
+  await assert.rejects(fixtureExecutions(binding, undefined, { read, control: async () => ({ status: 'observed', command: 'd'.repeat(32), executionObservationFile: '/arbitrary/path' }) }));
+});
+
+test('late CSV capture uses exact private receipt status and still requires independent post-terminal source witness', async t => {
+  const dir = await directory(t), path = join(dir, 'events'), now = Date.now(), operationNonce = 'e'.repeat(32);
+  const journal = await openJournal(path, { tag: runId, budget: { records: 128, bytes: 128 * 2048 + 65536, recordBytes: 2048, chunkRecords: 64 } });
+  const r = { ...receipt(), kind: 'disposable', ready: true, executionJournal: path, fixtureObserver: {}, accounts: [{ ...account,
+    dashboards: { 1: { id: 'dash_owned', revision: 1 } }, identityVerifiedAt: new Date(now).toISOString() }] };
+  await journal.append({ type: 'intent', kind: 'stream', username: account.username, workload: 'csv', status: 'pending',
+    operationNonce, fixtureObserved: true, dashboardId: 'dash_owned', dashboardRevision: 1 });
+  const observed = { losses: 0, at: new Date(now).toISOString(), process: { incarnation: 'f'.repeat(32) }, operations: [{
+    operation: operationNonce, actor: account.userId, resource: 'dash_owned', request: 'complete', unknown: false,
+    receipts: [{ id: executionId, owner: account.userId, status: 'succeeded', observedAt: new Date(now).toISOString() }] }] };
+  const requests = [], clientFactory = () => ({ close() {}, json: async (_method, path) => {
+    requests.push(path); if (path.endsWith('/auth/me')) return { user: { id: account.userId, username: account.username } };
+    assert.equal(path, '/api/v1/schemer/dashboards/dash_owned'); return { id: 'dash_owned', revision: 1 };
+  } });
+  const first = await observeCohortWork(r, 'csv', { source: source(), now, clientFactory, fixtureObservation: observed });
+  assert.equal(first.value.unreleasedExecutions, 1); assert.equal(first.value.coverage.complete, false);
+  const released = { ...source([]), at: new Date(now + 1000).toISOString() };
+  const second = await observeCohortWork(r, 'csv', { source: released, state: first.state, now: now + 1000, clientFactory, fixtureObservation: observed });
+  assert.equal(second.value.coverage.complete, true); assert.equal(second.value.retiredProofs[0].id, executionId);
+  assert(!requests.some(path => path.includes('/common/')));
+  const lost = await observeCohortWork(r, 'csv', { source: released, state: second.state, now: now + 1000, clientFactory, fixtureObservation: { ...observed, losses: 1 } });
+  assert.equal(lost.value.activeExecutions, null); assert.equal(lost.value.activeJobs, null); assert.equal(lost.value.coverage.complete, false);
+  assert.throws(() => sourceEvidence({ ...released, captured: [] }, runId));
+  await journal.close();
+});
+
+test('unmatched fixture operations and observer restart cannot supply a zero-work baseline', async () => {
+  const r = { ...receipt(), kind: 'disposable', fixtureObserver: {} };
+  const observation = { losses: 0, process: { incarnation: 'f'.repeat(32) }, operations: [{ operation: 'e'.repeat(32),
+    actor: account.userId, resource: 'dash_owned', unknown: false, receipts: [] }] };
+  const batch = await observeCohortWork(r, 'csv', { source: source([]), fixtureObservation: observation, clientFactory: workClient().factory });
+  assert.equal(batch.value.activeExecutions, null); assert.equal(batch.value.activeJobs, null); assert.equal(batch.value.coverage.complete, false);
+  await assert.rejects(observeCohortWork(r, 'csv', { source: source([]), state: batch.state,
+    fixtureObservation: { ...observation, process: { incarnation: 'a'.repeat(32) } }, clientFactory: workClient().factory }), /process_changed/);
+});
 async function directory(t) {
   const dir = await mkdtemp(join(tmpdir(), 'schemii-owned-observation-')); t.after(() => rm(dir, { recursive: true, force: true })); return dir;
 }

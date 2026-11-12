@@ -97,6 +97,8 @@ services:
     volumes:
       - observer:/qualification-state
       - ${PRESSURE_ROOT}/dev/pressure/app.py:/qualification/pressure_app.py:ro
+      - ${PRESSURE_ROOT}/dev/pressure/execution_observer.py:/qualification/execution_observer.py:ro
+      - ${PRESSURE_DIRECTORY}/execution-input:/qualification-input:ro
       - ${PRESSURE_ROOT}/dev/schemii.toml:/etc/schemii/schemii.toml:ro
       - ${PRESSURE_DIRECTORY}/setup_token:/run/secrets/setup_token:ro
       - ${PRESSURE_DIRECTORY}/app_password:/run/secrets/app_password:ro

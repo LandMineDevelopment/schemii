@@ -101,6 +101,48 @@ test('author and viewer report streams persist a pre-send intent and exact saved
     assert.equal(terminal.dashboardRevision, 3); assert.equal(entries.at(-1).status, 'closed');
   }
 });
+
+test('disposable saved CSV persists intent before declaration and journals the actual private receipt before ack', async () => {
+  const entries = [], expected = oracleFor(['id'], [['1']]), dashboard = { id: 'dash_owned', revision: 3 };
+  const account = { username: 'owner', userId: 'user_owned', model: { id: 'model_owned', revision: 1 }, dashboards: { 1: dashboard },
+    fixtureObserver: { run: 'pressure_' + 'a'.repeat(32) }, oracles: { csv: expected } };
+  let declaration, operation;
+  const client = { request: async options => {
+    assert(declaration); assert.equal(options.path, '/api/v1/schemer/dashboards/dash_owned/tiles/tile-1/export');
+    assert.equal(options.fixtureOperation, operation); options.oracle.push(Buffer.from('id\r\n1\r\n')); options.oracle.finish();
+    entries.push('http-complete'); return { status: 200 };
+  } };
+  const observeFixture = async (_binding, request = {}) => {
+    if (request.declare?.length) {
+      assert.equal(entries[0].kind, 'stream'); declaration = request.declare[0]; operation = declaration.operation;
+      assert.equal(entries[0].operationNonce, operation); assert.equal(declaration.actor, account.userId);
+    }
+    if (request.acknowledge?.length) {
+      assert(entries.some(value => value.executionId === executionId)); assert(entries.some(value => value.fixtureStatus === 'succeeded'));
+    }
+    return { losses: 0, at: new Date().toISOString(), process: { incarnation: 'b'.repeat(32) }, operations: [{ ...declaration,
+      request: 'complete', unknown: false, receipts: [{ id: executionId, owner: account.userId, status: 'succeeded', observedAt: new Date().toISOString() }] }] };
+  };
+  await runJourney({ workload: 'csv', account, client, observeFixture,
+    onIntent: async value => { entries.push(value); return 1; }, finishIntent: async (_id, value) => entries.push(value),
+    onExecution: async (_owner, id, value) => entries.push({ executionId: id, ...value }) });
+  assert.equal(declaration.kind, 'tile-csv'); assert.equal(entries.at(-1).status, 'closed');
+});
+
+test('missing or lost fixture capture never substitutes no-job status or acknowledges an operation', async () => {
+  for (const losses of [0, 1]) {
+    let acknowledged = false;
+    const account = { username: 'owner', userId: 'user_owned', model: { id: 'model_owned', revision: 1 }, dashboards: { 1: { id: 'dash_owned', revision: 1 } },
+      fixtureObserver: {}, oracles: { csv: oracleFor(['id'], [[1]]) } };
+    await assert.rejects(runJourney({ workload: 'csv', account,
+      client: { request: async ({ oracle }) => { oracle.push(Buffer.from('id\r\n1\r\n')); oracle.finish(); return { status: 200 }; } },
+      onIntent: async () => 1, finishIntent: async () => {}, observeFixture: async (_binding, request = {}) => {
+        if (request.acknowledge?.length) acknowledged = true;
+        return { operations: [], losses };
+      } }), /fixture_execution_observation_unknown/);
+    assert.equal(acknowledged, false);
+  }
+});
 test('real lifecycle/source smoke remains opt-in', { skip: process.env.SCHEMII_LOAD_ADAPTER_LIVE !== '1', timeout: 2400000 }, async () => {
   // Explicitly prepared held fixture + independently running observer required.
   // This oracle never starts a stack, provisions, fakes time or guesses secrets.
