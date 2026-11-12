@@ -99,7 +99,7 @@ function getStream(tile, selection = null, { refresh = false } = {}) {
   const create = selected => {
     const origin = dashboard;
     const currentGroup = dashboardGroup;
-    const cache = new ResultCache({ pageSize: tile.limit, budget: browserBudget, start: (onFrame, signal) => !selected && currentGroup ? currentGroup.tile(tile.id, onFrame) : readResultStream(`${API}/${origin.id}/tiles/${encodeURIComponent(tile.id)}/executions/stream`,
+    const cache = new ResultCache({ pageSize: tile.limit, budget: !selected && currentGroup ? currentGroup.budgetFor(tile.id) || browserBudget : browserBudget, start: (onFrame, signal) => !selected && currentGroup ? currentGroup.tile(tile.id, onFrame) : readResultStream(`${API}/${origin.id}/tiles/${encodeURIComponent(tile.id)}/executions/stream`,
       { expectedRevision: origin.revision, selection: selected, ...selectionBody(origin) }, frame => {
         if (frame.type === 'start') onFrame({ ...frame, plan: frame.tiles.find(item => item.tileId === tile.id)?.plan });
         else onFrame(frame);
@@ -222,7 +222,7 @@ function renderTile(card, tile) {
     renderVisualization(body, tile, data, { compact: true, modelId: dashboard.modelId });
     appendStreamStatus(body, data);
     restoreScroll(body, position);
-    status.textContent = `${data.rows.length} ${tile.kind === 'detail' ? 'rows' : 'groups'} cached${cache?.loading ? ' · loading…' : data.limitReached ? ' · preview limit' : data.error ? ' · interrupted' : ' · complete'}`;
+    status.textContent = `${data.rows.length} ${tile.kind === 'detail' ? 'rows' : 'groups'} cached${cache?.loading ? ' · loading…' : data.limitReached ? ['dashboard_row_limit', 'dashboard_byte_limit', 'browser_dashboard_budget', 'browser_budget'].includes(data.reason) ? ' · dashboard preview capacity reached' : ' · preview limit' : data.error ? ' · interrupted' : ' · complete'}`;
   } else { body.replaceChildren(element('p', { className: 'empty-state', text: slicersDirty ? 'Apply dashboard slicers to load this tile.' : missingSlicers().length ? 'Set the dashboard slicers to load this tile.' : 'Open or refresh to load this tile.' })); status.textContent = 'Not run'; }
 }
 function renderTiles() {
@@ -271,7 +271,7 @@ async function runTile(tile, useGroup = false) {
 async function runAll() {
   if (!readyToRun()) return;
   await stopRuns(); const version = epoch, queue = [...dashboard.tiles], origin = dashboard;
-  dashboardGroup = new DashboardResultGroup({ start: (onFrame, signal) => readResultStream(`${API}/${origin.id}/executions/stream`, { expectedRevision: origin.revision, ...selectionBody(origin) }, onFrame, signal) });
+  dashboardGroup = new DashboardResultGroup({ budget: browserBudget, tileIds: queue.map(tile => tile.id), start: (onFrame, signal) => readResultStream(`${API}/${origin.id}/executions/stream`, { expectedRevision: origin.revision, ...selectionBody(origin) }, onFrame, signal) });
   await Promise.all(queue.map(tile => runTile(tile, true)));
 }
 function expand(tile) {

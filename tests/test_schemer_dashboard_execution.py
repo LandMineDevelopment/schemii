@@ -312,7 +312,10 @@ def test_drill_selection_reaches_compiler_and_cannot_inject_fields(dashboard, ac
     plan = result.json() if action == "plan" else json.loads(result.text.splitlines()[0])["tiles"][0]["plan"]
     assert plan["drill"] is True
     assert '"contributors"."field_1" = ' in plan["sql"]
-    assert 'GROUP BY' not in plan["sql"]
+    from sqlglot import exp, parse_one
+    raw = next(node for node in parse_one(plan["sql"], read="postgres").find_all(exp.Subquery) if node.alias == "contributors")
+    assert raw.this.args.get("group") is None
+    assert 'qualifying_parent' in plan["sql"]
     body["selection"]["dimensions"][0]["column"] = "id"
     assert client.post(url + "/" + action, json=body).status_code == 422
     assert client.post(url + "/" + action, json={"expectedRevision": 1, "sql": "SELECT 1"}).status_code == 422
@@ -450,3 +453,47 @@ def test_stream_and_export_revision_checks(dashboard):
         response = client.post(url + "/" + action, json={"expectedRevision": 99})
         assert response.status_code == 409
     assert not hasattr(console, "target")
+
+
+def test_saved_sort_filter_topn_plan_stream_and_full_export_share_final_sql(dashboard):
+    client, url, console, _ = dashboard
+    path = url.split("/tiles/")[0]
+    current = client.get(path).json()
+    tile = current["tiles"][0]
+    output = {"table": "people", "column": "name", "aggregate": "count_distinct"}
+    tile.update(sort=[{**output, "direction": "desc"}], topN=2,
+                aggregateFilters=[{**output, "operator": "gte", "value": 1}])
+    body = {key: current[key] for key in ["name", "modelId", "modelRevision", "optionalFilters", "selections", "tiles"]}
+    saved = client.put(path, json={**body, "expectedRevision": current["revision"]})
+    assert saved.status_code == 200, saved.text
+    revision = saved.json()["revision"]
+    plan = client.post(url + "/plan", json={"expectedRevision": revision}).json()
+    assert 'DESC NULLS LAST' in plan["sql"] and 'LIMIT 2' in plan["sql"]
+    events = client.post(url + "/executions", json={"expectedRevision": revision})
+    assert events.status_code == 200, events.text
+    assert console.target["statements"] == [plan["sql"]]
+    export = client.post(url + "/export", data={"payload": json.dumps({"expectedRevision": revision})})
+    assert export.status_code == 200, export.text
+    assert console.target["statements"] == [plan["sql"]]
+    assert saved.json()["tiles"][0]["limit"] == 3
+    assert saved.json()["tiles"][0]["topN"] == 2
+
+
+@pytest.mark.parametrize("planning_source", ["managed", "shared"], indirect=True)
+def test_scalar_kpi_priority_is_derived_from_validated_aggregation(planning_source, monkeypatch):
+    import asyncio
+    from schemii.schemer import routes, streaming
+    from schemii.schemer.dashboard_models import DashboardUpdate
+    source = planning_source
+    tiles = [{"id": kind, "title": kind, "kind": "kpi",
+              "measures": [{"table": "people", "column": "name", "aggregate": aggregate}], "limit": 3}
+             for kind, aggregate in [("raw", "none"), ("scalar", "count")]]
+    dashboard = source.services.dashboards.update(source.owner, source.dashboard.id, DashboardUpdate(
+        expected_revision=source.dashboard.revision, name="Priority", model_id=source.model.id,
+        model_revision=1, tiles=tiles))
+    monkeypatch.setattr(streaming, "response", lambda services, owner, model, planned, errors: planned)
+    planned = asyncio.run(routes.stream_dashboard(dashboard.id,
+        routes.DashboardExecutionRequest(expected_revision=dashboard.revision), source.request,
+        Principal(user_id="viewer", authentication_source="local_prototype")))
+    assert [(tile["tileId"], tile["scalarKpi"]) for tile in planned] == [("raw", False), ("scalar", True)]
+    assert source.console.runs == []

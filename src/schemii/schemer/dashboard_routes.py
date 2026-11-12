@@ -3,11 +3,13 @@ from contextlib import contextmanager
 from fastapi import APIRouter, Depends, Query, Request, Response
 from schemii.common.api.errors import ApiProblem
 from schemii.common.metadata.models import Principal, get_current_principal
+from schemii.schemoo.domain import source_identity
 from schemii.schemoo.models import ExploreState
 from schemii.schemoo.derived import type_family
 from schemii.schemoo.routes import api_errors
 from schemii.schemoo.service import load_model, model_catalog, plan_query
 from .time_analysis import validate_time_analysis
+from .tile_queries import validate_report_controls
 from .access import available_dashboards, owned_report_services, prepare_dashboard
 from .dashboard_models import Dashboard, DashboardCreate, DashboardUpdate
 from .dashboard_store import (DashboardNotFoundError, DashboardConflictError,
@@ -86,7 +88,7 @@ def validate_dashboard(services, owner, body):
     # model scope; this validation copy only checks authored fields and filters.
     definition = model.definition.model_copy(update={"scopes": []})
     nodes = {node.id: node for node in model.definition.nodes}
-    tables = {table["name"]: table for table in catalog["tables"]}
+    tables = {source_identity(catalog, table): table for table in catalog["tables"]}
 
     def numeric(node_id, column):
         node = nodes.get(node_id)
@@ -101,7 +103,7 @@ def validate_dashboard(services, owner, body):
                     return False
                 return numeric(output.nodeId or node.derivation.source, output.column)
             return numeric(node.derivation.source, column)
-        details = next((c for c in tables[node.table]["columns"] if c["name"] == column), {})
+        details = next((c for c in tables[source_identity(catalog, node.model_dump(exclude_none=True))]["columns"] if c["name"] == column), {})
         return type_family(details) == "numeric"
 
     for tile in body.tiles:
@@ -110,6 +112,7 @@ def validate_dashboard(services, owner, body):
                 plan_query(catalog, definition, ExploreState(root=definition.root, fields=fields,
                     reportFilters=tile.report_filters, limit=tile.limit), model.catalog_fingerprint)
         validate_time_analysis(tile, catalog, definition)
+        validate_report_controls(tile, catalog, definition)
         for field in tile.measures:
             if tile.kind in {"bar", "line", "donut"} and field.aggregate not in {"count", "count_distinct"} and not numeric(field.table, field.column):
                 raise ValueError("Charts require numeric measures")

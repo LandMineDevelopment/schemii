@@ -6,7 +6,7 @@ import { fieldLabel } from '#model/model-columns.js';
 import { aggregateChoices } from './report-state.js';
 import { timeDimensions } from './time-analysis.js';
 import { renderTimeAnalysis } from './time-analysis-editor.js';
-import { TILE_TYPES, tileErrors, fieldChoices, fieldKey } from './dashboard-state.js';
+import { TILE_TYPES, tileErrors, fieldChoices, fieldKey, reportOutputs, reportOutputKey, numericFilterValue } from './dashboard-state.js';
 
 function icon(name, label, onClick, disabled = false) {
   const button = createIconButton({ icon: name, label, className: 'ui-button' }); button.onclick = onClick; button.disabled = disabled; return button;
@@ -14,6 +14,7 @@ function icon(name, label, onClick, disabled = false) {
 export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, saveLabel = 'Apply & run' }) {
   const current = structuredClone(tile), original = JSON.stringify(tile);
   current.selections ||= {};
+  current.sort ||= []; current.aggregateFilters ||= []; current.topN ??= null;
   const modelDraft = { ...structuredClone(model.definition), fields: [], selections: current.selections, reportFilters: current.reportFilters };
   const dialog = element('dialog', { className: 'ui-dialog tile-editor', attrs: { 'aria-label': 'Configure analytics tile' } });
   const body = element('div', { className: 'tile-editor-body' });
@@ -75,7 +76,7 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, sav
   function render() {
     disposeSelects(body); body.replaceChildren();
     tabbar.replaceChildren();
-    const tabs = [['fields', 'View & fields'], ['filters', 'Optional filters'], ...(current.kind === 'detail' ? [] : [['drill', 'Drill-through columns']])];
+    const tabs = [['fields', 'View & fields'], ['filters', 'Optional filters'], ['results', 'Sort & result filters'], ...(current.kind === 'detail' ? [] : [['drill', 'Drill-through columns']])];
     if (!tabs.some(([id]) => id === tab)) tab = 'fields';
     for (const [id, label] of tabs) {
       const button = element('button', { type: 'button', className: 'ui-button', text: label, attrs: { role: 'tab', 'aria-selected': id === tab, 'aria-controls': `tile-${id}-pane` } });
@@ -91,13 +92,64 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, sav
       }
       body.append(element('p', { className: 'hint', text: 'Results stream automatically into a bounded browser cache. Scroll to browse received rows or groups; scrolling does not run another query. Previews stop at row or memory limits, and charts may display fewer groups. Refresh runs the query again. Expand a tile and choose Download full results to run the full query against a fresh snapshot.' }));
 
-    } else if (tab === 'filters') {
+    } else if (tab === 'results') renderResultControls();
+    else if (tab === 'filters') {
       const parameters = element('section'), filters = element('section'); body.append(parameters, filters);
       const optionalDraft = { ...modelDraft, scopes: modelDraft.scopes.filter(scope => scope.kind !== 'required' && scope.requirement !== 'optional') };
       if (optionalDraft.scopes.length) renderParameterValues(parameters, { draft: optionalDraft, catalog, force: true, onChange: () => { current.selections = optionalDraft.selections; }, onLoadDomain });
       renderReportFilters(filters, { draft: modelDraft, catalog, onChange: () => { current.reportFilters = modelDraft.reportFilters; }, onLoadDomain });
       body.prepend(element('p', { className: 'hint', text: 'These filters apply only to this tile. Required model slicers are controlled by the dashboard.' }));
     } else body.append(element('p', { className: 'hint', text: 'Choose the raw columns shown after selecting a chart mark or aggregate value. Schemer adds the clicked group and measure filters automatically. Related detail fields can produce multiple rows per contributing record.' }), fieldList('Drill-through columns', 'detailFields'));
+  }
+  function renderResultControls() {
+    const outputs = reportOutputs(current, model, catalog), reference = output => ({ table: output.table, column: output.column, aggregate: output.aggregate, kind: output.kind });
+    const measures = new Set(current.measures.map(field => JSON.stringify([field.table, field.column, field.aggregate])));
+    const aggregateOutputs = outputs.filter(output => measures.has(JSON.stringify([output.table, output.column, output.aggregate])));
+    body.append(element('p', { className: 'hint', text: 'Source filters run first. Result filters run after aggregation and complete time comparisons or running totals. Sorting and Top N then choose the final results, before browser delivery limits. Remaining outputs break sort ties in ascending order, with NULLs last.' }));
+    const top = element('input', { attrs: { type: 'number', min: 1, max: 2147483647, step: 1, placeholder: 'All qualifying results', 'aria-label': 'Top N results' } });
+    top.value = current.topN ?? ''; top.oninput = () => { current.topN = numericFilterValue(top.value); };
+    body.append(element('label', { className: 'stack' }, ['Top N results (optional)', top]));
+    function chooseOutput(label, options, selected, change) {
+      const key = reportOutputKey(selected), choices = options.map(output => [reportOutputKey(output), output.label]);
+      if (!choices.some(([value]) => value === key)) choices.unshift([key, `${selected.table} · ${selected.column} (unavailable output)`]);
+      return modelSelect(label, choices, key, value => { const [table, column, aggregate, kind] = JSON.parse(value); change({ table, column, aggregate, kind }); render(); });
+    }
+    const sorting = element('section', { className: 'field-section' }, [element('h3', { text: 'Ordered sort priorities' })]);
+    current.sort.forEach((item, index) => {
+      const card = element('section', { className: 'upgrade-section' });
+      card.append(chooseOutput(`Sort ${index + 1} output`, outputs, item, ref => Object.assign(item, ref)),
+        modelSelect(`Sort ${index + 1} direction`, [['asc', 'Ascending'], ['desc', 'Descending']], item.direction, value => { item.direction = value; }),
+        modelSelect(`Sort ${index + 1} NULL placement`, [['last', 'NULLs last'], ['first', 'NULLs first']], item.nulls || 'last', value => { item.nulls = value; }));
+      const move = offset => { current.sort.splice(index, 1); current.sort.splice(index + offset, 0, item); render(); };
+      card.append(element('div', { className: 'actions' }, [icon('earlier', `Move sort ${index + 1} earlier`, () => move(-1), index === 0), icon('later', `Move sort ${index + 1} later`, () => move(1), index === current.sort.length - 1), icon('close', `Remove sort ${index + 1}`, () => { current.sort.splice(index, 1); render(); })]));
+      sorting.append(card);
+    });
+    const addSort = element('button', { type: 'button', className: 'ui-button', text: 'Add sort priority' });
+    const nextSort = outputs.find(output => !current.sort.some(item => reportOutputKey(item) === reportOutputKey(output)));
+    addSort.disabled = !nextSort || current.sort.length >= 32;
+    addSort.onclick = () => { if (nextSort) { current.sort.push({ ...reference(nextSort), direction: 'asc', nulls: 'last' }); render(); } };
+    sorting.append(addSort); body.append(sorting);
+    const predicates = element('section', { className: 'field-section' }, [element('h3', { text: 'Aggregate-result filters (all must match)' })]);
+    if (current.kind === 'detail') predicates.append(element('p', { className: 'hint', text: 'Detail reports have no aggregate outputs. Use source-row filters on the Optional filters tab.' }));
+    current.aggregateFilters.forEach((item, index) => {
+      const card = element('section', { className: 'upgrade-section' });
+      card.append(chooseOutput(`Result filter ${index + 1} output`, aggregateOutputs, item, ref => Object.assign(item, ref)),
+        modelSelect(`Result filter ${index + 1} operator`, [['eq', 'Equals'], ['ne', 'Does not equal'], ['gt', 'Greater than'], ['gte', 'At least'], ['lt', 'Less than'], ['lte', 'At most'], ['is_null', 'Is NULL'], ['not_null', 'Is not NULL']], item.operator, value => { item.operator = value; if (['is_null', 'not_null'].includes(value)) item.value = null; render(); }));
+      if (!['is_null', 'not_null'].includes(item.operator)) {
+        const output = aggregateOutputs.find(output => reportOutputKey(output) === reportOutputKey(item)), type = output?.dataType || '';
+        if (type === 'boolean') card.append(modelSelect(`Result filter ${index + 1} value`, [['', 'Choose a value'], ['true', 'True'], ['false', 'False']], item.value == null ? '' : String(item.value), value => { item.value = value === '' ? null : value === 'true'; }));
+        else {
+          const numeric = /^(smallint|integer|bigint|numeric|decimal|real|double precision|int[248]|float[48])(?:\b|\()/i.test(type);
+          const input = element('input', { attrs: { type: type === 'date' ? 'date' : 'text', ...(numeric ? { inputmode: 'decimal' } : {}), maxlength: 4000, 'aria-label': `Result filter ${index + 1} value` } });
+          input.value = item.value ?? ''; input.oninput = () => { item.value = numeric ? numericFilterValue(input.value) : input.value; }; card.append(input);
+        }
+      }
+      card.append(icon('close', `Remove result filter ${index + 1}`, () => { current.aggregateFilters.splice(index, 1); render(); })); predicates.append(card);
+    });
+    const addFilter = element('button', { type: 'button', className: 'ui-button', text: 'Add aggregate-result filter' });
+    addFilter.disabled = !aggregateOutputs.length || current.aggregateFilters.length >= 32;
+    addFilter.onclick = () => { current.aggregateFilters.push({ ...reference(aggregateOutputs[0]), operator: 'gt', value: null }); render(); };
+    predicates.append(addFilter); body.append(predicates);
   }
   function close() {
     if (pending) return;
@@ -107,7 +159,7 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, sav
   const save = element('button', { type: 'button', className: 'ui-button primary', text: saveLabel });
   save.onclick = async () => {
     if (pending) return;
-    current.title = current.title.trim(); const errors = tileErrors(current);
+    current.title = current.title.trim(); const errors = tileErrors(current, model, catalog);
     if (errors.length) { error.textContent = errors.join(' '); return; }
     pending = true; save.disabled = true; body.inert = true; error.textContent = '';
     try { await onSave(current); dialog.close(); }
