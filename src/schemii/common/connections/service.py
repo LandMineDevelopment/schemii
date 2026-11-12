@@ -128,7 +128,7 @@ class ConnectionService:
         return self._repository.list(SCHEMII_CONNECTION_OWNER_ID)
 
     def create_schemii_owned(self, request: PostgresConnectionCreate) -> PostgresConnectionProfile:
-        """Store a database-admin-provisioned read-only login in the shared pool."""
+        """Store an externally provisioned login; PostgreSQL grants define its authority."""
         if request.password is None:
             raise ValueError("Schemii-owned profiles require an explicit credential")
         return self.create(SCHEMII_CONNECTION_OWNER_ID, request)

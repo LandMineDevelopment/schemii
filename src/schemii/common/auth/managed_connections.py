@@ -1,4 +1,4 @@
-"""Provisioner-only lifecycle for Schemii-owned PostgreSQL read-only identities."""
+"""Provisioner-only lifecycle for externally provisioned PostgreSQL identities."""
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 
