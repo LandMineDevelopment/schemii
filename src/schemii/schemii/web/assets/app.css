@@ -1210,3 +1210,12 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   .sql-editor-panel .sql-pane-heading { padding-inline: 8px; }
   .sql-editor-panel .sql-pane-actions { gap: 3px; padding-right: 6px; }
 }
+
+.deployment-target { display:flex; flex-wrap:wrap; gap:16px; padding:16px 20px; }
+.deployment-target label { display:grid; gap:6px; flex:1 1 220px; min-width:0; }
+.deployment-target select,.deployment-collision select { max-width:100%; padding:8px; }
+.deployment-comparison { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+.deployment-comparison pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto; font-size:12px; }
+.deployment-collision { border-top:1px solid var(--line); padding:16px 0; }
+@media (max-width:650px) { .deployment-comparison { grid-template-columns:minmax(0,1fr); } }
+#design-deployment-dialog > .ui-dialog__shell { grid-template-rows:auto auto minmax(0,1fr) auto auto; }

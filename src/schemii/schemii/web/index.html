@@ -98,6 +98,7 @@
           <button id="types-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="schemas" title="Enums and domains" aria-label="Enums and domains"></button>
           <button id="objects-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="objects" title="Browse database objects" aria-label="Browse database objects"></button>
           <span class="rail-divider" data-tool-layers="tables views sql" data-tool-active aria-hidden="true"></span>
+          <button id="deploy-design-button" class="ui-icon-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="migration" title="Copy design to PostgreSQL target" aria-label="Copy design to PostgreSQL target" hidden disabled></button>
           <button id="review-migration-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="migration" title="Review migration" aria-label="Review migration" disabled></button>
           <button id="postgres-button" type="button" data-tool-layers="tables views sql" data-tool-active data-ui-icon="database" title="PostgreSQL connections" aria-label="PostgreSQL connections"></button>
           <button id="ai-assistant-button" type="button" data-tool-layers="tables views sql" data-tool-active data-ui-icon="assistant" title="AI schema assistant" aria-label="AI schema assistant" aria-expanded="false"></button>
@@ -544,6 +545,16 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
         <header class="ui-dialog__head"><div><small>Bounded live PostgreSQL snapshot</small><h2 id="relation-preview-title">Preview rows</h2><p id="relation-preview-copy">Read-only data preview. Values may change between pages as PostgreSQL changes.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close row preview"></button></header>
         <div class="relation-preview-body" id="relation-preview-body" aria-live="polite"></div>
         <footer class="ui-dialog__actions"><span id="relation-preview-status">Up to 100 rows</span><button class="ui-button compact primary" type="button" data-close-dialog>Close</button></footer>
+      </div>
+    </dialog>
+
+    <dialog class="ui-dialog migration-dialog" id="design-deployment-dialog" aria-labelledby="design-deployment-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Detached design · reviewed copy</small><h2 id="design-deployment-title">Copy design to PostgreSQL target</h2><p>Save desired metadata first, then review a fresh migration before any PostgreSQL changes. Your detached source and target-only objects stay intact.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close design copy review"></button></header>
+        <div class="deployment-target"><label>Connection<select id="deployment-connection"></select></label><label>Namespace<select id="deployment-namespace"></select></label></div>
+        <div class="migration-review-body" id="deployment-review-body"></div>
+        <div class="form-status migration-status" id="deployment-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact" id="review-deployment-button" type="button" disabled>Review copy</button><button class="ui-button compact primary" id="copy-deployment-button" type="button" disabled>Copy and review migration</button></footer>
       </div>
     </dialog>
 

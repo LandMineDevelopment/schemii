@@ -24,6 +24,9 @@ from schemii.schemii.migrations.models import ColumnTypeAnalysis, ColumnTypeAnal
 from .export import export_design
 from .deletion_impact import DesignObjectNotFoundError, design_deletion_impact
 from .models import (
+    DesignDeploymentReviewRequest,
+    DesignDeploymentCopyRequest,
+    DesignDeploymentPreview,
     DesignDeletionImpact,
     DesignBaselineResetPreview,
     DesignBaselineResetRequest,
@@ -468,3 +471,31 @@ def export_workspace_design(
     if design.revision != body.expected_design_revision:
         raise _design_conflict(DesignConflictError(design.revision))
     return export_design(design, body)
+
+
+@router.post("/design/deployment-review", response_model=DesignDeploymentPreview)
+def review_design_deployment(
+    workspace_id: str,
+    body: DesignDeploymentReviewRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignDeploymentPreview:
+    """Review a metadata-only copy into the owner's existing exact target."""
+    try:
+        return _migrations(request).review_design_deployment(principal.user_id, workspace_id, body)
+    except MigrationServiceError as error:
+        raise _migration_problem(error) from error
+
+
+@router.post("/design/deployment-copy", response_model=DesignHistoryMutation)
+def copy_design_deployment(
+    workspace_id: str,
+    body: DesignDeploymentCopyRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignHistoryMutation:
+    """Save one undoable target edit; the original detached design stays intact."""
+    try:
+        return _migrations(request).copy_design_deployment(principal.user_id, workspace_id, body)
+    except MigrationServiceError as error:
+        raise _migration_problem(error) from error

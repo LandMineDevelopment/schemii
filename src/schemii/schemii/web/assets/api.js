@@ -93,6 +93,8 @@ export const api = Object.freeze({
   analyzeDesignView: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/view-analysis`, { ...options, method: "POST", body }),
   getDesignLayout: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/layout`, options),
   replaceDesignLayout: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/layout`, { ...options, method: "PUT", body }),
+  reviewDesignDeployment: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/deployment-review`, { ...options, method: "POST", body }),
+  copyDesignDeployment: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/deployment-copy`, { ...options, method: "POST", body }),
   exportDesign: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/exports`, { ...options, method: "POST", body }),
   analyzeColumnType: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/column-type-analysis`, { ...options, method: "POST", body }),
   createMigrationPlan: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/migration-plans`, { ...options, method: "POST", body }),
