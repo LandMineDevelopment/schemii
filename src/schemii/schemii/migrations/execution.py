@@ -51,6 +51,8 @@ from .planner import (
     compile_migration_steps,
     content_fingerprint,
     new_baseline_content,
+    migration_compatibility,
+    preservation_matches,
     physical_column_order_mismatches,
     preserve_column_display_order,
 )
@@ -301,6 +303,10 @@ class MigrationExecutionCoordinator:
                 status=503,
             )
 
+        compatibility = migration_compatibility(record.authority.live_catalog, record.authority.live_content,
+            record.authority.merged_content, tuple(table.name for table in record.authority.merged_content.tables if table.id in record.authority.rebuild_table_ids))
+        if plan.compatibility is not None and (not compatibility.operation_safe or compatibility != plan.compatibility):
+            return self._fail_before_apply(execution_record, "compatibility_evidence_changed", "Operation safety no longer matches the reviewed catalog evidence")
         intended: dict[str, Any] = {}
 
         def on_started(transaction_id: str, target_identity: dict[str, Any]) -> None:
@@ -335,8 +341,7 @@ class MigrationExecutionCoordinator:
                 record.authority.merged_content,
             )
             if (
-                not complete
-                or issues
+                (not complete and (not compatibility.operation_safe or not preservation_matches(record.authority.live_catalog, catalog, compatibility)))
                 or remaining
                 or blockers
                 or physical_order_mismatches
@@ -656,6 +661,7 @@ class MigrationExecutionCoordinator:
         catalog = PostgresCatalog.model_validate_json(
             json.dumps(intended["catalog"], ensure_ascii=False)
         )
+        _, coverage_issues, coverage_complete = new_baseline_content(catalog, merged)
         design = self._design(owner_id, record.plan.workspace_id)
         design_conflict = False
         if design.fingerprint != content_fingerprint(merged):
@@ -695,8 +701,8 @@ class MigrationExecutionCoordinator:
                     ),
                     content=merged,
                     catalog=catalog,
-                    complete=True,
-                    issues=[],
+                    complete=coverage_complete,
+                    issues=[item.model_dump(mode="json", by_alias=True) for item in coverage_issues],
                     source="migration",
                     expected_predecessor_id=baseline.id if baseline else None,
                     source_execution_id=execution.id,

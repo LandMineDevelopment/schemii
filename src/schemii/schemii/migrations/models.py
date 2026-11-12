@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, model_validator
 
 from schemii.common.api.models import ApiModel
+from schemii.common.postgres.models import PostgresObjectIdentity
 from schemii.schemii.designs.models import DesignIdentifier, DesignObjectId
 
 
@@ -177,6 +178,16 @@ class MigrationColumnOrderRebuild(ApiModel):
     )
 
 
+class MigrationCompatibility(ApiModel):
+    editable_complete: bool
+    operation_safe: bool
+    evidence_version: int | None
+    impact: list[PostgresObjectIdentity]
+    protected_scope: list[PostgresObjectIdentity]
+    unknown_reasons: list[str]
+    blocking_reasons: list[str]
+
+
 class MigrationPlan(ApiModel):
     """Immutable server-derived review of desired, baseline, and live state."""
 
@@ -192,6 +203,7 @@ class MigrationPlan(ApiModel):
     review_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     drift_status: MigrationDriftStatus
     complete: bool
+    compatibility: MigrationCompatibility | None = None
     apply_capable: bool
     destructive: bool
     column_type_conversions: list[ColumnTypeConversion] = Field(default_factory=list, max_length=160000)

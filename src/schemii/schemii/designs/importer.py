@@ -6,7 +6,7 @@ import hashlib
 import math
 from dataclasses import dataclass
 
-from schemii.common.postgres.models import PostgresCatalog, PostgresColumn
+from schemii.common.postgres.models import PostgresCatalog, PostgresColumn, PostgresObjectIdentity, dependency_closure
 from schemii.common.postgres.query_analysis import QueryDefinitionError, parse_query_definition
 from schemii.common.postgres.schema_source import (
     SchemaSourceError,
@@ -113,6 +113,37 @@ def _layout(content: SchemiiDesignContent) -> SchemiiDesignLayoutContent:
         for index, view in enumerate(content.views)
     )
     return SchemiiDesignLayoutContent(objects=objects)
+
+
+def _structured_issues(catalog: PostgresCatalog, issues: list[WorkspaceImportIssue]) -> list[WorkspaceImportIssue]:
+    output = []
+    for issue in issues:
+        identity = None
+        for table in sorted(catalog.tables, key=lambda item: -len(item.name)):
+            prefix = f"{catalog.namespace}.{table.name}"
+            if issue.object_name == prefix or issue.object_name.startswith(prefix + "."):
+                identity = PostgresObjectIdentity(kind="relation", namespace=catalog.namespace, name=table.name)
+                break
+        if identity is None:
+            for group, kind in ((catalog.types, "type"), ((*catalog.views, *catalog.materialized_views), "relation"), (catalog.functions, "routine")):
+                for item in group:
+                    signature = getattr(item, "identity_arguments", "")
+                    label = f"{item.name}({signature})" if kind == "routine" else item.name
+                    if issue.object_name == label:
+                        identity = PostgresObjectIdentity(kind=kind, namespace=catalog.namespace, name=item.name, signature=signature)
+        if identity is None and catalog.safety is not None:
+            for item in catalog.safety.preservation:
+                if issue.object_name == f"{item.identity.namespace}.{item.identity.name}":
+                    identity = item.identity
+                    break
+        scope = dependency_closure(catalog.safety, {identity}) if identity is not None and catalog.safety is not None else set()
+        output.append(issue.model_copy(update={
+            "identity": identity, "feature_code": "unrepresented_" + issue.category,
+            "protected_scope": sorted(scope, key=lambda item: (item.kind,item.namespace,item.name,item.signature)),
+            "dependency_complete": bool(identity is not None and catalog.fingerprint_version == 2 and catalog.safety and catalog.safety.dependency_complete),
+            "unknown_reasons": list(catalog.safety.unknown_reasons) if catalog.safety else ["Historical catalog has no versioned dependency evidence"],
+        }))
+    return output
 
 
 def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
@@ -568,7 +599,17 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
         "triggers": len(content.triggers),
         "types": len(content.types),
     }
+    if catalog.safety is not None:
+        for item in catalog.safety.preservation:
+            if item.relation_kind in {"f", "S", "c"}:
+                _issue(issues, "opaque_relation", f"{item.identity.namespace}.{item.identity.name}",
+                    "Foreign tables, standalone sequence contracts, and composite types are preserved as protected PostgreSQL objects, not editable design definitions")
+    issues = _structured_issues(catalog, issues)
     summary = WorkspaceImportSummary(
+        safety_evidence_version=catalog.safety.version if catalog.safety else None,
+        migration_guidance=("Unsupported objects stay protected. Only changes outside their proven dependency closure can be reviewed."
+            if catalog.safety and catalog.safety.dependency_complete else
+            "Dependency safety is unproven. Changes involving unsupported PostgreSQL features remain blocked; export and ordinary SQL are available."),
         catalog_fingerprint=catalog.fingerprint,
         catalog_captured_at=catalog.captured_at,
         complete=not issues,

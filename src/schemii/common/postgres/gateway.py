@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 import secrets
+import json
 import threading
 import time
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -46,6 +47,9 @@ from .console.gateway import (
 )
 from .models import (
     PostgresCatalog,
+    PostgresSafetyEvidence,
+    PostgresDependency,
+    PostgresPreservation,
     PostgresCheckConstraint,
     PostgresColumn,
     PostgresConnectionTestResult,
@@ -65,6 +69,9 @@ from .models import (
     build_postgres_catalog,
 )
 from .queries import (
+    SAFETY_OBJECTS_QUERY,
+    SAFETY_DEPENDENCIES_QUERY,
+    SAFETY_UNKNOWNS_QUERY,
     COLUMNS_QUERY,
     CONNECTION_TEST_QUERY,
     CONSTRAINTS_QUERY,
@@ -1303,7 +1310,28 @@ class PsycopgPostgresGateway:
                 self._limits.max_total_objects,
                 sum(len(rows) for rows in groups),
             )
+        if metadata["server_version_num"] < 140000:
+            safety = PostgresSafetyEvidence(dependencies=(), preservation=(), dependency_complete=False,
+                unknown_reasons=("Safety evidence requires PostgreSQL14 or newer",))
+        else:
+            objects = self._bounded_rows(database_connection, "safety_objects", SAFETY_OBJECTS_QUERY,
+                namespace, self._limits.max_total_objects, text_budget, ("descriptor",))
+            dependencies = self._bounded_rows(database_connection, "safety_dependencies", SAFETY_DEPENDENCIES_QUERY,
+                namespace, self._limits.max_total_objects, text_budget, ("descriptor",))
+            unknown = self._one(self._execute_rows(database_connection, SAFETY_UNKNOWNS_QUERY, (namespace,)))
+            reasons = []
+            for field, reason in (("routine_bodies", "Routine bodies and dynamic references are not fully tracked by pg_depend"),
+                                  ("opaque_dependencies", "Foreign or composite objects have unproven dependencies"),
+                                  ("inaccessible", "Schema metadata is inaccessible to this role")):
+                if type(unknown.get(field)) is not bool:
+                    raise PostgresCatalogValidationError()
+                if unknown[field]: reasons.append(reason)
+            safety = PostgresSafetyEvidence.model_validate_json(json.dumps({
+                "dependencies": [json.loads(row["descriptor"]) for row in dependencies],
+                "preservation": [json.loads(row["descriptor"]) for row in objects],
+                "dependency_complete": not reasons, "unknown_reasons": reasons}))
         return self._build_catalog(
+            safety=safety,
             namespace=namespace,
             metadata=metadata,
             type_rows=groups[0],
@@ -1513,6 +1541,7 @@ class PsycopgPostgresGateway:
         self,
         *,
         namespace: str,
+        safety: PostgresSafetyEvidence | None = None,
         metadata: Mapping[str, Any],
         type_rows: list[dict[str, Any]],
         table_rows: list[dict[str, Any]],
@@ -1760,6 +1789,7 @@ class PsycopgPostgresGateway:
         )
 
         return build_postgres_catalog(
+            safety=safety,
             database=metadata["database"],
             namespace=namespace,
             server_version=metadata["server_version"],

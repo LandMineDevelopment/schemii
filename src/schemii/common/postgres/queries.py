@@ -402,3 +402,91 @@ READABLE_COLUMNS_QUERY = """
     ORDER BY c.relname, a.attnum
     LIMIT %s
 """
+
+# Versioned safety evidence is separate from lossless editable import. All rows
+# are bounded by the same gateway catalog limits and included in the full digest.
+SAFETY_OBJECTS_QUERY = """
+    /* schemii_catalog_safety_objects */
+    WITH settings AS (SELECT %s::int AS maximum, %s::text AS namespace)
+    SELECT CASE WHEN octet_length(descriptor.value) <= settings.maximum THEN descriptor.value END AS descriptor,
+           octet_length(descriptor.value) AS descriptor_bytes
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid=c.reltablespace
+    LEFT JOIN pg_catalog.pg_am am ON am.oid=c.relam
+    CROSS JOIN settings
+    CROSS JOIN LATERAL (SELECT jsonb_build_object(
+      'identity', jsonb_build_object('kind','relation','namespace',n.nspname,'name',c.relname),
+      'relation_kind',c.relkind::text, 'owner',pg_catalog.pg_get_userbyid(c.relowner),'actor',current_user,
+      'acl',COALESCE((SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),
+         'grantee',CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END,
+         'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantee,a.privilege_type,a.grantor)
+         FROM aclexplode(COALESCE(c.relacl,acldefault('r',c.relowner))) a),'[]'::jsonb),
+      'reloptions',to_jsonb(COALESCE(c.reloptions,ARRAY[]::text[])),
+      'tablespace',ts.spcname,'access_method',am.amname,
+      'partition_bound',pg_get_expr(c.relpartbound,c.oid,true),
+      'partition_parents',COALESCE((SELECT jsonb_agg(jsonb_build_object('kind','relation','namespace',pn.nspname,'name',p.relname) ORDER BY pn.nspname,p.relname)
+         FROM pg_inherits i JOIN pg_class p ON p.oid=i.inhparent JOIN pg_namespace pn ON pn.oid=p.relnamespace WHERE i.inhrelid=c.oid),'[]'::jsonb),
+      'indexes',COALESCE((SELECT jsonb_agg(jsonb_build_object('name',ic.relname,'table',c.relname,
+         'definition',pg_get_indexdef(i.indexrelid),'method',iam.amname,'unique',i.indisunique,
+         'valid',i.indisvalid,'predicate',pg_get_expr(i.indpred,i.indrelid,true)) ORDER BY ic.relname)
+         FROM pg_index i JOIN pg_class ic ON ic.oid=i.indexrelid JOIN pg_am iam ON iam.oid=ic.relam WHERE i.indrelid=c.oid),'[]'::jsonb),
+      'default_grantees',COALESCE((SELECT jsonb_agg(DISTINCT CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END)
+         FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+         WHERE d.defaclrole=(SELECT oid FROM pg_roles WHERE rolname=current_user)
+           AND d.defaclobjtype='r' AND d.defaclnamespace IN (0,n.oid)),'[]'::jsonb),
+      'properties',jsonb_build_object('persistence',c.relpersistence,'row_security',c.relrowsecurity,
+          'force_row_security',c.relforcerowsecurity,'replica_identity',c.relreplident)::text
+    )::text AS value) descriptor
+    WHERE n.nspname=settings.namespace AND c.relkind IN ('r','p','v','m','f','S','c')
+    ORDER BY c.relname LIMIT %s
+"""
+
+SAFETY_DEPENDENCIES_QUERY = """
+    /* schemii_catalog_safety_dependencies */
+    WITH settings AS (SELECT %s::int AS maximum, %s::text AS namespace),
+    nodes AS (
+      SELECT 'pg_class'::regclass::oid AS classid,c.oid AS objid,'relation'::text AS kind,n.nspname AS namespace,c.relname AS name,''::text AS signature
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      UNION ALL
+      SELECT 'pg_type'::regclass::oid,t.oid,CASE WHEN t.typrelid=0 THEN 'type' ELSE 'relation' END,n.nspname,COALESCE(c.relname,t.typname),''
+      FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace LEFT JOIN pg_class c ON c.oid=t.typrelid
+      UNION ALL
+      SELECT 'pg_proc'::regclass::oid,p.oid,'routine',n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    ), edges AS (
+      SELECT CASE WHEN COALESCE(r.ev_class,con.conrelid,tr.tgrelid,ad.adrelid) IS NOT NULL THEN 'pg_class'::regclass ELSE d.classid END AS source_class,
+             COALESCE(r.ev_class,con.conrelid,tr.tgrelid,ad.adrelid,d.objid) AS source,
+             d.refclassid AS target_class,d.refobjid AS target,d.deptype::text AS kind
+      FROM pg_depend d
+      LEFT JOIN pg_rewrite r ON d.classid='pg_rewrite'::regclass AND r.oid=d.objid
+      LEFT JOIN pg_constraint con ON d.classid='pg_constraint'::regclass AND con.oid=d.objid AND con.conrelid<>0
+      LEFT JOIN pg_trigger tr ON d.classid='pg_trigger'::regclass AND tr.oid=d.objid
+      LEFT JOIN pg_attrdef ad ON d.classid='pg_attrdef'::regclass AND ad.oid=d.objid
+      WHERE d.refclassid IN ('pg_class'::regclass,'pg_type'::regclass,'pg_proc'::regclass)
+      UNION ALL SELECT 'pg_class'::regclass,inhrelid,'pg_class'::regclass,inhparent,'partition' FROM pg_inherits
+    )
+    SELECT CASE WHEN octet_length(descriptor.value)<=settings.maximum THEN descriptor.value END AS descriptor,
+           octet_length(descriptor.value) AS descriptor_bytes
+    FROM (SELECT DISTINCT source_class,source,target_class,target,kind FROM edges) e
+    JOIN nodes sn ON sn.classid=e.source_class AND sn.objid=e.source
+    JOIN nodes tn ON tn.classid=e.target_class AND tn.objid=e.target
+    CROSS JOIN settings
+    CROSS JOIN LATERAL (SELECT jsonb_build_object(
+      'source',jsonb_build_object('kind',sn.kind,'namespace',sn.namespace,'name',sn.name,'signature',sn.signature),
+      'target',jsonb_build_object('kind',tn.kind,'namespace',tn.namespace,'name',tn.name,'signature',tn.signature),'kind',e.kind)::text AS value) descriptor
+    WHERE sn.namespace !~ '^pg_' AND sn.namespace<>'information_schema'
+      AND tn.namespace !~ '^pg_' AND tn.namespace<>'information_schema'
+      AND (sn.kind,sn.namespace,sn.name,sn.signature)<>(tn.kind,tn.namespace,tn.name,tn.signature)
+    ORDER BY sn.namespace,sn.name,sn.signature,tn.namespace,tn.name,tn.signature,e.kind LIMIT %s
+"""
+
+SAFETY_UNKNOWNS_QUERY = """
+    /* schemii_catalog_safety_unknowns */
+    SELECT
+      EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') AS routine_bodies,
+      EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('f','c')) AS opaque_dependencies,
+      NOT has_schema_privilege(%s,'USAGE') AS inaccessible
+"""

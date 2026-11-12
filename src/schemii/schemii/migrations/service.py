@@ -72,6 +72,7 @@ from .planner import (
     compile_migration_steps,
     content_fingerprint,
     new_baseline_content,
+    migration_compatibility,
     random_plan_id,
     reconcile_designs,
     tables_requiring_empty_for_required_columns,
@@ -803,6 +804,10 @@ class MigrationService:
             column_type_conversions=conversions,
         )
         compiler_blockers.extend(conversion_blockers)
+        compatibility = migration_compatibility(catalog, reconciliation.live, merged,
+            tuple(table.name for table in merged.tables if table.id in eligible_rebuild_ids))
+        compiler_blockers.extend(MigrationWarning(code="unsafe_compatibility_boundary", message=reason, object_path="schema.compatibility")
+            for reason in compatibility.blocking_reasons)
         warnings = list(reconciliation.warnings)
         if reconciliation.external_changes:
             warnings.insert(
@@ -875,6 +880,7 @@ class MigrationService:
             "columnOrderRebuilds": [
                 item.model_dump(mode="json", by_alias=True) for item in order_rebuilds
             ],
+            "compatibility": compatibility.model_dump(mode="json", by_alias=True),
             "steps": [step.model_dump(mode="json", by_alias=True) for step in steps],
             "externalChanges": [
                 item.model_dump(mode="json", by_alias=True)
@@ -911,6 +917,7 @@ class MigrationService:
             review_digest=review_digest,
             drift_status=drift_status,
             complete=complete,
+            compatibility=compatibility,
             apply_capable=apply_capable,
             destructive=destructive,
             column_type_conversions=conversion_reviews,
@@ -1050,7 +1057,9 @@ class MigrationService:
             current_catalog,
             resolutions=submitted,
         )
-        unresolved = [item for item in reconciliation.conflicts if item.id not in submitted]
+        # A submitted choice is not proof that a regenerated opaque/structural
+        # conflict has disappeared. The merger removes only resolved conflicts.
+        unresolved = reconciliation.conflicts
         if unresolved or reconciliation.merged is None:
             raise MigrationServiceError(
                 409,

@@ -14,7 +14,7 @@ from pglast import parse_sql
 from pglast.enums import FunctionParameterMode
 from pglast.stream import RawStream
 
-from schemii.common.postgres.models import PostgresCatalog
+from schemii.common.postgres.models import PostgresCatalog, PostgresObjectIdentity, dependency_closure
 from schemii.common.postgres.query_analysis import referenced_relations
 from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.models import (
@@ -31,6 +31,7 @@ from schemii.schemii.designs.models import (
 from schemii.schemii.designs.store import design_fingerprint, validate_design_content
 
 from .models import (
+    MigrationCompatibility,
     MigrationConflict,
     MigrationExternalChange,
     MigrationStep,
@@ -510,6 +511,74 @@ def catalog_design(
     return content, warnings, imported.summary.complete
 
 
+def migration_compatibility(catalog: PostgresCatalog, live: SchemiiDesignContent,
+                            desired: SchemiiDesignContent, extra_relations: tuple[str, ...] = ()) -> MigrationCompatibility:
+    """Prove operations disjoint from the closure of every uneditable feature."""
+    imported = import_postgres_catalog(catalog)
+    impact = set()
+    def identity(kind: str, name: str, signature: str = "") -> PostgresObjectIdentity:
+        return PostgresObjectIdentity(kind=kind, namespace=catalog.namespace, name=name, signature=signature)
+    for group, kind in (("tables", "relation"), ("views", "relation"), ("types", "type"), ("functions", "routine")):
+        before, after = _by_id(getattr(live, group)), _by_id(getattr(desired, group))
+        for key in before.keys() | after.keys():
+            old, new = before.get(key), after.get(key)
+            if old == new: continue
+            # Population is observed cache state, never recurring desired DDL.
+            if group == "views" and old is not None and new is not None and old.kind == new.kind == "materialized_view" and old.model_dump(exclude={"populate_on_create"}) == new.model_dump(exclude={"populate_on_create"}):
+                continue
+            for item in (old, new):
+                if item is not None: impact.add(identity(kind,item.name,getattr(item,"identity_arguments","")))
+    table_names = {table.id: table.name for table in [*live.tables,*desired.tables]}
+    for group in ("relationships", "triggers"):
+        before,after = _by_id(getattr(live,group)),_by_id(getattr(desired,group))
+        for key in before.keys() | after.keys():
+            if before.get(key)==after.get(key): continue
+            for item in (before.get(key),after.get(key)):
+                if item is None: continue
+                if group == "triggers": impact.add(identity("relation",item.relation_name))
+                else:
+                    impact.update(identity("relation",table_names[key]) for key in (item.source_table_id,item.target_table_id))
+    impact.update(identity("relation",name) for name in extra_relations)
+    protected = {item.identity for item in imported.summary.issues if item.identity is not None}
+    safety = catalog.safety if catalog.fingerprint_version == 2 else None
+    if safety is not None: protected=dependency_closure(safety,protected)
+    reasons=[]
+    unknown=list(safety.unknown_reasons) if safety is not None else ["Historical catalog has no versioned dependency evidence"]
+    if imported.summary.issues:
+        if safety is None or not safety.dependency_complete or any(item.identity is None for item in imported.summary.issues):
+            reasons.append("Uneditable objects have an unknown dependency boundary")
+        if protected & impact: reasons.append("Changes intersect the protected dependency closure")
+    # Versioned unknown dependency metadata also protects fully editable designs
+    # from operations whose full impact has not been established.
+    if safety is not None and not safety.dependency_complete and impact:
+        reasons.append("Dependency evidence is incomplete")
+    order=lambda item:(item.kind,item.namespace,item.name,item.signature)
+    return MigrationCompatibility(editable_complete=imported.summary.complete, operation_safe=not reasons,
+        evidence_version=safety.version if safety else None, impact=sorted(impact,key=order),
+        protected_scope=sorted(protected,key=order), unknown_reasons=unknown, blocking_reasons=reasons)
+
+
+def preservation_matches(before: PostgresCatalog, after: PostgresCatalog,
+                         compatibility: MigrationCompatibility) -> bool:
+    """A successful partial import must leave every protected catalog byte intact."""
+    if not compatibility.protected_scope: return True
+    if before.fingerprint_version != 2 or after.fingerprint_version != 2 or before.safety is None or after.safety is None:
+        return False
+    if not before.safety.dependency_complete or not after.safety.dependency_complete: return False
+    scope=set(compatibility.protected_scope)
+    def projection(catalog: PostgresCatalog):
+        evidence=catalog.safety
+        objects={item.identity: item.model_dump(mode="json") for item in evidence.preservation if item.identity in scope}
+        rows={}
+        for group,kind in ((catalog.tables,"relation"),(catalog.views,"relation"),(catalog.materialized_views,"relation"),(catalog.types,"type"),(catalog.functions,"routine")):
+            for item in group:
+                key=PostgresObjectIdentity(kind=kind,namespace=item.namespace,name=item.name,signature=getattr(item,"identity_arguments",""))
+                if key in scope: rows[key]=item.model_dump(mode="json")
+        edges=[edge.model_dump(mode="json") for edge in evidence.dependencies if edge.source in scope or edge.target in scope]
+        return objects,rows,edges
+    return projection(before)==projection(after)
+
+
 def reconcile_designs(
     baseline: SchemiiDesignContent,
     desired: SchemiiDesignContent,
@@ -558,7 +627,8 @@ def reconcile_designs(
                 allowed_resolutions=["pull_live"],
             )
         )
-    if not complete:
+    compatibility = migration_compatibility(catalog, live, merged or desired)
+    if not complete and not compatibility.operation_safe:
         merger.conflicts.append(
             MigrationConflict(
                 id=_identifier("mcf", "schema.coverage", catalog.fingerprint),
