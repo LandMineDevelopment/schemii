@@ -1,4 +1,4 @@
-import { sourceIdentity, sourceNodeId, sameSource, edgeRelationship } from "./logical-relationships.js";
+import { sourceIdentity, sourceNodeId, sourceNodeIds, sameSource, edgeRelationship } from "./logical-relationships.js";
 import { catalogContract, importedDraft, MODEL_LIMITS } from "./model-draft.js";
 
 const relationshipFields = ["id","name","sourceTable","sourceColumn","targetTable","targetColumn","sourceNamespace","targetNamespace","columns"];
@@ -36,8 +36,11 @@ export function reconcileSourceCatalog(draft,catalog) {
 export function addSourceSelection(draft,catalog,selection) {
   const imported=importedDraft(catalog,selection),next=structuredClone(draft);
   const selectedTables=new Set(imported.nodes.map(node=>sourceIdentity(node,catalog)));
-  const canonical=new Map();
-  for(const node of next.nodes.filter(node=>!node.derivation)) if(!canonical.has(sourceIdentity(node,catalog))||node.id===sourceNodeId(node,catalog))canonical.set(sourceIdentity(node,catalog),node.id);
+  const canonical=new Map(), ranks=new Map(), physical=next.nodes.filter(node=>!node.derivation), allocated=sourceNodeIds(physical,catalog);
+  for(const node of physical) {
+    const identity=sourceIdentity(node,catalog), rank=node.id===sourceNodeId(node,catalog)?0:node.id===allocated.get(identity)?1:2;
+    if(!canonical.has(identity)||rank<ranks.get(identity)) {canonical.set(identity,node.id);ranks.set(identity,rank);}
+  }
   const ids=new Set(next.nodes.map(node=>node.id));
   for(const node of imported.nodes) {
     if(canonical.has(sourceIdentity(node,catalog)))continue;

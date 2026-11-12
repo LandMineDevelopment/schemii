@@ -125,6 +125,19 @@ test("generated IDs remain bounded and deterministic for long escaped identifier
   assert.deepEqual(sourceNodeIds([...sources].reverse(),catalog),ids);
 });
 
+test("adding fields prefers the collision-safe canonical occurrence even when aliases are ordered first",()=>{
+  const catalog={namespace:"one",tables:[{namespace:"one",name:'["two","same"]',columns:[column("id"),column("extra")]},
+    {namespace:"two",name:"same",columns:[column("id"),column("extra")]}],relationships:[]};
+  const draft=importedDraft(catalog,catalog.tables.map(table=>({namespace:table.namespace,table:table.name,columns:["id"]})));
+  const canonical=draft.nodes.find(node=>node.namespace==="two");
+  const alias={...canonical,id:"authored_alias",label:"Other role"};draft.nodes.unshift(alias);
+  const before=draft.nodes.map(node=>node.id);
+  addSourceSelection(draft,catalog,[{namespace:"two",table:"same",columns:["extra"]}]);
+  assert.deepEqual(draft.nodes.map(node=>node.id),before);
+  assert.equal(draft.exposedFields.find(field=>field.column==="extra").table,canonical.id);
+  assert.equal(draft.exposedFields.some(field=>field.table===alias.id),false);
+});
+
 test("source display quotes components so dotted names remain unambiguous",()=>{
   const catalog={namespace:"public"};
   assert.equal(sourceLabel({namespace:"a.b",table:"c"},catalog),'"a.b".c');
