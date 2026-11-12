@@ -365,7 +365,7 @@ suite orchestration remain separate extensions; unsupported flags fail explicitl
 
 ## Opt-in native thread browser adapter
 
-Use `--browser native --controller t3 --reviewer-account ACCOUNT --runtime-slots N`
+Use `--browser native --controller t3 --reviewer-accounts ACCOUNT1,ACCOUNT2 --runtime-slots N`
 for the stock native `schemii_browser` adapter. Read the complete
 [native acceptance contract](../../docs/native-qa-acceptance.md) before dispatch.
 Preparation retains existing account, fixture, capability and deployment checks,
@@ -375,8 +375,16 @@ The CLI records native binding/authentication, scenario-begin, selected captures
 image/download inspection and distinct reviewer adjudication. It never mixes a
 legacy session handle with an unrelated native browser.
 
-`--parallel` counts native testers and reserves a separate selected reviewer
-account/lane. The guard checks the matching prepared backend and reported capacity.
+`--parallel` counts native testers (at most ten). Every selected reviewer reserves
+its own distinct account/lane in addition to the coordinator and active testers.
+`--reviewer-account ACCOUNT` remains supported for one reviewer; it cannot be
+combined with `--reviewer-accounts`. The reviewer list must be nonempty, unique
+and included in `--accounts`. Ten testers and two reviewers need twelve account
+lanes and thirteen observed runtime slots; see the exact native acceptance
+example linked above. Smaller tester waves retain all reviewer reservations.
+The guard checks the matching prepared backend, actual reviewer roles and
+reported capacity. Reviewer status grants no product permissions: use role-correct
+accounts with independently verified fixture access for the reviewed products.
 Normal `browser_close` removes the backend, guardian and generation output while
 leaving the reusable stdio endpoint live. After exporting evidence, visible signout,
 `browser_close` and harness `finish`, a worker whose connection is genuinely done

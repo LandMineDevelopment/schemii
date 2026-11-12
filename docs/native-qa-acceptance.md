@@ -27,14 +27,50 @@ accounts, prepare two testers plus an independent reviewer:
 ./test.sh run --run RUN_ID
 ```
 
-`--parallel` counts testers; the reviewer has its own reserved account and ready
-lane. Supply observed runtime slots, never a configuration target. The native
-adapter allows ten testers plus one reviewer, requiring coordinator capacity too.
+`--parallel` counts testers; each reviewer has its own reserved selected account
+and ready lane. `--reviewer-account` remains supported for a singleton. Use
+`--reviewer-accounts` for an explicit comma-separated list; the two flags are
+mutually exclusive. Empty, repeated or unselected reviewer usernames are rejected.
+Supply observed runtime slots, never a configuration target. The native adapter
+allows at most ten testers plus the selected reviewers. Every active wave needs
+one coordinator + `--parallel` testers + every reviewer, including reviewers who
+are waiting to inspect evidence. Reviewers cannot also fill tester slots.
 A larger requested mission cannot silently count a smaller wave as equivalent.
 Preparation uses only `./start.sh`, verifies local and Tailscale HTTPS, checks
 permissions/resources and holds the existing deployment lease. Freeze source for
 the entire run. Feature scenarios need their normal fixture resources/access
 checks; a native browser does not grant application permissions.
+
+For ten testers and two role-correct reviewers on an observed 13-slot interface:
+
+```bash
+./test.sh prepare --browser native --controller t3 \
+  --accounts qa_designer_010,qa_designer_011,qa_designer_012,qa_designer_001,qa_modeler_011,qa_modeler_012,qa_report_author_011,qa_report_author_012,qa_report_author_013,qa_viewer_011,qa_designer_014,qa_report_author_014 \
+  --reviewer-accounts qa_designer_014,qa_report_author_014 \
+  --agents 12 --parallel 10 --runtime-slots 13 \
+  --credentials-file /private/retained-credentials.json \
+  --fixtures /private/ready-ten-tester-fixtures.json --tracks lifecycle \
+  --products schemii,schemoo,schemer --viewports desktop,mobile --headless
+```
+
+This names twelve account lanes: ten testers, a Schemii designer reviewer and a
+Schemoo/Schemer report-author reviewer. Verify the actual accounts' effective
+product/resource grants and ready fixture scenarios before dispatch. Mixed-persona
+fixtures must declare their product-specific scenarios, expected capabilities and
+`deniedProducts`; the global product list does not grant access. The account
+names and reviewer role do not establish access. Give each reviewer only the
+cases and owned resources it can actually inspect and reproduce. Neither is an
+all-product administrator. The manifest, `plan`, `doctor` and report distinguish
+tester/reviewer counts and the active slot budget. Preparation and a pending
+tester handoff do not establish application acceptance or overlapping AI work.
+
+In a linked worktree, Codex may execute the primary checkout's trusted assignment
+hook. A passing branch-local guard test does not activate that hook for new
+actors. Integrate the reviewed plural-selection guard into the primary checkout,
+review/trust the changed hook through supported controls and verify fresh provider
+loading before dispatching a plural manifest. Keep the existing supported
+singleton workflow until that activation is established; never bypass reviewer
+role checks or weaken the guard to start a run.
 
 Use the actual prepared checkout, run/lane IDs and native return ID. Each prompt
 contains exactly one standalone assignment, with `qa.browser` set to `native`:

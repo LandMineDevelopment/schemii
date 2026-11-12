@@ -329,8 +329,68 @@ class AssignmentGuardTests(unittest.TestCase):
         self.manifest.update(browser="native", runtimeSlots=13, parallel=2, reviewerAccount="qa_designer_014")
         self.manifest["lanes"][0].update(role="tester", username="qa_designer_012")
         self.manifest["lanes"].append({"id":"lane-2", "role":"reviewer", "username":"qa_designer_014", "status":"ready", "agent":None})
+        self.manifest["lanes"].append({"id":"lane-3", "role":"tester", "username":"qa_designer_013", "status":"queued", "agent":None})
         self.write_manifest()
         return assignment
+
+    def plural_native_qa(self):
+        assignment = self.native_qa()
+        self.manifest.update(parallel=10, reviewerAccount=None,
+                             reviewerAccounts=["qa_designer_014", "qa_report_author_014"])
+        self.manifest["lanes"] = [
+            {"id": f"lane-{i + 1}", "role": "tester", "username": f"qa_designer_{i + 1:03}", "status": "ready", "agent": None}
+            for i in range(10)
+        ] + [
+            {"id": f"lane-{i + 11}", "role": "reviewer", "username": username, "status": "ready", "agent": None}
+            for i, username in enumerate(self.manifest["reviewerAccounts"])
+        ]
+        self.write_manifest()
+        return assignment
+
+    def test_ten_testers_and_two_actual_reviewer_roles_fit_thirteen_slots(self):
+        assignment = self.plural_native_qa()
+        self.assertEqual(self.result(assignment), {})
+        for lane_id in ("lane-11", "lane-12"):
+            assignment["qa"]["lane"] = lane_id
+            assignment["owned_resources"] = [f"qa:qa-guard-test:{lane_id}"]
+            assignment["owned_paths"] = [f"artifacts/qa/qa-guard-test/{lane_id}"]
+            assignment["kind"] = "ui-testing"
+            self.assertDenied(self.result(assignment), "independent review role")
+            assignment["kind"] = "review"
+            self.assertEqual(self.result(assignment), {})
+
+    def test_plural_reviewers_cannot_bypass_identity_roles_or_active_capacity(self):
+        for change in (
+            {"runtimeSlots": 12}, {"runtimeSlots": True}, {"parallel": 11},
+            {"reviewerAccounts": []}, {"reviewerAccounts": None},
+            {"reviewerAccounts": ["unknown"]},
+            {"reviewerAccounts": ["qa_designer_014", "QA_DESIGNER_014"]},
+            {"reviewerAccount": "qa_designer_014"},
+        ):
+            with self.subTest(change=change):
+                assignment = self.plural_native_qa()
+                self.manifest.update(change)
+                self.write_manifest()
+                self.assertDenied(self.result(assignment), "prepared native backend")
+        for mutation in ("tester-role", "duplicate-account", "unknown-role", "missing-reviewer"):
+            with self.subTest(mutation=mutation):
+                assignment = self.plural_native_qa()
+                if mutation == "tester-role":
+                    self.manifest["lanes"][-1]["role"] = "tester"
+                elif mutation == "duplicate-account":
+                    self.manifest["lanes"][0]["username"] = "QA_DESIGNER_014"
+                elif mutation == "unknown-role":
+                    self.manifest["lanes"][0]["role"] = "unassigned"
+                else:
+                    self.manifest["lanes"].pop()
+                self.write_manifest()
+                self.assertDenied(self.result(assignment), "prepared native backend")
+
+    def test_plural_singleton_manifest_keeps_historical_singular_contract(self):
+        assignment = self.native_qa()
+        self.manifest["reviewerAccounts"] = [self.manifest["reviewerAccount"]]
+        self.write_manifest()
+        self.assertEqual(self.result(assignment), {})
 
     def test_prepared_native_lane_requires_matching_backend_capacity_and_reviewer(self):
         assignment = self.native_qa()
