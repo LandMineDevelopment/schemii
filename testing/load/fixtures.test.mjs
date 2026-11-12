@@ -9,7 +9,7 @@ import tls from 'node:tls';
 import { EventEmitter } from 'node:events';
 import { prepareFixtures, cleanupFixtures, compiledColumns, rowOracles, streamRequest, prepareOwnedFixtures, cleanupOwnedFixtures, createOwnedResource, heldFixture, disposedFixtureConsumer, fixtureCommand, LOAD_FIXTURE_PROFILE, resourceFingerprint } from './fixtures.mjs';
 import { plan } from './plan.mjs';
-import { readSnapshot, writeSnapshot } from './journal.mjs';
+import { readSnapshot, writeSnapshot, openJournal } from './journal.mjs';
 import { NDJSONOracle, CSVOracle } from './protocol.mjs';
 import { privateJSON, writeJSON } from '../harness/store.mjs';
 import { ProtocolFailure } from './protocol.mjs';
@@ -92,6 +92,7 @@ async function disposable(t, options = {}) {
   const stores = new Map(), state = { serial: 0, source: false, failOnce: null, writes: [], revoked: [], drift: false, deletes: [], details: [] };
   const store = name => { if (!stores.has(name)) stores.set(name, []); return stores.get(name); };
   const authority = { version: 1, kind: 'schemii-pressure-load-hold', status: 'held', profile: LOAD_FIXTURE_PROFILE, tag, path: join(dir, 'authority.json'), origin: LOCAL,
+    run: adminName, nonce: 'a'.repeat(64), directory: dir, application: { id: 'b'.repeat(64) },
     admin: { username: adminName, userId: adminId, password: 'fixture-admin-password' }, sourceWitnessConfig: join(dir, 'source-monitor-config.json'),
     sourceAdminRole: 'fixture_source_admin', sourceAdminConnection: { password: 'source-admin-private' },
     appSourceConnection: { host: 'source', port: 5432, database: 'pressure_source', username: 'pressure_source', password: 'source-private', sslMode: 'require', connectTimeout: 3 } };
@@ -180,9 +181,15 @@ async function disposable(t, options = {}) {
   };
   const spec = plan({ fixtureMode: 'disposable', workload: options.workload || 'sql-page', active: options.active || 2, registered: options.registered || 10,
     profileMode: options.profileMode || 'private-single', profiles: options.profiles });
+  const observeFixture = async binding => {
+    assert.deepEqual(binding, { authorityFile: authority.path, attachmentFile: join(dir, 'attachment.json'),
+      run: authority.run, nonce: authority.nonce, application: authority.application });
+    state.observerReads = (state.observerReads || 0) + 1;
+    return { version: 1, run: authority.run, losses: 0, operations: [] };
+  };
   return { dir, spec, users, state, stores, authority, FakeClient,
     prepare: () => prepareOwnedFixtures({ dir, spec, authority, Client: FakeClient, provisionSource, readColumns: async () => ['Orders.id'] }),
-    cleanup: receipt => cleanupOwnedFixtures({ dir, receipt, authority, Client: FakeClient, provisionSource }) };
+    cleanup: receipt => cleanupOwnedFixtures({ dir, receipt, authority, Client: FakeClient, provisionSource, observeFixture }) };
 }
 test('disposable population separates registered and active identities, rotates private profiles and cleans exact resources', async t => {
   const f = await disposable(t, { profileMode: 'private-multiple' }), receipt = await f.prepare();
@@ -190,11 +197,50 @@ test('disposable population separates registered and active identities, rotates 
   assert(receipt.accounts.every(account => account.variants.length === 2 && account.profiles.length === 2));
   assert(receipt.accounts.every(account => account.oracles.sql.rows === 513));
   const result = await f.cleanup(receipt);
+  assert.equal(f.state.observerReads, 1);
   assert.equal(result.registeredAccountsDeleted, 10); assert.equal(result.objectsRemaining, 0);
   assert(f.users.has('retained-peer')); assert(f.users.has(f.authority.admin.username));
   assert.equal(f.state.source, false);
   const second = await f.cleanup(await readSnapshot(join(f.dir, 'fixtures-private.json')));
   assert.equal(second.objectsRemaining, 0); assert(f.users.has('retained-peer'));
+});
+test('disposable CSV provisions its saved one-tile dashboard with the exact observer actor binding', async t => {
+  const f = await disposable(t, { workload: 'csv', active: 1, registered: 1 }), receipt = await f.prepare();
+  const account = receipt.accounts[0];
+  assert.deepEqual(Object.keys(account.dashboards), ['1']);
+  assert.equal(account.dashboards[1].modelId, account.model.id);
+  assert.deepEqual(account.fixtureObserver, receipt.fixtureObserver);
+  assert.equal(receipt.population.topology.dashboardsPerOwner, 1);
+  const result = await f.cleanup(receipt);
+  assert.equal(result.objectsRemaining, 0); assert.equal(f.state.observerReads, 1); assert(f.users.has('retained-peer'));
+});
+test('late private CSV receipt is durable before exact cancellation and cannot substitute source-release proof', async t => {
+  const f = await disposable(t, { workload: 'csv', active: 1, registered: 1 }), receipt = await f.prepare();
+  const account = receipt.accounts[0], operation = 'e'.repeat(32), executionId = 'cex_' + 'f'.repeat(32), path = join(f.dir, 'journey');
+  const journal = await openJournal(path, { tag: receipt.tag, budget: { records: 64, bytes: 64 * 2048 + 65536, recordBytes: 2048, chunkRecords: 64 } });
+  await journal.append({ type: 'intent', kind: 'stream', username: account.username, workload: 'csv', status: 'pending',
+    operationNonce: operation, fixtureObserved: true, dashboardId: account.dashboards[1].id, dashboardRevision: account.dashboards[1].revision });
+  await journal.close(); receipt.executionJournal = path;
+  await writeSnapshot(join(f.dir, 'ownership-private.json'), { runId: receipt.tag, sourceConfig: f.authority.sourceWitnessConfig, sourceOutput: join(f.dir, 'source-output.json') });
+  class ReceiptClient extends f.FakeClient {
+    async json(method, path, ...args) {
+      if (path.startsWith('/api/v1/common/')) {
+        assert.equal(method, 'DELETE'); assert.equal(path, `/api/v1/common/query-executions/${executionId}`);
+        assert.equal((await readSnapshot(join(f.dir, 'fixtures-private.json'))).fixtureExecutionCleanupJournal[0].id, executionId);
+        return { id: executionId, status: 'succeeded' };
+      }
+      return super.json(method, path, ...args);
+    }
+  }
+  await assert.rejects(cleanupOwnedFixtures({ dir: f.dir, receipt, authority: f.authority, Client: ReceiptClient,
+    provisionSource: async () => assert.fail('source deletion must wait for its independent witness'),
+    witness: async config => { assert.equal(config, f.authority.sourceWitnessConfig); return { releaseVerified: false, live: [{ pid: 123 }] }; },
+    observeFixture: async binding => {
+      assert.deepEqual(binding, account.fixtureObserver);
+      return { losses: 0, process: { incarnation: 'a'.repeat(32) }, operations: [{ operation, actor: account.userId, resource: account.dashboards[1].id,
+        request: 'complete', unknown: false, receipts: [{ id: executionId, owner: account.userId, status: 'succeeded' }] }] };
+    } }), /cleanup_source_release_unverified/);
+  assert.equal(receipt.fixtureExecutionCleanupJournal[0].id, executionId); assert.equal(f.state.deletes.length, 0);
 });
 test('pure viewers keep only Schemer access and receive an explicit shared grant; recovery is separate', async t => {
   const f = await disposable(t, { workload: 'shared-report', profileMode: 'managed-shared' }), receipt = await f.prepare();

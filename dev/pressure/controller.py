@@ -38,6 +38,19 @@ from urllib.request import (
 )
 import uuid
 
+if __package__:
+    from .execution_observer import (
+        MAXIMUM_BYTES as EXECUTION_BYTES,
+        declaration,
+        validate_snapshot,
+    )
+else:
+    from execution_observer import (
+        MAXIMUM_BYTES as EXECUTION_BYTES,
+        declaration,
+        validate_snapshot,
+    )
+
 LOCAL = "https://localhost:8001"
 PREVIEW = "https://omarchy.taile4f57f.ts.net"
 POSTGRES = "postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73"
@@ -56,6 +69,7 @@ ASSETS = (
     "dev/pressure/controller.py",
     "dev/pressure/probe.py",
     "dev/pressure/app.py",
+    "dev/pressure/execution_observer.py",
     "dev/pressure/compose.yaml",
     "dev/ingress/nginx.conf",
     "dev/schemii.toml",
@@ -695,7 +709,12 @@ def join_consumer(identity: dict) -> None:
 
 
 def attachment_request(
-    root: Path, primary: Path, directory: Path, action: str, argument: str
+    root: Path,
+    primary: Path,
+    directory: Path,
+    action: str,
+    argument: str,
+    execution=None,
 ) -> dict:
     """Metadata IPC only: no Docker access or acquisition of the holder's leases."""
     check(
@@ -769,7 +788,16 @@ def attachment_request(
             and info.st_uid == os.getuid(),
             "attachment_lock",
         )
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                check(time.monotonic() < lock_deadline, "attachment_busy_unknown")
+                time.sleep(0.02)
+        if action == "executions":
+            request["execution"] = execution
         private_write(directory / "request.json", request)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -778,7 +806,13 @@ def attachment_request(
                 value = private_read(response)
                 if value.get("requestId") == request["requestId"]:
                     check(
-                        value.get("status") in {"attached", "detaching"},
+                        value.get("status")
+                        == {
+                            "attach": "attached",
+                            "heartbeat": "attached",
+                            "detach": "detaching",
+                            "executions": "observed",
+                        }[action],
                         "holder_request_rejected",
                     )
                     return value
@@ -986,9 +1020,11 @@ class Fixture:
                 "database.crt",
                 "ingress.key",
                 "ingress.crt",
+                "execution-input",
             )
         } | {
             str(self.root / "dev/pressure/app.py"),
+            str(self.root / "dev/pressure/execution_observer.py"),
             str(self.root / "dev/schemii.toml"),
             str(self.root / "dev/ingress/nginx.conf"),
         }
@@ -1450,6 +1486,12 @@ class Fixture:
 
     def prepare_stack(self) -> None:
         self.secrets()
+        # Only this fixed input directory is mounted read-only in the fixture.
+        # The enclosing run directory remains 0700; app's explicit group can
+        # read declarations without acquiring access to any other host files.
+        execution_input = self.directory / "execution-input"
+        execution_input.mkdir(mode=0o750)
+        execution_input.chmod(0o750)
         self.up(["metadata", "source"])
         endpoints = {}
         for name in ("metadata", "source"):
@@ -1839,7 +1881,7 @@ class Fixture:
                 )
             else:
                 check(
-                    action in {"heartbeat", "detach"}
+                    action in {"heartbeat", "detach", "executions"}
                     and type(attachment) is dict
                     and secrets.compare_digest(
                         request.get("token", ""), attachment["token"]
@@ -1852,7 +1894,9 @@ class Fixture:
                     == attachment["consumer"],
                     "consumer_identity_changed",
                 )
-                if action == "heartbeat":
+                if action == "executions":
+                    reply.update(self.execution_channel(request.get("execution")))
+                elif action == "heartbeat":
                     attachment["heartbeatAt"] = now()
                     private_write(self.directory / "attachment.json", attachment)
                     reply["status"] = "attached"
@@ -1872,6 +1916,158 @@ class Fixture:
         )
         self.save("holder-request-observed")
         private_write(self.directory / "response.json", reply)
+
+    def execution_channel(self, request) -> dict:
+        """Fixed fixture IPC, while the existing holder owns both launcher leases."""
+        verify_leases(self.primary / ".git")
+        check(
+            self.state["assets"] == {name: sha(self.root / name) for name in ASSETS},
+            "execution_source_changed",
+        )
+        check(
+            type(request) is dict
+            and set(request) == {"version", "declare", "acknowledge"}
+            and request["version"] == 1,
+            "execution_command_schema",
+        )
+        check(
+            type(request["declare"]) is list
+            and len(request["declare"]) <= 16
+            and type(request["acknowledge"]) is list
+            and len(request["acknowledge"]) <= 128,
+            "execution_command_bound",
+        )
+        additions = [declaration(item) for item in request["declare"]]
+        check(
+            all(
+                type(key) is str and re.fullmatch(r"[0-9a-f]{32}", key)
+                for key in request["acknowledge"]
+            ),
+            "execution_ack_identity",
+        )
+        baseline = self.observation()
+        process = baseline["observation"]["process"]
+        previous = self.state.get(
+            "executionCommands", {"operations": [], "process": process}
+        )
+        check(previous["process"] == process, "execution_process_restarted")
+        operations = {item["operation"]: item for item in previous["operations"]}
+        seen = self.state.setdefault("executionNonces", [])
+        for key in request["acknowledge"]:
+            check(key in operations, "execution_ack_unmatched")
+            del operations[key]
+        for item in additions:
+            check(
+                item["operation"] not in seen and len(seen) < 4096,
+                "execution_nonce_reused_or_history_full",
+            )
+            operations[item["operation"]] = item
+            seen.append(item["operation"])
+        check(len(operations) <= 128, "execution_retention_full_unknown")
+        value = {
+            "version": 1,
+            "run": self.state["run"],
+            "process": process,
+            "command": secrets.token_hex(16),
+            "operations": list(operations.values()),
+            "acknowledge": request["acknowledge"],
+        }
+        raw = (json.dumps(value, separators=(",", ":")) + "\n").encode()
+        check(len(raw) <= EXECUTION_BYTES, "execution_command_bytes")
+        directory = self.directory / "execution-input"
+        info = directory.lstat()
+        check(
+            stat.S_ISDIR(info.st_mode)
+            and stat.S_IMODE(info.st_mode) == 0o750
+            and info.st_uid == os.getuid()
+            and info.st_gid == os.getgid(),
+            "execution_input_owner",
+        )
+        temporary = directory / ("command-" + secrets.token_hex(8) + ".tmp")
+        try:
+            fd = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640
+            )
+            with os.fdopen(fd, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o640)
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, directory / "execution-commands.json")
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.state["executionCommands"] = value
+        self.save("execution-observation-intent")
+        deadline = time.monotonic() + 3
+        while True:
+            observed = self.execution_observation(baseline, process)
+            if observed["command"] == value["command"]:
+                break
+            check(time.monotonic() < deadline, "execution_observation_unknown")
+            time.sleep(0.1)
+        exported = {
+            "version": 1,
+            "run": self.state["run"],
+            "nonce": self.state["hold"]["nonce"],
+            "containerId": baseline["containerId"],
+            "containerStartedAt": baseline["containerStartedAt"],
+            "observation": observed,
+        }
+        path = self.directory / "execution-observation.json"
+        private_write(path, exported)
+        return {
+            "status": "observed",
+            "executionObservationFile": str(path),
+            "command": value["command"],
+        }
+
+    def execution_observation(self, baseline, process) -> dict:
+        owned = self.state["containers"]["schemii"]
+        raw = self.runtime(
+            [
+                "docker",
+                "container",
+                "cp",
+                owned["id"] + ":/qualification-state/execution-observation.json",
+                "-",
+            ],
+            environment=self.environment,
+            timeout=5,
+            limit=EXECUTION_BYTES + 16384,
+            binary=True,
+        )
+        check(
+            type(raw) is bytes and len(raw) <= EXECUTION_BYTES + 16384,
+            "execution_observation_archive",
+        )
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+            members = archive.getmembers()
+            check(len(members) == 1, "execution_observation_members")
+            member = members[0]
+            check(
+                member.name == "execution-observation.json"
+                and member.isfile()
+                and member.size <= EXECUTION_BYTES
+                and member.uid == 10001
+                and member.mode == 0o600,
+                "execution_observation_file",
+            )
+            value = json.loads(archive.extractfile(member).read(EXECUTION_BYTES + 1))
+        validate_snapshot(value, self.state["run"], process)
+        current = self.observation()
+        check(
+            current["containerId"] == baseline["containerId"]
+            and current["containerStartedAt"] == baseline["containerStartedAt"]
+            and current["observation"]["process"] == process,
+            "execution_observation_owner_changed",
+        )
+        check(
+            0
+            <= (datetime.now(timezone.utc) - instant(value["at"])).total_seconds()
+            <= 3,
+            "execution_observation_stale",
+        )
+        return value
 
     def finish_consumers(self) -> None:
         attachment = self.state.get("hold", {}).get("attachment")
@@ -2295,6 +2491,47 @@ def recover(root: Path, primary: Path, directory: Path, runtime=command) -> Fixt
     return fixture
 
 
+def read_execution_request() -> dict:
+    """One bounded stdin record, never paths or opaque IDs in command arguments."""
+    raw = bytearray()
+    deadline = time.monotonic() + 2
+    while not raw.endswith(b"\n"):
+        remaining = deadline - time.monotonic()
+        check(
+            remaining > 0
+            and bool(select.select([sys.stdin.fileno()], [], [], remaining)[0]),
+            "execution_input_deadline",
+        )
+        part = os.read(sys.stdin.fileno(), min(65536, EXECUTION_BYTES + 1 - len(raw)))
+        check(bool(part), "execution_input_incomplete")
+        raw.extend(part)
+        check(len(raw) <= EXECUTION_BYTES, "execution_input_budget")
+    value = json.loads(raw)
+    check(
+        type(value) is dict
+        and set(value) == {"version", "declare", "acknowledge"}
+        and value["version"] == 1,
+        "execution_input_schema",
+    )
+    check(
+        type(value["declare"]) is list
+        and len(value["declare"]) <= 16
+        and type(value["acknowledge"]) is list
+        and len(value["acknowledge"]) <= 128,
+        "execution_input_bound",
+    )
+    for item in value["declare"]:
+        declaration(item)
+    check(
+        all(
+            type(key) is str and re.fullmatch(r"[0-9a-f]{32}", key)
+            for key in value["acknowledge"]
+        ),
+        "execution_input_ack",
+    )
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
@@ -2310,6 +2547,7 @@ def main() -> int:
             "--metadata-pressure-attach",
             "--metadata-pressure-heartbeat",
             "--metadata-pressure-detach",
+            "--metadata-pressure-executions",
         ),
     )
     parser.add_argument("directory", nargs="?", type=Path)
@@ -2334,6 +2572,9 @@ def main() -> int:
                 args.directory,
                 args.action.removeprefix("--metadata-pressure-"),
                 args.argument,
+                read_execution_request()
+                if args.action == "--metadata-pressure-executions"
+                else None,
             )
             print(json.dumps(result), flush=True)
             return 0

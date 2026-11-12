@@ -5,7 +5,10 @@ export const WORKLOADS = ['cheap-read', 'catalog', 'compile', 'report-1', 'repor
 export const PROFILE_MODES = ['private-single', 'private-multiple', 'managed-shared', 'managed-distinct'];
 export function fixtureTopology(spec) {
   const lanes = spec.workload === 'mix' ? spec.mix.map(value => value.workload) : [spec.workload];
-  const dashboardCounts = [...new Set(lanes.filter(value => /^report-(1|5|20)$/.test(value)).map(value => Number(value.slice(7))))].sort((a, b) => a - b);
+  // Disposable CSV exports a saved tile; share its one-tile dashboard with
+  // report-1 and count the demand before any fixture mutation.
+  const dashboardCounts = [...new Set(lanes.filter(value => value === 'csv' || /^report-(1|5|20)$/.test(value))
+    .map(value => value === 'csv' ? 1 : Number(value.slice(7))))].sort((a, b) => a - b);
   const models = lanes.some(value => ['compile', 'csv', 'slow-reader', 'disconnect', 'cancel'].includes(value) || value.startsWith('report-'));
   const perOwner = spec.profileMode === 'private-multiple' ? spec.profilesPerOwner : 1;
   if (dashboardCounts.length * perOwner > 100) throw new Error('fixture_dashboard_limit_reduce_profiles_or_report_variants');

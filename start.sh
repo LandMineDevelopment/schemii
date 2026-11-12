@@ -31,7 +31,7 @@ ensure_docker_access() {
   fi
 }
 
-if [[ "${1-}" == --qualify-metadata-pressure || "${1-}" == --recover-metadata-pressure || "${1-}" == --hold-metadata-pressure || "${1-}" == --hold-load-fixture || "${1-}" == --metadata-pressure-attach || "${1-}" == --metadata-pressure-heartbeat || "${1-}" == --metadata-pressure-detach ]]; then
+if [[ "${1-}" == --qualify-metadata-pressure || "${1-}" == --recover-metadata-pressure || "${1-}" == --hold-metadata-pressure || "${1-}" == --hold-load-fixture || "${1-}" == --metadata-pressure-attach || "${1-}" == --metadata-pressure-heartbeat || "${1-}" == --metadata-pressure-detach || "${1-}" == --metadata-pressure-executions ]]; then
   case "$1" in
     --qualify-metadata-pressure) (( $# <= 2 )) || fail "pressure qualification accepts at most one private run directory" ;;
     --recover-metadata-pressure|--hold-metadata-pressure|--hold-load-fixture) (( $# == 2 )) || fail "pressure mode requires its one explicit argument" ;;

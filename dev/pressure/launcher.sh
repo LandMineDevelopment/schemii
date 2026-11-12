@@ -6,7 +6,7 @@ pressure_main() {
   common="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)" || fail "could not resolve pressure deployment leases"
   primary="$(git --git-dir="$common" worktree list --porcelain | sed -n '1s/^worktree //p')" || fail "could not resolve the primary checkout"
   [[ -d "$common" && "$common" == /* && -d "$primary" && "$primary" == /* ]] || fail "pressure checkout identity is unavailable"
-  if [[ "$1" == --metadata-pressure-attach || "$1" == --metadata-pressure-heartbeat || "$1" == --metadata-pressure-detach ]]; then
+  if [[ "$1" == --metadata-pressure-attach || "$1" == --metadata-pressure-heartbeat || "$1" == --metadata-pressure-detach || "$1" == --metadata-pressure-executions ]]; then
     exec python3 "$ROOT_DIR/dev/pressure/controller.py" --root "$ROOT_DIR" --primary "$primary" --common "$common" -- "$@"
   fi
   gate="$common/qa-startup.lock"

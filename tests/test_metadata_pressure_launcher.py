@@ -14,6 +14,170 @@ import pytest
 from dev.pressure import controller as c
 
 
+def test_execution_channel_exports_only_fixed_owned_artifact_under_existing_fences(
+    tmp_path, monkeypatch
+):
+    import io
+    import tarfile
+    from dev.pressure.execution_observer import ExecutionObserver
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "asset").write_text("source")
+    directory = tmp_path / "pressure"
+    directory.mkdir(mode=0o700)
+    (directory / "execution-input").mkdir(mode=0o750)
+    owned = {"id": "a" * 64}
+    process = {
+        "pid": 1,
+        "uid": 10001,
+        "startTicks": "1",
+        "incarnation": "b" * 32,
+        "startedAt": c.now(),
+    }
+    baseline = {
+        "containerId": owned["id"],
+        "containerStartedAt": c.now(),
+        "observation": {"process": process},
+    }
+    monkeypatch.setattr(c, "ASSETS", ("asset",))
+    leases = []
+    monkeypatch.setattr(c, "verify_leases", lambda path: leases.append(path))
+    fixture = c.Fixture.__new__(c.Fixture)
+    fixture.root, fixture.primary, fixture.directory = root, root, directory
+    fixture.environment = {}
+    fixture.state = {
+        "run": "pressure_" + "a" * 32,
+        "assets": {"asset": c.sha(root / "asset")},
+        "containers": {"schemii": owned},
+        "hold": {"nonce": "c" * 64},
+    }
+    fixture.observation = lambda: baseline
+    fixture.save = lambda *args: None
+    calls = []
+
+    def runtime(argv, **kwargs):
+        assert argv == [
+            "docker",
+            "container",
+            "cp",
+            owned["id"] + ":/qualification-state/execution-observation.json",
+            "-",
+        ]
+        assert kwargs["binary"] is True
+        calls.append(argv)
+        command = json.loads(
+            (directory / "execution-input/execution-commands.json").read_text()
+        )
+        observer = ExecutionObserver(fixture.state["run"], directory, process)
+        observer.command = command["command"]
+        observer.operations = {
+            item["operation"]: {
+                **item,
+                "request": "declared",
+                "unknown": False,
+                "receipts": [],
+            }
+            for item in command["operations"]
+        }
+        raw = json.dumps(observer.snapshot()).encode()
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as writer:
+            member = tarfile.TarInfo("execution-observation.json")
+            member.size, member.uid, member.mode = len(raw), 10001, 0o600
+            writer.addfile(member, io.BytesIO(raw))
+        return archive.getvalue()
+
+    fixture.runtime = runtime
+    operation = {
+        "operation": "d" * 32,
+        "actor": "user_owned",
+        "resource": "dash_owned",
+        "method": "POST",
+        "path": "/api/v1/schemer/dashboards/dash_owned/executions/stream",
+        "kind": "dashboard-stream",
+    }
+    result = fixture.execution_channel(
+        {"version": 1, "declare": [operation], "acknowledge": []}
+    )
+    assert result["status"] == "observed" and len(calls) == 1
+    assert leases == [root / ".git"]
+    assert (
+        stat.S_IMODE(
+            (directory / "execution-input/execution-commands.json").stat().st_mode
+        )
+        == 0o640
+    )
+    assert (
+        stat.S_IMODE((directory / "execution-observation.json").stat().st_mode) == 0o600
+    )
+    assert (
+        c.private_read(directory / "execution-observation.json")["observation"][
+            "operations"
+        ][0]["operation"]
+        == operation["operation"]
+    )
+    with pytest.raises(c.Refused, match="nonce_reused"):
+        fixture.execution_channel(
+            {"version": 1, "declare": [operation], "acknowledge": []}
+        )
+    fixture.state["assets"]["asset"] = "changed"
+    with pytest.raises(c.Refused, match="source_changed"):
+        fixture.execution_channel({"version": 1, "declare": [], "acknowledge": []})
+    assert len(calls) == 1
+
+
+def test_execution_stdin_is_bounded_closed_data_without_paths_or_sql(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(c.sys, "stdin", SimpleNamespace(fileno=lambda: 123))
+    monkeypatch.setattr(c.select, "select", lambda *args: ([123], [], []))
+    for value in [
+        {"version": 1, "declare": [], "acknowledge": []},
+        {"version": 1, "declare": [], "acknowledge": [], "sql": "PRIVATE_SQL"},
+    ]:
+        monkeypatch.setattr(
+            c.os, "read", lambda *args: (json.dumps(value) + "\n").encode()
+        )
+        if "sql" in value:
+            with pytest.raises(c.Refused, match="input_schema"):
+                c.read_execution_request()
+        else:
+            assert c.read_execution_request() == value
+    monkeypatch.setattr(c.os, "read", lambda *args: b"x" * 65536)
+    with pytest.raises(c.Refused, match="input_budget"):
+        c.read_execution_request()
+    monkeypatch.setattr(c.select, "select", lambda *args: ([], [], []))
+    with pytest.raises(c.Refused, match="input_deadline"):
+        c.read_execution_request()
+
+
+def test_execution_input_read_group_survives_restrictive_caller_umask(
+    tmp_path, monkeypatch
+):
+    directory = tmp_path / "run"
+    directory.mkdir(mode=0o700)
+    fixture = c.Fixture.__new__(c.Fixture)
+    fixture.directory = directory
+    fixture.secrets = lambda: None
+
+    def stop_before_runtime(*args, **kwargs):
+        raise RuntimeError("stop_before_runtime")
+
+    fixture.up = stop_before_runtime
+    monkeypatch.setattr(
+        c, "command", lambda *args, **kwargs: pytest.fail("No runtime allowed")
+    )
+    previous = os.umask(0o077)
+    try:
+        with pytest.raises(RuntimeError, match="stop_before_runtime"):
+            fixture.prepare_stack()
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE((directory / "execution-input").stat().st_mode) == 0o750
+
+
 def container(service, project, run=None, image=None):
     identifier = hashlib.sha256((project + service).encode()).hexdigest()
     limits = {

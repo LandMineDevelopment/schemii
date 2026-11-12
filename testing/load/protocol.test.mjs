@@ -134,6 +134,18 @@ test('fixture topology budgets only requested report variants and rejects imposs
   assert.equal(supported.fixtureTopology.dashboardsPerOwner, 99);
   for (const profiles of [34, 100]) assert.throws(() => plan({ fixtureMode: 'disposable', workload: 'mix', mix, active: 1, profileMode: 'private-multiple', profiles }), /reduce_profiles_or_report_variants/);
 });
+test('saved-tile CSV budgets one shared report-1 variant and all dashboard demand before provisioning', () => {
+  const options = { fixtureMode: 'disposable', active: 1, profileMode: 'private-multiple', profiles: 100 };
+  const csv = plan({ ...options, workload: 'csv' });
+  assert.deepEqual(csv.fixtureTopology.dashboardCounts, [1]);
+  assert.equal(csv.fixtureTopology.modelsPerOwner, 100); assert.equal(csv.fixtureTopology.dashboardsPerOwner, 100);
+  const sameVariant = plan({ ...options, workload: 'mix', mix: [{ workload: 'csv', weight: 50 }, { workload: 'report-1', weight: 50 }] });
+  assert.deepEqual(sameVariant.fixtureTopology.dashboardCounts, [1]); assert.equal(sameVariant.fixtureTopology.dashboardsPerOwner, 100);
+  const mix = [{ workload: 'csv', weight: 50 }, { workload: 'report-5', weight: 50 }];
+  const supported = plan({ ...options, profiles: 50, workload: 'mix', mix });
+  assert.deepEqual(supported.fixtureTopology.dashboardCounts, [1, 5]); assert.equal(supported.fixtureTopology.dashboardsPerOwner, 100);
+  assert.throws(() => plan({ ...options, profiles: 51, workload: 'mix', mix }), /reduce_profiles_or_report_variants/);
+});
 test('explicit30-to60minute soak duration remains immutable and leaves a supported held-run budget', () => {
   const value = plan({ recipe: 'soak', workload: 'sql-page', fixtureMode: 'disposable', active: 1, soakSeconds: 1800 });
   assert.equal(value.stages[1].seconds, 1800); assert.equal(value.soakSeconds, 1800); assert.equal(validatePlan(value), value);

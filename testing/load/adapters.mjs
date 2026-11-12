@@ -3,7 +3,7 @@ import { isDeepStrictEqual as same } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { HTTPClient } from './http.mjs';
 import { RowOracle, oracleFor, NDJSONOracle, CSVOracle, ProtocolFailure } from './protocol.mjs';
-import { ordinaryRequest, streamRequest, resourceFingerprint } from './fixtures.mjs';
+import { ordinaryRequest, streamRequest, resourceFingerprint, fixtureExecutions } from './fixtures.mjs';
 
 const fail = code => { throw new ProtocolFailure(code); };
 const identifier = value => {
@@ -17,6 +17,7 @@ export async function runJourney({ workload, account, client, signal, sequence =
   onIntent = async () => { throw new Error('durable_intent_required'); }, onExecution = async () => {},
   finishIntent = async () => {}, save = async () => {}, origin, Client = HTTPClient,
   captureSource = async () => { throw new Error('independent_source_capture_required'); },
+  observeFixture = fixtureExecutions,
   idleWait = ms => sleep(ms, undefined, { signal }) }) {
   if (['cheap-read', 'catalog', 'compile'].includes(workload)) {
     const request = ordinaryRequest(workload, account);
@@ -128,12 +129,17 @@ export async function runJourney({ workload, account, client, signal, sequence =
     return;
   }
   const shared = workload === 'shared-report';
-  const request = shared ? { method: 'POST', path: `/api/v1/schemer/dashboards/${account.sharedDashboard.id}/executions/stream`,
+  const fixture = account.fixtureObserver, operationNonce = fixture ? randomBytes(16).toString('hex') : null;
+  const request = workload === 'csv' && fixture ? { method: 'POST', path: `/api/v1/schemer/dashboards/${account.dashboards[1].id}/tiles/tile-1/export`,
+    body: { expectedRevision: account.dashboards[1].revision } } : shared ? { method: 'POST', path: `/api/v1/schemer/dashboards/${account.sharedDashboard.id}/executions/stream`,
     body: { expectedRevision: account.sharedDashboard.revision }, tiles: account.sharedDashboard.tiles } : streamRequest(workload, account);
-  const dashboard = shared ? account.sharedDashboard : workload.startsWith('report-') ? account.dashboards[Number(workload.slice(7))] : null;
+  const dashboard = shared ? account.sharedDashboard : workload === 'csv' && fixture ? account.dashboards[1] : workload.startsWith('report-') ? account.dashboards[Number(workload.slice(7))] : null;
   const binding = dashboard ? { dashboardId: dashboard.id, dashboardRevision: dashboard.revision } : { modelId: account.model.id, modelRevision: account.model.revision };
-  const reportMetadata = { kind: 'report-stream', ...binding };
-  const intent = await onIntent({ kind: 'stream', username: account.username, workload });
+  const reportMetadata = { kind: 'report-stream', ...binding, ...(fixture ? { operationNonce } : {}) };
+  const intent = await onIntent({ kind: 'stream', username: account.username, workload, ...binding, ...(fixture ? { operationNonce, fixtureObserved: true } : {}) });
+  if (fixture) await observeFixture(fixture, { declare: [{ operation: operationNonce, actor: account.userId,
+    resource: dashboard?.id || account.model.id, method: request.method, path: request.path,
+    kind: dashboard ? workload === 'csv' ? 'tile-csv' : 'dashboard-stream' : workload === 'csv' ? 'model-csv' : 'model-stream' }], acknowledge: [] });
   let recording = Promise.resolve(), executionId;
   const oracle = workload === 'csv' ? new CSVOracle(account.oracles.csv) : new NDJSONOracle(request.tiles, { onExecution: id => {
     executionId = id; recording = recording.then(async () => {
@@ -156,12 +162,37 @@ export async function runJourney({ workload, account, client, signal, sequence =
     };
   }
   try {
-    const result = await client.request({ ...request, oracle, signal, operation: 'report_stream', slowMs: workload === 'slow-reader' ? 100 : 0,
+    const result = await client.request({ ...request, fixtureOperation: operationNonce, oracle, signal, operation: 'report_stream', slowMs: workload === 'slow-reader' ? 100 : 0,
       disconnectAfterBytes: workload === 'disconnect' ? 1024 : 0 });
     if (result.status !== 200) fail('report_http_failed');
     if (executionId) await recording.then(() => onExecution(account.username, executionId, { ...reportMetadata, terminalAt: new Date().toISOString(), terminal: 'drained' }));
-    await finishIntent(intent, { status: 'closed', ...(executionId ? { executionId } : { idExposure: 'server_managed_not_exposed' }) });
+    if (!fixture) await finishIntent(intent, { status: 'closed', ...(executionId ? { executionId } : { idExposure: 'server_managed_not_exposed', qualification: 'unqualified_legacy_capture' }) });
   } catch (error) {
     if (!(workload === 'disconnect' && error.code === 'intentional_disconnect') && !(workload === 'cancel' && cancellation && error.code === 'stream_error')) throw error;
-  } finally { await recording; if (cancellation) await cancellation; }
+  } finally {
+    await recording; if (cancellation) await cancellation;
+    if (fixture) {
+      // Even a failed/aborted HTTP request may have reserved in a worker. The
+      // bounded channel retains late records until an explicit durable ack.
+      let observed, entry;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        observed = await observeFixture(fixture); entry = observed.operations.find(value => value.operation === operationNonce);
+        if (entry?.receipts?.[0]?.status !== 'unknown' && ['complete', 'failed'].includes(entry?.request)) break;
+      }
+      const captured = entry?.receipts?.[0];
+      if (captured) {
+        if (entry.actor !== account.userId || entry.resource !== (dashboard?.id || account.model.id) || captured.owner !== account.userId || !exactId(captured.id, 'cex') || executionId && captured.id !== executionId) fail('fixture_execution_capture_changed');
+        if (!executionId) {
+          executionId = captured.id;
+          await onExecution(account.username, executionId, { ...reportMetadata, observerProcess: observed.process });
+        }
+        await onExecution(account.username, executionId, { ...reportMetadata, observerProcess: observed.process,
+          fixtureStatus: captured.status, fixtureObservedAt: captured.observedAt, fixtureRequest: entry.request,
+          terminalAt: observed.at, terminal: captured.status });
+        await finishIntent(intent, { status: 'closed', executionId, fixtureCapture: 'exact_reserve_return' });
+      } else await finishIntent(intent, { status: 'unknown', fixtureCapture: 'missing_or_late' });
+      if (!entry || entry.unknown || observed.losses || !captured || !['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(captured.status) || !['complete', 'failed'].includes(entry.request)) fail('fixture_execution_observation_unknown');
+      await observeFixture(fixture, { declare: [], acknowledge: [operationNonce] });
+    }
+  }
 }

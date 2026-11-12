@@ -14,6 +14,53 @@ held launcher fixture through its constrained consumer contract below; it never
 starts a second stack. No launcher runs during unit tests or `load plan`. Do not
 edit source or rebuild while either harness owns a lease.
 
+## Private fixture execution receipts
+
+Disposable report and CSV journeys declare a run-owned operation nonce after
+their private intent is durable, before sending the authenticated request. CSV
+uses a saved dashboard tile, sharing the one-tile dashboard with `report-1`.
+This demand counts against the existing 100-dashboard owner limit before any
+provisioning; retained-mode model export remains a distinct path. The fixture
+wrapper correlates the nonce through
+ASGI tasks and `asyncio.to_thread`, then records the actual base Console reserve
+return synchronously. It returns the identical receipt and preserves application
+errors and cleanup order, including a reserve that finishes after cancellation.
+The nonce grants no application access. Production routes and permissions are
+unchanged; report receipts are never read through the forbidden common GET.
+
+The attached consumer uses `start.sh --metadata-pressure-executions` with its
+existing fixed attachment file and bounded allowlisted stdin record. Only the
+holder may write the fixed read-only declaration input and export the exact
+owned container's fixed private `execution-observation.json`. Existing source,
+lease, run, attachment and process-incarnation guards apply. No arbitrary paths,
+SQL, rows, credentials or whole execution objects are exported. Existing metadata
+observation retains its separate 16 KiB bound.
+
+The channel holds at most 128 unacknowledged operations in 128 KiB. Acknowledgment
+follows durable recording of the exact captured IDs and status in the private
+journey journal. Late unacknowledged captures also enter a bounded private cleanup
+journal. Nonce history is bounded at 4,096, and the existing holder IPC request
+budget remains 1,024; exhaustion stops observation rather than silently evicting
+work. Missing, unmatched, unreadable, pruned, restarted or lost observation stays
+unknown and blocks qualification. Legacy retained-mode CSV capture remains
+explicitly unqualified.
+
+Receipt status comes only from exact-owner `get_owned` reads. Request completion
+is recorded separately: `succeeded` does not prove a native cursor or permit was
+released, nor that CSV/NDJSON values were correct. Independent captured source
+identity/release evidence and full protocol oracles remain mandatory. A CSV too
+fast for the independent source witness leaves a qualification gap; receipt
+capture does not manufacture that witness.
+
+This instrumentation adds synchronous capture-file writes, private launcher IPC,
+and up to 16 ordinary metadata reads per 100 ms sampler sweep. Its private scalar
+counters report metadata reads, capture writes and elapsed sampling/capture time.
+These are observer costs, separate from offered application HTTP calls. They do
+not measure the complete instrumentation CPU, scheduler, IPC or database impact;
+`overheadMeasured` and `stockCapacityEligible` remain false. No capacity claim is
+supported until the coordinator qualifies the real assembled fixture and its
+independent witnesses.
+
 ## Tools and recipes
 
 Node uses the existing host runtime; no npm or production dependency is added.

@@ -296,20 +296,62 @@ export async function heldFixture(path, { readIdentity = processIdentity, now = 
   return { ...value, rawKind: value.kind, kind: 'schemii-pressure-load-hold', path, osRuntimeReceiptObjectSha256: digest(osReceipt), tag: witness.runId, origin: value.canonicalOrigin, admin,
     sourceAdminConnection, appSourceConnection, sourceAdminRole: credentials.sourceAdminRole };
 }
-export async function fixtureCommand(authority, action, attachment, { launch = spawn } = {}) {
-  if (!['attach', 'heartbeat', 'detach'].includes(action) || action !== 'attach' && attachment !== `${authority.directory}/attachment.json`) bad('fixture_control_invalid');
+const fixtureQueues = new Map();
+function queuedFixture(directory, task) {
+  if (!fixtureQueues.has(directory) && fixtureQueues.size >= 16) bad('fixture_control_budget');
+  const previous = fixtureQueues.get(directory) || Promise.resolve();
+  const pending = previous.catch(() => {}).then(task); fixtureQueues.set(directory, pending);
+  void pending.finally(() => { if (fixtureQueues.get(directory) === pending) fixtureQueues.delete(directory); }).catch(() => {});
+  return pending;
+}
+export function fixtureCommand(authority, action, attachment, options) {
+  return queuedFixture(authority.directory, () => fixtureControl(authority, action, attachment, options));
+}
+async function fixtureControl(authority, action, attachment, { launch = spawn, executionRequest = null } = {}) {
+  if (!['attach', 'heartbeat', 'detach', 'executions'].includes(action) || action !== 'attach' && attachment !== `${authority.directory}/attachment.json`) bad('fixture_control_invalid');
   const args = action === 'attach' ? ['--metadata-pressure-attach', authority.directory, String(process.pid)] :
     [`--metadata-pressure-${action}`, authority.directory, attachment];
   return new Promise((resolve, reject) => {
-    const child = launch(authority.launcherPath, args, { stdio: ['ignore', 'pipe', 'ignore'] }); let output = '';
+    const payload = action === 'executions' ? JSON.stringify({ version: 1, ...executionRequest }) + '\n' : null;
+    if (payload && Buffer.byteLength(payload) > 131072) { reject(new ProtocolFailure('fixture_control_budget')); return; }
+    const child = launch(authority.launcherPath, args, { stdio: [payload ? 'pipe' : 'ignore', 'pipe', 'ignore'] }); let output = '';
+    if (payload) { child.stdin.on('error', () => {}); child.stdin.end(payload); }
     child.stdout.on('data', part => { output += part; if (output.length > 65536) child.kill('SIGKILL'); });
     const timer = setTimeout(() => child.kill('SIGKILL'), 15000);
     child.once('error', () => { clearTimeout(timer); reject(new ProtocolFailure('fixture_control_unavailable')); });
     child.once('close', code => {
       clearTimeout(timer);
-      try { if (code !== 0) bad('fixture_control_unavailable'); const result = JSON.parse(output); if (result.status !== ({ attach: 'attached', heartbeat: 'attached', detach: 'detaching' })[action] || action === 'attach' && result.attachmentFile !== `${authority.directory}/attachment.json`) bad('fixture_control_invalid'); resolve(result); }
+      try { if (code !== 0) bad('fixture_control_unavailable'); const result = JSON.parse(output); if (result.status !== ({ attach: 'attached', heartbeat: 'attached', detach: 'detaching', executions: 'observed' })[action] || action === 'attach' && result.attachmentFile !== `${authority.directory}/attachment.json` || action === 'executions' && result.executionObservationFile !== `${authority.directory}/execution-observation.json`) bad('fixture_control_invalid'); resolve(result); }
       catch { reject(new ProtocolFailure('fixture_control_unavailable')); }
     });
+  });
+}
+
+// Private attachment IPC only. No authenticated report-receipt GET fallback.
+export async function fixtureExecutions(binding, request = { declare: [], acknowledge: [] }, { read = readSnapshot, control = fixtureControl } = {}) {
+  if (!binding || typeof binding.authorityFile !== 'string' || !/^pressure_[a-f0-9]{32}$/.test(binding.run || '')) bad('fixture_execution_binding');
+  const authority = await read(binding.authorityFile, 262144);
+  if (authority.kind !== 'launcher_owned_disposable_pressure' || authority.status !== 'held' || authority.run !== binding.run || authority.nonce !== binding.nonce ||
+      binding.authorityFile !== `${authority.directory}/authority.json` || binding.attachmentFile !== `${authority.directory}/attachment.json` ||
+      !same(authority.application, binding.application) || authority.stockCapacityEligible !== false ||
+      !Number.isFinite(Date.parse(authority.heartbeatAt)) || Date.now() - Date.parse(authority.heartbeatAt) > 15000 || Date.parse(authority.expiresAt) <= Date.now()) bad('fixture_execution_authority_changed');
+  return queuedFixture(authority.directory, async () => {
+    const attachment = await read(binding.attachmentFile, 262144);
+    if (attachment.status !== 'attached' || attachment.run !== binding.run || attachment.nonce !== binding.nonce) bad('fixture_execution_attachment_changed');
+    if (!Array.isArray(request.declare) || request.declare.length > 16 || !Array.isArray(request.acknowledge) || request.acknowledge.length > 128) bad('fixture_execution_request_budget');
+    const reply = await control(authority, 'executions', binding.attachmentFile, { executionRequest: request });
+    if (reply.status !== 'observed' || reply.executionObservationFile !== `${authority.directory}/execution-observation.json` || !/^[a-f0-9]{32}$/.test(reply.command || '')) bad('fixture_execution_reply_changed');
+    const result = await read(reply.executionObservationFile, 262144), value = result.observation;
+    if (result.version !== 1 || result.run !== binding.run || result.nonce !== binding.nonce || result.containerId !== binding.application.id || !Number.isFinite(Date.parse(result.containerStartedAt)) ||
+        value?.version !== 1 || value.run !== binding.run || !/^[a-f0-9]{32}$/.test(value.command || '') || value.instrumentation?.stockCapacityEligible !== false ||
+        !Number.isSafeInteger(value.losses) || value.losses < 0 || !Array.isArray(value.operations) || value.operations.length > 128 ||
+        !Number.isFinite(Date.parse(value.at)) || Date.now() - Date.parse(value.at) > 15000 || Date.parse(value.at) > Date.now() + 5000) bad('fixture_execution_observation_unknown');
+    // Another attached observer may export a newer snapshot after this reply.
+    // Require this command's concrete effects, rather than treating a newer
+    // fixed file as an empty result or replaying the command.
+    if (request.declare.some(item => !value.operations.some(entry => Object.keys(item).every(key => entry[key] === item[key]))) ||
+        request.acknowledge.some(operation => value.operations.some(entry => entry.operation === operation))) bad('fixture_execution_command_unknown');
+    return value;
   });
 }
 export async function disposedFixtureConsumer(binding, owner, { read = readConfig } = {}) {
@@ -384,6 +426,8 @@ export async function prepareOwnedFixtures({ dir, spec, authority, Client = HTTP
   if (!receipt) receipt = { version: 1, kind: 'disposable', tag: authority.tag, profile: authority.profile, population: shape, authorityFile: authority.path, resources: [], accounts: [], executions: [], intents: [] };
   if (receipt.kind !== 'disposable' || receipt.tag !== authority.tag || !same(receipt.profile, authority.profile) || !contains(receipt.population, shape) || receipt.authorityFile !== authority.path) bad('population_scope_changed');
   const save = () => writeSnapshot(file, receipt);
+  receipt.fixtureObserver = { authorityFile: authority.path, attachmentFile: `${authority.directory}/attachment.json`, run: authority.run,
+    nonce: authority.nonce, application: authority.application };
   await save();
   const admin = new Client({ origin: authority.origin, maxBytes: 16 * 1024 * 1024 }), clients = new Map();
   const owned = (client, key, kind, collection, listKey, body, ownerId, verifyAdoption) => createOwnedResource({ receipt, save, client, key, kind, collection, listKey, body, ownerId, verifyAdoption });
@@ -420,6 +464,7 @@ export async function prepareOwnedFixtures({ dir, spec, authority, Client = HTTP
       await client.login({ username: entry.username, password: entry.password }, user.id); // Secret-bound ownership, not name adoption.
       let account = receipt.accounts.find(value => value.username === entry.username);
       if (!account) { account = { username: entry.username, userId: user.id, password: entry.password, fixtureTag: receipt.tag, index: entry.index }; receipt.accounts.push(account); }
+      account.fixtureObserver = receipt.fixtureObserver;
       account.cookie = client.cookie; account.identityVerifiedAt = new Date().toISOString(); await save();
     }
     const sourceConfig = join(dir, 'source-fixture-config-private.json'), sourceReceipt = join(dir, 'source-fixture-private.json');
@@ -552,7 +597,7 @@ export async function prepareOwnedFixtures({ dir, spec, authority, Client = HTTP
 }
 
 export async function cleanupOwnedFixtures({ dir, receipt, origin, Client = HTTPClient, provisionSource = sourceFixture, authority: supplied,
-  witness = sampleSource }) {
+  witness = sampleSource, observeFixture = fixtureExecutions }) {
   const authority = supplied || await heldFixture(receipt.authorityFile);
   if (authority.tag !== receipt.tag || authority.kind !== 'schemii-pressure-load-hold' || authority.status !== 'held' || !same(authority.profile, receipt.profile)) bad('cleanup_fixture_authority_changed');
   const save = () => writeSnapshot(join(dir, 'fixtures-private.json'), receipt);
@@ -609,6 +654,25 @@ export async function cleanupOwnedFixtures({ dir, receipt, origin, Client = HTTP
         executions.set(event.id, { ...entry, ...event });
       }
       if (pending.size > 1000000 || executions.size > 1000000) bad('cleanup_journal_memory_budget');
+    }
+    if (receipt.fixtureObserver && !receipt.executionCleanupComplete) {
+      const observed = await observeFixture(receipt.fixtureObserver);
+      // Persist actual late IDs before any cleanup request. This is bounded by
+      // the fixture channel, separate from the single-writer journey journal.
+      receipt.fixtureExecutionCleanupJournal ||= [];
+      for (const entry of observed.operations) for (const captured of entry.receipts) {
+        const intent = [...pending.values()].find(value => value.operationNonce === entry.operation);
+        const account = receipt.accounts.find(value => value.userId === entry.actor);
+        if (!intent || !account || intent.username !== account.username || captured.owner !== account.userId || entry.resource !== (intent.dashboardId || intent.modelId) || !/^cex_[a-f0-9]{32}$/.test(captured.id)) bad('cleanup_fixture_capture_changed');
+        if (!receipt.fixtureExecutionCleanupJournal.some(value => value.id === captured.id)) receipt.fixtureExecutionCleanupJournal.push({
+          id: captured.id, username: account.username, kind: 'report-stream', operationNonce: entry.operation,
+          fixtureStatus: captured.status, fixtureRequest: entry.request, observerProcess: observed.process });
+        executions.set(captured.id, { ...executions.get(captured.id), ...receipt.fixtureExecutionCleanupJournal.find(value => value.id === captured.id) });
+        intent.executionId = captured.id; intent.status = 'acquired';
+      }
+      if (receipt.fixtureExecutionCleanupJournal.length > 128) bad('cleanup_fixture_journal_budget');
+      await save();
+      if (observed.losses || observed.operations.some(entry => entry.unknown || !entry.receipts.length || !['complete', 'failed'].includes(entry.request))) bad('cleanup_fixture_observation_unknown');
     }
     const allIntents = [...(receipt.intents || []), ...pending.values()];
     if (!receipt.executionCleanupComplete) for (const intent of allIntents) {
