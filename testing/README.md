@@ -332,3 +332,53 @@ replace the application's recovery workflow.
 See [harness controls](harness/README.md), [database contract](database/README.md),
 and [manual validation](harness/VALIDATION.md). No application test suite is
 implicitly launched by any command here.
+
+## Disposable served metadata-pressure qualification (#134)
+
+The opt-in `./start.sh --qualify-metadata-pressure` path is authored for the
+remaining served HTTPS/lifespan boundary. It does not run during normal startup,
+unit feedback or a load campaign. Run it only after independent review and
+coordinator scheduling; it temporarily leases the canonical deployment and may
+stop **only the exact recorded retained ingress** to reserve port 8001. Existing
+application/database containers, volumes, secrets, accounts and configuration are
+preserved. An empty or unhealthy retained deployment is refused before mutation.
+
+Prerequisites are the current source/application-image and configuration match,
+healthy canonical and tailnet origins, existing pinned database/ingress images,
+a prepared primary `.venv` with the project's existing Psycopg/HTTPX dependencies,
+and the committed, unchanged v2 `testing/load/source_monitor.py` dependency from PR #238. Its repaired helper fingerprint is pinned before creation; old/unbound helper bytes are rejected. The
+source witness is reused, not reimplemented; its exact bytes and empty baseline
+are recorded. A missing witness fails before fixture creation. Do not copy an
+unreviewed helper into place to bypass the prerequisite.
+
+The launcher records its private journal first under
+`PRIMARY/.schemii/metadata-pressure/pressure_<32 hex>/journal.json`. It creates a
+new owner-labeled project with two fresh volumes, fresh private credentials, low
+fixed resource/metadata limits, the exact reviewed application image, and a
+separate HTTPS ingress at `https://localhost:8001`. Tailscale continues to use
+`https://omarchy.taile4f57f.ts.net`; no Serve route is changed. Only this disposable
+fixture grants bootstrap consent. Private source/metadata witnesses record exact
+database, role, PID and backend-start scope. The source provisioner records its private TLS endpoint, actual server address/port/postmaster start/database OID, and a fresh owned database comment marker before any source query. The fixed recipe covers auth advisory
+waits, normal saturation, safe errors/cookie retention, readiness/control,
+source cancellation, native close, actual application stop/start lifespan,
+fresh authenticated `SELECT 42`, revision conflicts and role/session revocation.
+It accepts no arbitrary URL, DSN or SQL.
+
+Every create/stop/start/cleanup has an intent record and exact ownership guard.
+Failure or cancellation attempts guarded cleanup and restoration of the retained
+ingress, then checks both HTTPS origins. SIGKILL leaves the journal for explicit
+`./start.sh --recover-metadata-pressure ABSOLUTE_PRIVATE_RUN_DIRECTORY` after the
+recorded controller has exited. Recovery refuses active leases/controllers,
+changed source, replaced containers, different ownership and unsafe port state;
+it never repeats creation or deletes unknown resources. Unknown resources remain
+quarantined. If their exact owned ingress can safely be stopped, restoration is
+attempted while cleanup stays explicitly incomplete. Preserve the journal and
+all original failed evidence; do not prune containers or volumes to force recovery.
+
+This path is **not a throughput, capacity or manual UI pass**. Live execution is
+not established by its fake-command tests. Saturated normal admission prevents
+its authenticated runtime-observation endpoint from directly observing peak
+permits; that measurement remains **unknown**, and the recipe explicitly withholds
+complete acceptance even when its other cases pass. Post-drain permit counts and
+native/source close are observed separately. Independent final evidence review
+and the remaining peak-permit boundary are required before closing #134.

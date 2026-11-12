@@ -577,3 +577,20 @@ or application; it is additionally runnable after `npm ci`. The reporter-free
 ~364ms overhead, not a percentile or controlled benchmark. The 12-case fixture
 subset emitted 7,319 bytes and completed in 0.05s with Python timing enabled.
 Those observations do not establish compatibility or speed on other runtimes.
+
+### Served disposable metadata-pressure boundary
+
+`./start.sh --qualify-metadata-pressure` is an explicit coordinator-owned #134
+qualification path, separate from ordinary acceptance and capacity testing. Its
+launcher, controller and fixed HTTPS probe live in `dev/pressure/`; preparation,
+ownership, restoration and interrupted recovery are described in
+[the testing setup](../testing/README.md#disposable-served-metadata-pressure-qualification-134).
+It requires the committed #135 source witness before creating any runtime
+resources, a source/config-matching healthy retained deployment, and canonical
+exclusive leases. Only fresh disposable metadata/source databases receive
+pressure; retained user metadata is never a target. Fake lifecycle controls prove
+ownership and recovery decisions, not a live served-pressure pass. The current
+recipe preserves unobservable saturated peak permits as unknown and withholds
+complete acceptance. Reuse unchanged native/real-PostgreSQL/assembled receipts
+where their original source and scope still apply; run only the missing served
+qualification after independent review and explicit coordinator scheduling.

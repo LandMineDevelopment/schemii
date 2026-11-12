@@ -31,6 +31,13 @@ ensure_docker_access() {
   fi
 }
 
+if [[ "${1-}" == --qualify-metadata-pressure || "${1-}" == --recover-metadata-pressure ]]; then
+  (( $# <= 2 )) || fail "pressure qualification accepts at most one private run directory"
+  [[ "$1" != --recover-metadata-pressure || $# == 2 ]] || fail "pressure recovery requires its private run directory"
+  source "$ROOT_DIR/dev/pressure/launcher.sh"
+  pressure_main "$@"
+fi
+
 # Exact-container diagnostics do not enter stack configuration or lifecycle
 # preflight. Reported ownership labels are opaque metadata, never paths to open.
 if [[ "${1-}" == --inspect-runtime || "${1-}" == --stop-retired-runtime ]]; then
@@ -266,7 +273,7 @@ SCHEMII_RUNTIME_RECEIPT="${SCHEMII_RUNTIME_RECEIPT-}"
 SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
-  printf 'Usage: %s [--inspect-runtime ID [ID ...] | --stop-retired-runtime ID [ID ...] | --demo | --prepare-testing | --reset-testing SPACE | --check-testing-reset SPACE | --verify-testing [SPACE] | --prepare-testing-writable ACCOUNT | --reset-testing-writable ACCOUNT | --verify-testing-writable ACCOUNT | --backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
+  printf 'Usage: %s [--qualify-metadata-pressure [NEW_PRIVATE_RUN_DIRECTORY] | --recover-metadata-pressure PRIVATE_RUN_DIRECTORY | --inspect-runtime ID [ID ...] | --stop-retired-runtime ID [ID ...] | --demo | --prepare-testing | --reset-testing SPACE | --check-testing-reset SPACE | --verify-testing [SPACE] | --prepare-testing-writable ACCOUNT | --reset-testing-writable ACCOUNT | --verify-testing-writable ACCOUNT | --backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
 }
 
 list_demo_scenarios() {
