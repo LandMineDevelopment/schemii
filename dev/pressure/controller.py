@@ -63,7 +63,9 @@ REQUIRED_SOURCE_WITNESS_SHA256 = (
 # Empty intentionally denies attachment; it cannot authorize older detached engines.
 # Version 2 binds the load code plus its declared local runtime companions.
 # Only the coordinator may set this after independent review of the full manifest.
-REQUIRED_CONSUMER_TREE_SHA256 = "6e6b38beb9e2cea80778efeebd6626dcfc2ec902c6f8ecdb314cb85d0c11bce6"
+REQUIRED_CONSUMER_TREE_SHA256 = (
+    "6e6b38beb9e2cea80778efeebd6626dcfc2ec902c6f8ecdb314cb85d0c11bce6"
+)
 CONSUMER_SOURCE_INVENTORY_VERSION = 2
 CONSUMER_SOURCE_COMPANIONS = (
     "testing/harness/store.mjs",
