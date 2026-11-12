@@ -113,6 +113,14 @@ class PostgresNotNullConstraint(_PostgresModel):
     columns: Annotated[tuple[PostgresIdentifier, ...], Field(min_length=1, max_length=1)]
     definition: CatalogText
     validated: bool
+    # Absent historical evidence stays absent in canonical fingerprints.
+    is_local: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    inheritance_count: Annotated[int, Field(ge=0)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    no_inherit: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class PostgresExclusionConstraint(_PostgresModel):
@@ -220,7 +228,140 @@ class PostgresTable(_PostgresModel):
     triggers: tuple[PostgresTrigger, ...] = ()
 
 
+class PostgresObjectIdentity(_PostgresModel):
+    kind: Literal["relation", "type", "routine", "schema"]
+    namespace: PostgresIdentifier
+    name: PostgresIdentifier
+    signature: CatalogText = ""
+
+
+class PostgresDependency(_PostgresModel):
+    source: PostgresObjectIdentity
+    target: PostgresObjectIdentity
+    kind: CatalogText
+
+
+class PostgresGrant(_PostgresModel):
+    grantor: PostgresIdentifier
+    grantee: PostgresIdentifier
+    privilege: Literal[
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "TRUNCATE",
+        "REFERENCES",
+        "TRIGGER",
+        "MAINTAIN",
+        "USAGE",
+    ]
+    grantable: bool
+
+
+class PostgresColumnGrant(PostgresGrant):
+    privilege: Literal["SELECT", "INSERT", "UPDATE", "REFERENCES"]
+    column: PostgresIdentifier
+    ordinal: Annotated[int, Field(ge=1, le=1600)]
+
+
+class PostgresIdentitySequenceOwner(_PostgresModel):
+    table: PostgresObjectIdentity
+    column: PostgresIdentifier
+    ordinal: Annotated[int, Field(ge=1, le=1600)]
+    table_owner: PostgresIdentifier
+    dependency_kind: Literal["i"]
+
+
+class PostgresPreservation(_PostgresModel):
+    identity: PostgresObjectIdentity
+    relation_kind: Literal["r", "p", "v", "m", "f", "S", "c"]
+    owner: PostgresIdentifier
+    actor: PostgresIdentifier
+    acl: tuple[PostgresGrant, ...]
+    # None means historical evidence did not inspect column privileges.
+    column_acl: (
+        Annotated[tuple[PostgresColumnGrant, ...], Field(max_length=160_000)] | None
+    ) = None
+    identity_sequence_owner: PostgresIdentitySequenceOwner | None = None
+    reloptions: tuple[CatalogText, ...]
+    tablespace: PostgresIdentifier | None
+    access_method: PostgresIdentifier | None
+    partition_bound: CatalogText | None
+    partition_parents: tuple[PostgresObjectIdentity, ...]
+    indexes: tuple[PostgresIndex, ...]
+    default_grantees: tuple[PostgresIdentifier, ...]
+    properties: CatalogText
+
+
+class PostgresSafetyEvidence(_PostgresModel):
+    version: Literal[1, 2] = 1
+    dependencies: tuple[PostgresDependency, ...]
+    preservation: tuple[PostgresPreservation, ...]
+    dependency_complete: bool
+    unknown_reasons: tuple[CatalogText, ...]
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def strict_evidence_version(cls, value: Any) -> int:
+        if type(value) is not int or value not in {1, 2}:
+            raise ValueError("unknown catalog evidence version")
+        return value
+
+    @model_validator(mode="after")
+    def honest_completeness(self) -> "PostgresSafetyEvidence":
+        if self.dependency_complete == bool(self.unknown_reasons):
+            raise ValueError("dependency completeness must agree with unknown reasons")
+        if self.version == 1 and any(
+            item.column_acl is not None or item.identity_sequence_owner is not None
+            for item in self.preservation
+        ):
+            raise ValueError(
+                "historical evidence cannot acquire new preservation authority"
+            )
+        if self.version == 2 and any(
+            item.column_acl is None for item in self.preservation
+        ):
+            raise ValueError(
+                "current evidence must inspect column privilege presence or absence"
+            )
+        if self.version == 2 and self.dependency_complete:
+            for item in self.preservation:
+                owner = item.identity_sequence_owner
+                if owner is not None and (
+                    item.relation_kind != "S"
+                    or not any(
+                        edge.source == item.identity
+                        and edge.target == owner.table
+                        and edge.kind == "i"
+                        for edge in self.dependencies
+                    )
+                ):
+                    raise ValueError(
+                        "complete identity ownership evidence requires the exact internal dependency"
+                    )
+        identities = [item.identity for item in self.preservation]
+        if len(identities) != len(set(identities)):
+            raise ValueError("preservation identities must be unique")
+        return self
+
+
+def dependency_closure(
+    evidence: PostgresSafetyEvidence, seeds: set[PostgresObjectIdentity]
+) -> set[PostgresObjectIdentity]:
+    """Conservative connected closure, including incoming/cross-namespace edges."""
+    result = set(seeds)
+    while True:
+        size = len(result)
+        for edge in evidence.dependencies:
+            if edge.source in result or edge.target in result:
+                result.update((edge.source, edge.target))
+        if len(result) == size:
+            return result
+
+
 class _PostgresCatalogContent(_PostgresModel):
+    fingerprint_version: Literal[1, 2] = 1
+    safety: PostgresSafetyEvidence | None = None
     database: PostgresIdentifier
     namespace: PostgresIdentifier
     server_version: CatalogText
@@ -234,11 +375,51 @@ class _PostgresCatalogContent(_PostgresModel):
     materialized_views: tuple[PostgresMaterializedView, ...]
 
 
+# Every historical field is named, including nested defaulted fields. This is a
+# wire-format contract, independent of future additions to the domain models.
+_V1_COLUMN = {"name", "ordinal", "data_type", "nullable", "default_expression", "identity", "generated", "collation_schema", "collation_name"}
+_V1_KEY = {"name", "table", "columns", "definition", "validated", "deferrable", "initially_deferred"}
+_V1_CHECK = {"name", "table", "columns", "definition", "validated"}
+_V1_INDEX = {"name", "table", "definition", "method", "unique", "valid", "predicate"}
+_V1_TRIGGER = {"name", "table", "definition", "enabled"}
+_V1_TABLE = {"namespace": True, "name": True, "kind": True, "is_partition": True, "partition_key": True,
+    "columns": {"__all__": _V1_COLUMN}, "primary_key": _V1_KEY,
+    "unique_constraints": {"__all__": _V1_KEY}, "checks": {"__all__": _V1_CHECK},
+    "not_null_constraints": {"__all__": _V1_CHECK}, "exclusion_constraints": {"__all__": _V1_KEY},
+    "indexes": {"__all__": _V1_INDEX}, "triggers": {"__all__": _V1_TRIGGER}}
+_V1_VIEW = {"namespace": True, "name": True, "columns": {"__all__": _V1_COLUMN}, "query_definition": True}
+_V1_PROJECTION = {"database": True, "namespace": True, "server_version": True, "server_version_num": True,
+    "server_timezone": True, "types": {"__all__": {"namespace", "name", "kind", "definition"}},
+    "tables": {"__all__": _V1_TABLE},
+    "relationships": {"__all__": {"name", "source_namespace", "source_table", "source_columns", "target_namespace", "target_table", "target_columns", "definition", "on_update", "on_delete", "match_type", "validated", "deferrable", "initially_deferred"}},
+    "functions": {"__all__": {"namespace", "name", "kind", "identity_arguments", "arguments", "return_type", "language", "definition"}},
+    "views": {"__all__": _V1_VIEW}, "materialized_views": {"__all__": {**_V1_VIEW, "populated": True}}}
+
+
 def _catalog_digest(catalog: Any) -> str:
-    payload = catalog.model_dump(
-        mode="json",
-        exclude={"captured_at", "fingerprint"},
-    )
+    # Version1 is the frozen historical projection. Evidence is an explicit
+    # new version; defaulted future fields must never reinterpret old authority.
+    if catalog.fingerprint_version == 1:
+        payload = catalog.model_dump(mode="json", include=_V1_PROJECTION)
+    elif catalog.safety.version == 1:
+        # Preserve the first explicit evidence format byte-for-byte. Its missing
+        # column ACL/identity-owner fields never prove their absence.
+        payload = catalog.model_dump(
+            mode="json",
+            exclude={
+                "captured_at": True,
+                "fingerprint": True,
+                "safety": {
+                    "preservation": {
+                        "__all__": {"column_acl", "identity_sequence_owner"}
+                    }
+                },
+            },
+        )
+    else:
+        payload = catalog.model_dump(
+            mode="json", exclude={"captured_at", "fingerprint"}
+        )
     canonical = json.dumps(
         payload,
         ensure_ascii=False,
@@ -253,6 +434,13 @@ class PostgresCatalog(_PostgresCatalogContent):
     captured_at: datetime
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
+    @field_validator("fingerprint_version", mode="before")
+    @classmethod
+    def strict_fingerprint_version(cls, value: Any) -> int:
+        if type(value) is not int or value not in {1,2}:
+            raise ValueError("unknown catalog fingerprint version")
+        return value
+
     @field_validator("captured_at")
     @classmethod
     def require_utc_timestamp(cls, value: datetime) -> datetime:
@@ -262,6 +450,27 @@ class PostgresCatalog(_PostgresCatalogContent):
 
     @model_validator(mode="after")
     def require_matching_fingerprint(self) -> "PostgresCatalog":
+        if any(
+            constraint.is_local is not None
+            or constraint.inheritance_count is not None
+            or constraint.no_inherit is not None
+            for table in self.tables
+            for constraint in table.not_null_constraints
+        ) and (
+            self.fingerprint_version != 2
+            or self.safety is None
+            or self.safety.version != 2
+        ):
+            raise ValueError(
+                "historical catalog cannot carry new NOT NULL ownership evidence"
+            )
+        if (self.fingerprint_version == 2) != (self.safety is not None):
+            raise ValueError("version2 requires safety evidence; historical catalogs cannot acquire it")
+        if self.safety is not None and self.safety.dependency_complete:
+            expected = {PostgresObjectIdentity(kind="relation", namespace=item.namespace, name=item.name)
+                for item in (*self.tables, *self.views, *self.materialized_views)}
+            if not expected.issubset({item.identity for item in self.safety.preservation}):
+                raise ValueError("complete safety evidence requires every selected relation descriptor")
         if self.fingerprint != _catalog_digest(self):
             raise ValueError("fingerprint does not match the catalog")
         return self
@@ -287,10 +496,17 @@ def build_postgres_catalog(
     views: tuple[PostgresView, ...],
     materialized_views: tuple[PostgresMaterializedView, ...],
     captured_at: datetime,
+    safety: PostgresSafetyEvidence | None = None,
+    fingerprint_version: Literal[1, 2] | None = None,
 ) -> PostgresCatalog:
     """Build a validated catalog and derive its content fingerprint."""
 
+    selected_version = 2 if safety is not None else 1
+    if fingerprint_version is not None and (type(fingerprint_version) is not int or fingerprint_version != selected_version):
+        raise ValueError("catalog version and evidence must agree")
     content = _PostgresCatalogContent(
+        fingerprint_version=selected_version,
+        safety=safety,
         database=database,
         namespace=namespace,
         server_version=server_version,

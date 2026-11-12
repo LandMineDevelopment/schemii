@@ -10,12 +10,13 @@ import secrets
 from dataclasses import dataclass
 from typing import AbstractSet, Any, Iterable, Literal, Mapping
 
-from pglast import parse_sql
+from pglast import ast, parse_sql
 from pglast.enums import FunctionParameterMode
 from pglast.stream import RawStream
+from pglast.visitors import Visitor
 
-from schemii.common.postgres.models import PostgresCatalog
-from schemii.common.postgres.query_analysis import referenced_relations
+from schemii.common.postgres.models import PostgresCatalog, PostgresObjectIdentity, dependency_closure
+from schemii.common.postgres.query_analysis import referenced_relations, analyze_query_definition
 from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.models import (
     DesignColumn,
@@ -31,6 +32,8 @@ from schemii.schemii.designs.models import (
 from schemii.schemii.designs.store import design_fingerprint, validate_design_content
 
 from .models import (
+    MigrationMaterializedMaintenance,
+    MigrationCompatibility,
     MigrationConflict,
     MigrationExternalChange,
     MigrationStep,
@@ -179,9 +182,17 @@ def _equivalent_value(
     left: Any,
     right: Any,
     check_column_types: Mapping[str, Mapping[str, str]] | None = None,
+    catalog: PostgresCatalog | None = None,
 ) -> bool:
     if left is _MISSING or right is _MISSING:
         return left is right
+    if (
+        catalog is not None
+        and isinstance(left, str)
+        and isinstance(right, str)
+        and re.fullmatch(r"views\[[^]]+\]\.definition", path)
+    ):
+        return view_definitions_equivalent(catalog.namespace, left, right, catalog)
     if isinstance(left, str) and isinstance(right, str) and path.endswith(".expression"):
         match = re.fullmatch(r"tables\[([^]]+)\]\.checks\[[^]]+\]\.expression", path)
         if match and check_column_types and match[1] in check_column_types:
@@ -201,6 +212,7 @@ def _equivalent_value(
                 left_items[identifier],
                 right_items[identifier],
                 check_column_types,
+                catalog,
             )
             for identifier in left_items
         )
@@ -218,13 +230,14 @@ def _equivalent_value(
                 left[key],
                 right[key],
                 check_column_types,
+                catalog,
             )
             for key in left
         )
     if isinstance(left, list) and isinstance(right, list):
         return len(left) == len(right) and all(
             _equivalent_value(
-                f"{path}[{index}]", left_item, right_item, check_column_types
+                f"{path}[{index}]", left_item, right_item, check_column_types, catalog
             )
             for index, (left_item, right_item) in enumerate(zip(left, right))
         )
@@ -270,16 +283,32 @@ class _Merger:
         self,
         resolutions: dict[str, str] | None = None,
         check_column_types: Mapping[str, Mapping[str, str]] | None = None,
+        catalog: PostgresCatalog | None = None,
+        not_null_name_nullability: Mapping[str, bool] | None = None,
     ) -> None:
         self.external: list[MigrationExternalChange] = []
         self.conflicts: list[MigrationConflict] = []
         self.resolutions = resolutions or {}
         self.check_column_types = check_column_types or {}
+        self.catalog = catalog
+        self.not_null_name_nullability = not_null_name_nullability or {}
 
     def merge(self, baseline: Any, desired: Any, live: Any, path: str) -> Any:
         if desired is _MISSING and live is _MISSING:
             return _MISSING
-        if _equivalent_value(path, desired, live, self.check_column_types):
+        if desired is _MISSING and path in self.not_null_name_nullability:
+            if self.not_null_name_nullability[path]:
+                if live == baseline:
+                    return _MISSING
+                return self._conflict(path, baseline, desired, live, "direct")
+            # An absent requested name keeps the exact native name; it is not a
+            # request to rename or remove an existing NOT NULL constraint.
+            if live != baseline:
+                self._external(path, baseline, live)
+            return _copy(live)
+        if _equivalent_value(
+            path, desired, live, self.check_column_types, self.catalog
+        ):
             return _copy(desired)
 
         if baseline is not _MISSING:
@@ -327,11 +356,17 @@ class _Merger:
                     result.append(merged)
             return result
 
-        if _equivalent_value(path, desired, baseline, self.check_column_types):
-            if not _equivalent_value(path, live, baseline, self.check_column_types):
+        if _equivalent_value(
+            path, desired, baseline, self.check_column_types, self.catalog
+        ):
+            if not _equivalent_value(
+                path, live, baseline, self.check_column_types, self.catalog
+            ):
                 self._external(path, baseline, live)
             return _copy(live)
-        if _equivalent_value(path, live, baseline, self.check_column_types):
+        if _equivalent_value(
+            path, live, baseline, self.check_column_types, self.catalog
+        ):
             return _copy(desired)
 
         return self._conflict(path, baseline, desired, live, "direct")
@@ -471,6 +506,12 @@ def _aligned_content(
         replacement = candidate("views", (item.get("kind"), item.get("name")))
         if replacement:
             replacements[item["id"]] = replacement
+            if item.get("kind") == "materialized_view":
+                for reference in references:
+                    previous = next((view for view in reference.views if view.id == replacement), None)
+                    if previous is not None:
+                        item["populate_on_create"] = previous.populate_on_create
+                        break
     for item in document["triggers"]:
         replacement = candidate("triggers", (item.get("relation_name"), item.get("name")))
         if replacement:
@@ -510,6 +551,193 @@ def catalog_design(
     return content, warnings, imported.summary.complete
 
 
+def migration_compatibility(
+    catalog: PostgresCatalog,
+    live: SchemiiDesignContent,
+    desired: SchemiiDesignContent,
+    extra_relations: tuple[str, ...] = (),
+    verified_maintenance: tuple[str, ...] = (),
+) -> MigrationCompatibility:
+    """Prove operations disjoint from the closure of every uneditable feature."""
+    imported = import_postgres_catalog(catalog)
+    impact = set()
+
+    def identity(kind: str, name: str, signature: str = "") -> PostgresObjectIdentity:
+        return PostgresObjectIdentity(
+            kind=kind, namespace=catalog.namespace, name=name, signature=signature
+        )
+
+    for group, kind in (
+        ("tables", "relation"),
+        ("views", "relation"),
+        ("types", "type"),
+        ("functions", "routine"),
+    ):
+        before, after = _by_id(getattr(live, group)), _by_id(getattr(desired, group))
+        for key in before.keys() | after.keys():
+            old, new = before.get(key), after.get(key)
+            if old == new:
+                continue
+            # Population is observed cache state, never recurring desired DDL.
+            if (
+                group == "views"
+                and old is not None
+                and new is not None
+                and old.kind == new.kind
+                and old.name == new.name
+                and view_definitions_equivalent(
+                    catalog.namespace, old.definition, new.definition, catalog
+                )
+            ):
+                continue
+            for item in (old, new):
+                if item is not None:
+                    impact.add(
+                        identity(
+                            kind, item.name, getattr(item, "identity_arguments", "")
+                        )
+                    )
+    table_names = {table.id: table.name for table in [*live.tables, *desired.tables]}
+    for group in ("relationships", "triggers"):
+        before, after = _by_id(getattr(live, group)), _by_id(getattr(desired, group))
+        for key in before.keys() | after.keys():
+            if before.get(key) == after.get(key):
+                continue
+            for item in (before.get(key), after.get(key)):
+                if item is None:
+                    continue
+                if group == "triggers":
+                    impact.add(identity("relation", item.relation_name))
+                else:
+                    impact.update(
+                        identity("relation", table_names[key])
+                        for key in (item.source_table_id, item.target_table_id)
+                    )
+    impact.update(identity("relation", name) for name in extra_relations)
+    protected = {
+        item.identity for item in imported.summary.issues if item.identity is not None
+    }
+    safety = catalog.safety if catalog.fingerprint_version == 2 else None
+    if safety is not None:
+        protected = dependency_closure(safety, protected)
+    reasons = []
+    unknown = (
+        list(safety.unknown_reasons)
+        if safety is not None
+        else ["Historical catalog has no versioned dependency evidence"]
+    )
+    if imported.summary.issues:
+        if (
+            safety is None
+            or not safety.dependency_complete
+            or any(item.identity is None for item in imported.summary.issues)
+        ):
+            reasons.append("Uneditable objects have an unknown dependency boundary")
+        allowed = {identity("relation", name) for name in verified_maintenance}
+        if (protected & impact) - allowed:
+            reasons.append("Changes intersect the protected dependency closure")
+    # Versioned unknown dependency metadata also protects fully editable designs
+    # from operations whose full impact has not been established.
+    if safety is not None and not safety.dependency_complete and impact:
+        reasons.append("Dependency evidence is incomplete")
+    order = lambda item: (item.kind, item.namespace, item.name, item.signature)
+    return MigrationCompatibility(
+        editable_complete=imported.summary.complete,
+        operation_safe=not reasons,
+        evidence_version=safety.version if safety else None,
+        impact=sorted(impact, key=order),
+        protected_scope=sorted(protected, key=order),
+        unknown_reasons=unknown,
+        blocking_reasons=reasons,
+    )
+
+
+def preservation_matches(
+    before: PostgresCatalog,
+    after: PostgresCatalog,
+    compatibility: MigrationCompatibility,
+    mutable_relations: tuple[str, ...] = (),
+) -> bool:
+    """A successful partial import must leave every protected catalog byte intact."""
+    if not compatibility.protected_scope:
+        return True
+    if (
+        before.fingerprint_version != 2
+        or after.fingerprint_version != 2
+        or before.safety is None
+        or after.safety is None
+    ):
+        return False
+    if not before.safety.dependency_complete or not after.safety.dependency_complete:
+        return False
+    scope = set(compatibility.protected_scope)
+    scope.difference_update(
+        PostgresObjectIdentity(kind="relation", namespace=before.namespace, name=name)
+        for name in mutable_relations
+    )
+    view_queries = {
+        PostgresObjectIdentity(
+            kind="relation", namespace=item.namespace, name=item.name
+        ): item.query_definition
+        for item in (*before.views, *before.materialized_views)
+    }
+
+    def projection(catalog: PostgresCatalog):
+        evidence = catalog.safety
+        objects = {
+            item.identity: item.model_dump(mode="json")
+            for item in evidence.preservation
+            if item.identity in scope
+        }
+        rows = {}
+        for group, kind in (
+            (catalog.tables, "relation"),
+            (catalog.views, "relation"),
+            (catalog.materialized_views, "relation"),
+            (catalog.types, "type"),
+            (catalog.functions, "routine"),
+        ):
+            for item in group:
+                key = PostgresObjectIdentity(
+                    kind=kind,
+                    namespace=item.namespace,
+                    name=item.name,
+                    signature=getattr(item, "identity_arguments", ""),
+                )
+                if key in scope:
+                    value = item.model_dump(mode="json")
+                    query = value.get("query_definition")
+                    original = view_queries.get(key)
+                    if (
+                        original is not None
+                        and isinstance(query, str)
+                        and view_definitions_equivalent(
+                            before.namespace, original, query, catalog
+                        )
+                    ):
+                        # pg_get_viewdef qualification follows the connection's
+                        # search path. Preserve its proven binding, while all
+                        # other protected attributes still compare exactly.
+                        value["query_definition"] = original
+                    rows[key] = value
+        mutable = {
+            PostgresObjectIdentity(
+                kind="relation", namespace=before.namespace, name=name
+            )
+            for name in mutable_relations
+        }
+        edges = [
+            edge.model_dump(mode="json")
+            for edge in evidence.dependencies
+            if (edge.source in scope or edge.target in scope)
+            and edge.source not in mutable
+            and edge.target not in mutable
+        ]
+        return objects, rows, edges
+
+    return projection(before) == projection(after)
+
+
 def reconcile_designs(
     baseline: SchemiiDesignContent,
     desired: SchemiiDesignContent,
@@ -533,7 +761,16 @@ def reconcile_designs(
                 column.data_type, live_columns[column.name].data_type
             ).disposition == "equivalent"
         }
-    merger = _Merger(resolutions, check_column_types)
+    merger = _Merger(
+        resolutions,
+        check_column_types,
+        catalog,
+        {
+            f"tables[{table.id}].columns[{column.id}].not_null_constraint_name": column.nullable
+            for table in desired.tables
+            for column in table.columns
+        },
+    )
     merged_document = merger.merge(
         baseline.model_dump(mode="json"),
         desired.model_dump(mode="json"),
@@ -558,7 +795,8 @@ def reconcile_designs(
                 allowed_resolutions=["pull_live"],
             )
         )
-    if not complete:
+    compatibility = migration_compatibility(catalog, live, merged or desired)
+    if not complete and not compatibility.operation_safe:
         merger.conflicts.append(
             MigrationConflict(
                 id=_identifier("mcf", "schema.coverage", catalog.fingerprint),
@@ -600,6 +838,7 @@ class _MigrationPlan:
     """Inputs and collected output for one ordered migration-planning pass."""
 
     namespace: str
+    catalog: PostgresCatalog | None
     live: SchemiiDesignContent
     desired: SchemiiDesignContent
     empty_tables: AbstractSet[str]
@@ -622,6 +861,8 @@ def _column_definition(column: DesignColumn) -> str:
     elif column.default_expression is not None:
         parts.append(f"DEFAULT {column.default_expression.strip()}")
     if not column.nullable:
+        if column.not_null_constraint_name is not None:
+            parts.append(f"CONSTRAINT {_quote(column.not_null_constraint_name)}")
         parts.append("NOT NULL")
     return " ".join(parts)
 
@@ -1334,11 +1575,45 @@ def _plan_table_column_changes(
             ))
         if old.nullable != new.nullable:
             action = "DROP NOT NULL" if new.nullable else "SET NOT NULL"
-            plan.pending.append(_PendingStep(
-                52, "column", path, "alter_nullability",
-                f"ALTER TABLE {_qualified(plan.namespace, active_name)} ALTER COLUMN {_quote(current_column_name)} {action};",
-                data_movement=not new.nullable,
-            ))
+            statement = f"ALTER TABLE {_qualified(plan.namespace, active_name)} ALTER COLUMN {_quote(current_column_name)} {action};"
+            if not new.nullable and new.not_null_constraint_name is not None:
+                statement = (
+                    f"ALTER TABLE {_qualified(plan.namespace, active_name)} ADD CONSTRAINT "
+                    f"{_quote(new.not_null_constraint_name)} NOT NULL {_quote(current_column_name)};"
+                )
+            plan.pending.append(
+                _PendingStep(
+                    52,
+                    "column",
+                    path,
+                    "alter_nullability",
+                    statement,
+                    data_movement=not new.nullable,
+                )
+            )
+        elif (
+            not new.nullable
+            and new.not_null_constraint_name is not None
+            and old.not_null_constraint_name != new.not_null_constraint_name
+        ):
+            if old.not_null_constraint_name is None:
+                plan.blocking.append(
+                    MigrationWarning(
+                        code="not_null_constraint_identity_unavailable",
+                        message="The existing NOT NULL constraint identity must be inspected before naming it",
+                        object_path=path,
+                    )
+                )
+            else:
+                plan.pending.append(
+                    _PendingStep(
+                        53,
+                        "constraint",
+                        path,
+                        "rename_not_null_constraint",
+                        f"ALTER TABLE {_qualified(plan.namespace, active_name)} RENAME CONSTRAINT {_quote(old.not_null_constraint_name)} TO {_quote(new.not_null_constraint_name)};",
+                    )
+                )
 
 
 def _plan_table_constraint_changes(
@@ -1529,49 +1804,486 @@ def _plan_function_changes(plan: _MigrationPlan) -> None:
             ))
 
 
+def view_definitions_equivalent(
+    namespace: str, left: str, right: str, catalog: PostgresCatalog | None = None
+) -> bool:
+    """Compare parsed SQL; bind simple one-relation columns exactly as PostgreSQL.
+
+    Complex queries retain strict parsed equivalence. We never erase casts,
+    predicates, external schema names, or unresolved identifier differences.
+    """
+
+    def canonical(source: str) -> str:
+        statements = parse_sql(source)
+        if len(statements) != 1:
+            raise ValueError("one query required")
+        statement = statements[0].stmt
+        simple = (
+            isinstance(statement, ast.SelectStmt)
+            and not statement.withClause
+            and not statement.larg
+            and not statement.rarg
+            and not statement.sortClause
+            and not statement.groupClause
+            and not statement.havingClause
+            and not statement.windowClause
+            and not statement.distinctClause
+        )
+        ranges = statement.fromClause if simple else ()
+        table = (
+            ranges[0]
+            if len(ranges or ()) == 1 and isinstance(ranges[0], ast.RangeVar)
+            else None
+        )
+        if (
+            table is not None
+            and not (table.alias and table.alias.colnames)
+            and catalog is not None
+        ):
+            source_namespace = table.schemaname or namespace
+            relation = next(
+                (
+                    item
+                    for item in (
+                        *catalog.tables,
+                        *catalog.views,
+                        *catalog.materialized_views,
+                    )
+                    if item.namespace == source_namespace and item.name == table.relname
+                ),
+                None,
+            )
+            if relation is not None:
+                qualifier = table.alias.aliasname if table.alias else table.relname
+                names = {column.name for column in relation.columns}
+
+                class Bind(Visitor):
+                    def visit_ColumnRef(
+                        self, ancestors: Any, node: ast.ColumnRef
+                    ) -> None:
+                        # Nested query binding is deliberately not inferred.
+                        nearest = ancestors.find_nearest(ast.SelectStmt)
+                        if nearest is not None and nearest.node is not statement:
+                            return
+                        if (
+                            len(node.fields) == 1
+                            and isinstance(node.fields[0], ast.String)
+                            and node.fields[0].sval in names
+                        ):
+                            node.fields = (ast.String(sval=qualifier), node.fields[0])
+
+                Bind()(statement)
+                # Only this proven root RangeVar may lose its default schema.
+                # Nested/CTE/join scopes retain strict parsed qualification.
+                if table.schemaname == namespace:
+                    table.schemaname = None
+
+        return RawStream()(statement).strip().rstrip(";")
+
+    try:
+        return canonical(left) == canonical(right)
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def materialized_maintenance(
+    catalog: PostgresCatalog | None, view: DesignView, operation: str
+) -> tuple[MigrationMaterializedMaintenance, Any]:
+    """Authorize only same-identity transactional maintenance with replay proof."""
+    safety = (
+        catalog.safety
+        if catalog is not None and catalog.fingerprint_version == 2
+        else None
+    )
+    source = (
+        next(
+            (item for item in catalog.materialized_views if item.name == view.name),
+            None,
+        )
+        if catalog
+        else None
+    )
+    descriptor = (
+        next(
+            (
+                item
+                for item in safety.preservation
+                if item.identity.kind == "relation"
+                and item.identity.namespace == catalog.namespace
+                and item.identity.name == view.name
+            ),
+            None,
+        )
+        if safety
+        else None
+    )
+    reasons = []
+    if safety is None or not safety.dependency_complete:
+        reasons.append("Complete versioned dependency evidence is required")
+    if source is None or descriptor is None or descriptor.relation_kind != "m":
+        reasons.append("The exact existing materialized-view descriptor is unavailable")
+    if descriptor is not None:
+        if descriptor.owner != descriptor.actor:
+            reasons.append("Maintenance requires the recorded current owner identity")
+        if operation == "replace":
+            if descriptor.column_acl is None:
+                reasons.append(
+                    "Column privilege evidence is unavailable; replacement cannot prove preservation"
+                )
+            elif descriptor.column_acl:
+                reasons.append(
+                    "Column-level privileges cannot be replayed losslessly; use refresh or retain this definition"
+                )
+            try:
+                relations = [
+                    {
+                        "namespace": item.namespace,
+                        "name": item.name,
+                        "kind": "table",
+                        "columns": [
+                            {"name": column.name, "data_type": column.data_type}
+                            for column in item.columns
+                        ],
+                    }
+                    for item in (
+                        *catalog.tables,
+                        *catalog.views,
+                        *catalog.materialized_views,
+                    )
+                ]
+                analysis = analyze_query_definition(
+                    view.definition, relations, current_namespace=catalog.namespace
+                )
+                outputs = analysis["outputs"]
+                statement = parse_sql(view.definition)[0].stmt
+                targets = (
+                    statement.targetList
+                    if isinstance(statement, ast.SelectStmt)
+                    else ()
+                )
+                output_types = []
+                for index, output in enumerate(outputs):
+                    data_type = output["data_type"]
+                    # PostgreSQL integer literals in the int32 range have a
+                    # precise contract; other inferred expressions stay unknown.
+                    value = targets[index].val if index < len(targets or ()) else None
+                    if (
+                        data_type is None
+                        and isinstance(value, ast.A_Const)
+                        and isinstance(value.val, ast.Integer)
+                        and -(2**31) <= value.val.ival < 2**31
+                    ):
+                        data_type = "integer"
+                    output_types.append(data_type)
+                proved = (
+                    analysis["status"] == "available"
+                    and len(outputs) == len(source.columns)
+                    and all(
+                        output["name"] == column.name
+                        and data_type is not None
+                        and classify_type_change(
+                            column.data_type, data_type
+                        ).disposition
+                        == "equivalent"
+                        and column.collation_name in {None, "default"}
+                        and column.collation_schema in {None, "pg_catalog"}
+                        for output, data_type, column in zip(
+                            outputs, output_types, source.columns
+                        )
+                    )
+                )
+            except (ValueError, AttributeError, IndexError):
+                proved = False
+            if not proved:
+                reasons.append(
+                    "Replacement requires proven unchanged output names, types, and collations for index replay"
+                )
+            own_indexes = {
+                PostgresObjectIdentity(
+                    kind="relation", namespace=catalog.namespace, name=item.name
+                )
+                for item in descriptor.indexes
+            }
+            incoming = [
+                edge.source
+                for edge in safety.dependencies
+                if edge.target == descriptor.identity and edge.source not in own_indexes
+            ]
+            if incoming:
+                reasons.append(
+                    "Dependent PostgreSQL objects prevent same-name replacement without CASCADE"
+                )
+            if (
+                descriptor.reloptions
+                or descriptor.tablespace is not None
+                or descriptor.access_method not in {None, "heap"}
+            ):
+                reasons.append(
+                    "Non-default materialized-view storage properties cannot be replayed losslessly"
+                )
+            if descriptor.partition_parents or descriptor.partition_bound is not None:
+                reasons.append(
+                    "Partition-associated materialized views are unsupported"
+                )
+            try:
+                properties = json.loads(descriptor.properties)
+            except ValueError:
+                properties = None
+            if not isinstance(properties, dict):
+                properties = {"unproved": True}
+            policies = properties.pop("policies", [])
+            if (
+                policies
+                or set(properties)
+                != {
+                    "persistence",
+                    "row_security",
+                    "force_row_security",
+                    "replica_identity",
+                }
+                or properties.get("persistence") != "p"
+                or properties.get("row_security")
+                or properties.get("force_row_security")
+                or properties.get("replica_identity") not in {"d", "n"}
+            ):
+                reasons.append(
+                    "Materialized-view properties cannot be preserved by this replacement"
+                )
+            if any(item.grantor != descriptor.owner for item in descriptor.acl):
+                reasons.append(
+                    "ACL grantor identities cannot be replayed by the current owner"
+                )
+            for index in descriptor.indexes:
+                try:
+                    statements = parse_sql(index.definition)
+                    statement = statements[0].stmt
+                    valid = (
+                        len(statements) == 1
+                        and isinstance(statement, ast.IndexStmt)
+                        and not statement.concurrent
+                        and statement.relation.relname == view.name
+                        and statement.relation.schemaname in {None, catalog.namespace}
+                    )
+                except (ValueError, IndexError):
+                    valid = False
+                if not index.valid or not valid:
+                    reasons.append(
+                        "Every materialized-view index must have a valid replayable definition"
+                    )
+    report = MigrationMaterializedMaintenance(
+        view_id=view.id,
+        name=view.name,
+        operation=operation,
+        eligible=not reasons,
+        populated_before=source.populated if source else False,
+        populated_after=True
+        if operation == "refresh"
+        else source.populated
+        if source
+        else False,
+        preserved_indexes=[item.name for item in descriptor.indexes]
+        if descriptor
+        else [],
+        cached_data_consequence=(
+            "Replace cached rows from current source data once. Failure rolls back the refresh; successful refresh replaces the previous cache."
+            if operation == "refresh"
+            else "Recreate this definition and rebuild its cache from current data only when previously populated. Failure rolls back the original object and cached rows."
+        ),
+        blocking_reasons=reasons,
+    )
+    return report, descriptor
+
+
+def _materialized_acl_sql(namespace: str, name: str, descriptor: Any) -> list[str]:
+    target = _qualified(namespace, name)
+    grantees = (
+        {item.grantee for item in descriptor.acl}
+        | set(descriptor.default_grantees)
+        | {"PUBLIC", descriptor.owner}
+    )
+    role = lambda value: "PUBLIC" if value == "PUBLIC" else _quote(value)
+    statements = [
+        f"REVOKE ALL PRIVILEGES ON TABLE {target} FROM {role(grantee)};"
+        for grantee in sorted(grantees)
+    ]
+    statements.extend(
+        f"GRANT {grant.privilege} ON TABLE {target} TO {role(grant.grantee)}"
+        + (" WITH GRANT OPTION" if grant.grantable else "")
+        + ";"
+        for grant in descriptor.acl
+    )
+    return statements
+
+
+def materialized_preservation_matches(
+    before: PostgresCatalog, after: PostgresCatalog, operations: list[Any]
+) -> bool:
+    if not operations:
+        return True
+    if before.safety is None or after.safety is None:
+        return False
+    for operation in operations:
+        old = next(
+            (
+                item
+                for item in before.safety.preservation
+                if item.identity.name == operation.name
+                and item.identity.namespace == before.namespace
+            ),
+            None,
+        )
+        new = next(
+            (
+                item
+                for item in after.safety.preservation
+                if item.identity.name == operation.name
+                and item.identity.namespace == after.namespace
+            ),
+            None,
+        )
+        live = next(
+            (item for item in after.materialized_views if item.name == operation.name),
+            None,
+        )
+        if (
+            old is None
+            or new is None
+            or old != new
+            or live is None
+            or live.populated != operation.populated_after
+        ):
+            return False
+    return True
+
+
 def _plan_view_changes(plan: _MigrationPlan) -> None:
     live_views = _by_id(plan.live.views)
     desired_views = _by_id(plan.desired.views)
     for identifier in sorted(set(live_views) | set(desired_views)):
         before: DesignView | None = live_views.get(identifier)
         after: DesignView | None = desired_views.get(identifier)
-        if before == after:
+        if before == after or (
+            before is not None
+            and after is not None
+            and before.kind == after.kind
+            and before.name == after.name
+            and view_definitions_equivalent(
+                plan.namespace, before.definition, after.definition, plan.catalog
+            )
+        ):
             continue
-        if before is not None and after is not None and (
-            before.kind, before.name
-        ) != (after.kind, after.name):
-            plan.blocking.append(MigrationWarning(
-                code="view_identity_change_unsupported",
-                message=(f"Changing the name or kind of view {before.name} requires a "
-                         "dependency-aware view migration; restore the original name "
-                         "and kind before applying this design."),
-                object_path=f"views.{after.name}",
-            ))
+        if (
+            before is not None
+            and after is not None
+            and (before.kind, before.name) != (after.kind, after.name)
+        ):
+            plan.blocking.append(
+                MigrationWarning(
+                    code="view_identity_change_unsupported",
+                    message=(
+                        f"Changing the name or kind of view {before.name} requires a "
+                        "dependency-aware view migration; restore the original name "
+                        "and kind before applying this design."
+                    ),
+                    object_path=f"views.{after.name}",
+                )
+            )
             continue
         if before is not None and after is None:
             kind = "MATERIALIZED VIEW" if before.kind == "materialized_view" else "VIEW"
-            plan.pending.append(_PendingStep(
-                14, before.kind, f"views.{before.name}", "drop",
-                f"DROP {kind} {_qualified(plan.namespace, before.name)};",
-                destructive=True,
-            ))
+            plan.pending.append(
+                _PendingStep(
+                    14,
+                    before.kind,
+                    f"views.{before.name}",
+                    "drop",
+                    f"DROP {kind} {_qualified(plan.namespace, before.name)};",
+                    destructive=True,
+                )
+            )
         if after is not None:
             if after.kind == "materialized_view" and before is not None:
-                plan.blocking.append(MigrationWarning(
-                    code="materialized_view_replacement_unsupported",
-                    message=f"Replacing materialized view {after.name} requires preservation analysis",
-                    object_path=f"views.{after.name}",
-                ))
+                report, descriptor = materialized_maintenance(
+                    plan.catalog, after, "replace"
+                )
+                if not report.eligible:
+                    plan.blocking.extend(
+                        MigrationWarning(
+                            code="materialized_view_replacement_unsupported",
+                            message=reason,
+                            object_path=f"views.{after.name}",
+                        )
+                        for reason in report.blocking_reasons
+                    )
+                    continue
+                target = _qualified(plan.namespace, after.name)
+                plan.pending.append(
+                    _PendingStep(
+                        14,
+                        "materialized_view",
+                        f"views.{after.name}",
+                        "drop_for_replacement",
+                        f"DROP MATERIALIZED VIEW {target};",
+                        destructive=True,
+                    )
+                )
+                population = "WITH DATA" if report.populated_before else "WITH NO DATA"
+                plan.pending.append(
+                    _PendingStep(
+                        75,
+                        "materialized_view",
+                        f"views.{after.name}",
+                        "replace",
+                        f"CREATE MATERIALIZED VIEW {target} AS\n{after.definition.strip().rstrip(';')}\n{population};",
+                        destructive=True,
+                        data_movement=report.populated_before,
+                    )
+                )
+                for index in descriptor.indexes:
+                    plan.pending.append(
+                        _PendingStep(
+                            76,
+                            "index",
+                            f"views.{after.name}.indexes.{index.name}",
+                            "preserve",
+                            _statement(index.definition),
+                        )
+                    )
+                for index, sql in enumerate(
+                    _materialized_acl_sql(plan.namespace, after.name, descriptor)
+                ):
+                    plan.pending.append(
+                        _PendingStep(
+                            77,
+                            "materialized_view",
+                            f"views.{after.name}.acl.{index}",
+                            "preserve_privileges",
+                            sql,
+                            order=index,
+                        )
+                    )
                 continue
-            prefix = "CREATE OR REPLACE VIEW" if before is not None else (
-                "CREATE MATERIALIZED VIEW" if after.kind == "materialized_view" else "CREATE VIEW"
+            prefix = (
+                "CREATE OR REPLACE VIEW"
+                if before is not None
+                else (
+                    "CREATE MATERIALIZED VIEW"
+                    if after.kind == "materialized_view"
+                    else "CREATE VIEW"
+                )
             )
             sql = f"{prefix} {_qualified(plan.namespace, after.name)} AS\n{after.definition.strip().rstrip(';')}"
             if after.kind == "materialized_view":
                 sql += "\nWITH DATA" if after.populate_on_create else "\nWITH NO DATA"
-            plan.pending.append(_PendingStep(
-                75, after.kind, f"views.{after.name}", "replace" if before else "create", sql + ";",
-            ))
+            plan.pending.append(
+                _PendingStep(
+                    75,
+                    after.kind,
+                    f"views.{after.name}",
+                    "replace" if before else "create",
+                    sql + ";",
+                )
+            )
 
 
 def _plan_trigger_changes(plan: _MigrationPlan) -> None:
@@ -1638,6 +2350,7 @@ def compile_migration_steps(
     rebuild_table_ids: AbstractSet[str] = frozenset(),
     populated_rebuild_table_ids: AbstractSet[str] = frozenset(),
     column_type_conversions: Mapping[str, CompiledConversion] | None = None,
+    catalog: PostgresCatalog | None = None,
 ) -> tuple[list[MigrationStep], list[MigrationWarning]]:
     """Compile a conservative exact delta from reviewed live to merged desired.
 
@@ -1653,6 +2366,7 @@ def compile_migration_steps(
     conversions = column_type_conversions or {}
     plan = _MigrationPlan(
         namespace=namespace,
+        catalog=catalog,
         live=live,
         desired=desired,
         empty_tables=empty_tables,
@@ -1668,6 +2382,22 @@ def compile_migration_steps(
         pending=[],
         blocking=[],
     )
+    if (
+        catalog is not None
+        and catalog.server_version_num < 180000
+        and any(
+            column.not_null_constraint_name is not None
+            for table in desired.tables
+            for column in table.columns
+        )
+    ):
+        plan.blocking.append(
+            MigrationWarning(
+                code="named_not_null_requires_postgresql_18",
+                message="Named NOT NULL constraints require PostgreSQL 18 or later",
+                object_path="schema",
+            )
+        )
     _plan_physical_column_rebuilds(plan, rebuild_table_ids, populated_rebuild_table_ids)
     _plan_relationship_changes(plan)
     _plan_table_changes(plan)

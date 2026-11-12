@@ -55,7 +55,10 @@ function tableCatalogEntry(table, columns, triggers = []) {
       deferrable: false,
       initiallyDeferred: false,
     })),
-    notNullConstraints: [],
+    notNullConstraints: table.columns.filter(column => !column.nullable && column.notNullConstraintName).map(column => ({
+      name: column.notNullConstraintName, columns: [column.name], definition: "NOT NULL", validated: true,
+      isLocal: true, inheritanceCount: 0, noInherit: false,
+    })),
     exclusionConstraints: [],
     indexes: table.indexes.map(index => ({
       designId: index.id,
@@ -223,6 +226,7 @@ function normalizedColumns(columnValues) {
     name: value.name.trim(),
     dataType: value.dataType.trim(),
     nullable: value.primary ? false : Boolean(value.nullable),
+    notNullConstraintName: value.notNullConstraintName,
     primary: Boolean(value.primary),
     defaultExpression: value.defaultExpression === undefined ? undefined : optionalExpression(value.defaultExpression),
     identity: value.identity === undefined ? undefined : value.identity || null,
@@ -232,6 +236,11 @@ function normalizedColumns(columnValues) {
   if (columns.some(column => byteLength(column.name) > 63)) throw new Error("Column names must be at most 63 UTF-8 bytes.");
   if (columns.some(column => !column.dataType)) throw new Error("Every column needs a PostgreSQL data type.");
   for (const column of columns) {
+    if (column.notNullConstraintName !== undefined && column.notNullConstraintName !== null
+      && (typeof column.notNullConstraintName !== "string" || !column.notNullConstraintName
+        || column.notNullConstraintName.includes("\0") || byteLength(column.notNullConstraintName) > 63)) {
+      throw new Error("NOT NULL constraint names must be valid PostgreSQL identifiers of at most 63 UTF-8 bytes.");
+    }
     const behaviors = [column.defaultExpression, column.identity, column.generatedExpression].filter(value => value !== null && value !== undefined);
     if (behaviors.length > 1) throw new Error(`Choose one value behavior for “${column.name}”.`);
     if (column.identity && !["always", "by_default"].includes(column.identity)) throw new Error(`Choose a valid identity behavior for “${column.name}”.`);
@@ -369,11 +378,15 @@ function designTableFromValues(existingTable, name, columnValues, randomUUID) {
   const designColumns = columns.map(column => {
     const existing = existingColumns.get(column.id);
     const identity = column.identity === undefined ? existing?.identity ?? null : column.identity;
+    const nullable = identity ? false : column.nullable;
+    const notNullConstraintName = column.notNullConstraintName === undefined
+      ? existing?.notNullConstraintName : column.notNullConstraintName;
     return {
       id: existing?.id || id("column", randomUUID),
       name: column.name,
       dataType: column.dataType,
-      nullable: identity ? false : column.nullable,
+      nullable,
+      ...(!nullable && notNullConstraintName ? { notNullConstraintName } : {}),
       defaultExpression: column.defaultExpression === undefined ? existing?.defaultExpression ?? null : column.defaultExpression,
       identity,
       generatedExpression: column.generatedExpression === undefined ? existing?.generatedExpression ?? null : column.generatedExpression,
@@ -573,6 +586,7 @@ export function suggestDesignKeyName(content, { tableId, kind, columnIds, keyId 
   const used = new Set([
     ...table.keys.filter(key => key.id !== keyId).map(key => key.name),
     ...table.checks.map(check => check.name),
+    ...table.columns.map(column => column.notNullConstraintName).filter(Boolean),
   ]);
   if (!used.has(base)) return base;
   for (let index = 2; index < 10_000; index += 1) {
@@ -595,7 +609,8 @@ export function saveDesignKey(content, values, randomUUID = () => crypto.randomU
     throw new Error("Select at least one column from this table.");
   }
   if (new Set(columnIds).size !== columnIds.length) throw new Error("Each column can appear only once in a key.");
-  const duplicateName = [...table.keys, ...table.checks].some(item => item.id !== values.keyId && item.name === name);
+  const duplicateName = [...table.keys, ...table.checks].some(item => item.id !== values.keyId && item.name === name)
+    || table.columns.some(column => column.notNullConstraintName === name);
   if (duplicateName) throw new Error("A constraint with this name already exists on the table.");
   if (values.kind === "primary" && table.keys.some(key => key.id !== values.keyId && key.kind === "primary")) {
     throw new Error("This table already has a primary key.");
@@ -656,6 +671,7 @@ export function suggestDesignCheckName(content, { tableId, expression = "", chec
   const used = new Set([
     ...table.keys.map(key => key.name),
     ...table.checks.filter(check => check.id !== checkId).map(check => check.name),
+    ...table.columns.map(column => column.notNullConstraintName).filter(Boolean),
   ]);
   if (!used.has(base)) return base;
   for (let index = 2; index < 10_000; index += 1) {
@@ -675,7 +691,8 @@ export function saveDesignCheck(content, values, randomUUID = () => crypto.rando
   if (!expression) throw new Error("Enter the condition this check must enforce.");
   if (/^CHECK\s*\(/i.test(expression)) throw new Error("Enter only the condition; Schemii adds CHECK (…) during export.");
   validateExpression(expression, `check “${name}”`);
-  const duplicateName = [...table.keys, ...table.checks].some(item => item.id !== values.checkId && item.name === name);
+  const duplicateName = [...table.keys, ...table.checks].some(item => item.id !== values.checkId && item.name === name)
+    || table.columns.some(column => column.notNullConstraintName === name);
   if (duplicateName) throw new Error("A constraint with this name already exists on the table.");
   const check = {
     id: existing?.id || id("check", randomUUID),
@@ -815,6 +832,9 @@ function designRelationshipFromValues(content, values, relationshipId, randomUUI
   const source = content.tables.find(table => table.id === values.sourceTableId);
   const target = content.tables.find(table => table.id === values.targetTableId);
   if (!source || !target) throw new Error("Choose source and target tables from this design.");
+  if (source.columns.some(column => column.notNullConstraintName === relationshipName)) {
+    throw new Error("A constraint with this name already exists on the source table.");
+  }
   if (content.relationships.some(item => item.id !== relationshipId
     && item.sourceTableId === source.id
     && item.name === relationshipName)) {
