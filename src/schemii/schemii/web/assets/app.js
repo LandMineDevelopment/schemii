@@ -1,4 +1,6 @@
 import { setAssistantDesignSavedHandler } from "./ai-assistant.js";
+import { createProductContext, requireContextAccount } from "#common/product-context.js";
+let schemaHandoffPending = false, schemaHandoffGeneration = 0;
 import { createInspectorDataController } from "./inspector-data.js";
 import { createTableEditor } from "./table-editor.js";
 import { api } from "./api.js";
@@ -78,7 +80,7 @@ import { createRelationDataSource } from "./relation-data-source.js";
 import { quoteSqlIdentifier } from "./sql-identifier.js";
 import { appendDataGridPage, installAutoPageLoader } from "#common/data-grid.js";
 import { installProductNavigation } from "#common/product-navigation.js";
-import { createViewAnalysisController } from "./view-analysis.js";
+import { createViewAnalysisCollection } from "./view-analysis.js";
 import {
   catalogTableId,
   catalogViewId,
@@ -97,6 +99,7 @@ import {
   createLatestRequestController,
   createWorkspaceOperationController,
 } from "./request-coordinator.js";
+import { createDesignDeploymentController, detachedDesignEligible } from "./design-deployment.js";
 import { createMigrationReviewController } from "./migration-review.js";
 import { createSqlConsole } from "./sql-console.js";
 import { syncWorkspaceToolbar } from "./workspace-toolbar.js";
@@ -650,6 +653,21 @@ const migrationReview = createMigrationReviewController({
   notify: showToast,
   notifyError: errorToast,
 });
+const designDeployment = createDesignDeploymentController({
+  api,
+  elements: {
+    dialog: byId("design-deployment-dialog"), connection: byId("deployment-connection"),
+    namespace: byId("deployment-namespace"), body: byId("deployment-review-body"),
+    status: byId("deployment-status"), review: byId("review-deployment-button"), copy: byId("copy-deployment-button"),
+  },
+  getContext: () => ({ workspace: state.activeWorkspace, design: state.design }),
+  openTarget: async workspace => {
+    const index = state.workspaces.findIndex(item => item.id === workspace.id);
+    if (index < 0) state.workspaces.push(workspace); else state.workspaces[index] = workspace;
+    if (await openWorkspace(workspace)) await migrationReview.open();
+  },
+  notify: showToast,
+});
 const relationDataSource = createRelationDataSource({
   api,
   getWorkspace: () => state.activeWorkspace,
@@ -906,34 +924,55 @@ const updateFitAvailability = bindCanvasFitControl({
   onFit: scheduleCanvasViewPersistence,
 });
 
-function selectedViewAnalysisContext(view = currentCatalogView()) {
+let desiredViewAnalysisContexts = new Map();
+let desiredViewAnalysisSignature = null;
+let desiredViewAnalysisWorkspaceId = null;
+let desiredViewAnalysisGeneration = 0;
+let updateObjectViewAnalysis = () => {};
+
+function desiredViewAnalysisContext(view = currentCatalogView()) {
   if (!isDesignWorkspace() || !state.activeWorkspace || !state.design || !view?.designId) return null;
-  return {
-    key: [
-      state.activeWorkspace.id,
-      view.designId,
-      viewAnalysisContextSignature(state.design.content),
-    ].join(":"),
-    workspaceId: state.activeWorkspace.id,
-    view,
-  };
+  return desiredViewAnalysisContexts.get(view.designId) || null;
 }
 
-const viewAnalysis = createViewAnalysisController({
-  keyOf: context => context.key,
+const viewAnalysis = createViewAnalysisCollection({
   load: (context, { signal }) => api.analyzeDesignView(context.workspaceId, {
     viewId: context.view.designId,
     name: context.view.name,
     definition: context.view.queryDefinition,
   }, { signal }),
-  onChange: () => {
-    if (state.activeLayer === "views") renderSelectedViewDetail();
+  onChange: (value, context) => {
+    if (state.activeLayer === "views" && desiredViewAnalysisContext()?.key === value.key) renderSelectedViewDetail();
+    if (elements.objectsDialog.open) {
+      // Search includes metadata, so changed counts may change the matching set.
+      if (elements.objectsSearch.value) renderObjectsBrowser();
+      else updateObjectViewAnalysis(context.view.designId, value);
+    }
   },
 });
 
 function syncViewAnalysisSelection({ force = false, notify = false } = {}) {
-  const context = selectedViewAnalysisContext();
-  return viewAnalysis.select(context, { force, notify });
+  const workspaceId = state.activeWorkspace?.id;
+  const desired = isDesignWorkspace() && state.design && state.catalog?.source === "design";
+  const signature = desired ? viewAnalysisContextSignature(state.design.content) : null;
+  // Compare the complete context once. Compact generations keep per-view keys
+  // linear in view count and distinguish edits, workspace switches and undo.
+  if (workspaceId !== desiredViewAnalysisWorkspaceId || signature !== desiredViewAnalysisSignature) {
+    desiredViewAnalysisGeneration += 1;
+    desiredViewAnalysisWorkspaceId = workspaceId;
+    desiredViewAnalysisSignature = signature;
+  }
+  desiredViewAnalysisContexts = new Map(
+    desired
+      ? allViews(state.catalog).map(view => [view.designId, {
+        key: `${workspaceId}:${desiredViewAnalysisGeneration}:${view.designId}`,
+        workspaceId,
+        view,
+      }])
+      : [],
+  );
+  viewAnalysis.sync([...desiredViewAnalysisContexts.values()]);
+  return viewAnalysis.select(desiredViewAnalysisContext(), { force, notify });
 }
 
 function workspaceCanvasPositions(metadata = {}) {
@@ -1250,8 +1289,12 @@ function updateHeader() {
   elements.reloadConflictButton.disabled = state.catalogLoading;
   elements.applyConnectionLayoutButton.disabled = state.catalogLoading;
   updateDesignControls();
+  byId("create-model-from-schema").disabled = !state.activeWorkspace || state.catalogLoading || state.designSubmitting || state.historySubmitting || tableEditor.hasDraft || schemaHandoffPending;
   tableEditor.updateActions();
   elements.downloadCatalogButton.textContent = designWorkspace ? "Download desired design JSON" : "Download live catalog JSON";
+  byId("deploy-design-button").hidden = !detachedDesignEligible(state.activeWorkspace, state.design);
+  byId("deploy-design-button").disabled = !detachedDesignEligible(state.activeWorkspace, state.design)
+    || state.catalogLoading || state.designSubmitting || state.historySubmitting || tableEditor.hasDraft;
   elements.exportDesignSqlButton.disabled = !designWorkspace || !state.design || state.catalogLoading;
   elements.reviewMigrationButton.disabled = !migrationReview.available()
     || state.catalogLoading
@@ -2417,6 +2460,7 @@ function confirmDeleteWorkspace(workspace) {
 }
 
 function clearActiveWorkspace({ historyMode = "replace" } = {}) {
+  designDeployment.close();
   designEditors.discardDrafts();
   const workspaceId = state.activeWorkspace?.id;
   persistCanvasView();
@@ -2491,6 +2535,7 @@ async function openWorkspace(workspace, { historyMode = "push", navigationReques
     if (!await flushLayoutBeforeTransition() || !request.isCurrent()) return false;
     if (!await designEditors.requestDiscardDrafts() || !request.isCurrent()) return false;
     persistCanvasView();
+    designDeployment.close();
     workspaceOperations.invalidate();
     viewAnalysis.clear();
     resetLayoutSaveState();
@@ -2987,6 +3032,7 @@ function renderCatalogSurfaces() {
   if (elements.objectsDialog.open) renderObjectsBrowser();
   else {
     replace(elements.objectsList);
+    updateObjectViewAnalysis = () => {};
     elements.objectsCount.textContent = state.catalog ? "Open to browse live objects" : "No catalog loaded";
   }
   renderSqlTarget();
@@ -3048,8 +3094,8 @@ function renderSelectedViewDetail() {
     renderDesignViewStory(elements.viewDetail, { view: null });
     return;
   }
-  const context = selectedViewAnalysisContext(view);
-  const analysisState = viewAnalysis.snapshot();
+  const context = desiredViewAnalysisContext(view);
+  const analysisState = viewAnalysis.snapshot(context);
   const selectedState = context && analysisState.key === context.key
     ? analysisState
     : { status: "idle", analysis: null, error: null };
@@ -3175,6 +3221,7 @@ function renderObjectsBrowser() {
     || state.historySubmitting
     || tableEditor.hasDraft;
   if (!desired) {
+    updateObjectViewAnalysis = () => {};
     const result = renderRelationBrowser(elements.objectsList, {
       response: state.liveRelations,
       loading: state.liveRelationsLoading,
@@ -3205,7 +3252,14 @@ function renderObjectsBrowser() {
       renderFunctionsBrowser();
       openDialog(elements.functionsDialog);
     }
+  }, {
+    getViewAnalysis: view => viewAnalysis.summary(desiredViewAnalysisContext(view)),
+    onAnalyzeView: view => { void viewAnalysis.ensure(desiredViewAnalysisContext(view)); },
+    onRetryViewAnalysis: view => {
+      void viewAnalysis.ensure(desiredViewAnalysisContext(view), { force: true, notify: true });
+    },
   });
+  updateObjectViewAnalysis = result.updateViewAnalysis;
   elements.objectsCount.textContent = state.catalog ? `${result.shown} shown · ${result.matching} matching` : "No catalog loaded";
 }
 
@@ -3437,12 +3491,16 @@ function applyDesignHistoryMutation(mutation, { cue = true, render = true } = {}
   if (cue) showDesignChanges(beforeContent, mutation.design.content);
 }
 
-async function applyDesignHistoryPreview(delta) {
+async function applyDesignHistoryPreview(delta, { isCurrent = () => true, mutation = null } = {}) {
   const beforeContent = state.design.content;
-  const afterContent = applyJsonDelta(state.design.content, delta);
+  const afterContent = mutation?.design.content || applyJsonDelta(state.design.content, delta);
   const targets = designChangeTargets(beforeContent, afterContent);
   const prepared = await prepareDesignChangeTransition(targets, { reveal: true });
-  const design = {
+  if (!isCurrent()) {
+    changeTransitions.restore(prepared);
+    return { presentation: null };
+  }
+  const design = mutation?.design || {
     ...state.design,
     content: afterContent,
   };
@@ -3454,6 +3512,10 @@ async function applyDesignHistoryPreview(delta) {
   const focusedView = revealTarget?.scope === "views"
     ? focusChangedViewState(revealTarget)
     : null;
+  // History can restore a view whose prior analysis has been evicted. Assemble
+  // its detail before replacing the mounted surface, just as a cache hit would.
+  if (focusedView) await syncViewAnalysisSelection();
+  if (!isCurrent()) return { presentation: null };
   cancelColumnAuthoring();
   renderCatalogSurfaces();
   renderCatalogState();
@@ -3503,6 +3565,10 @@ async function executeDesignHistoryMoveConfirmed(direction) {
   try {
     const result = await performDesignHistoryMove({
       state, direction, operation,
+      // View analysis uses server-side source columns, including wildcard
+      // expansion. Do not analyze an optimistic design against the old server.
+      deferPreview: Boolean(state.design.content.views?.length
+        || applyJsonDelta(state.design.content, state.designHistory?.[direction]?.delta || []).views?.length),
       applyPreview: applyDesignHistoryPreview,
       requestMove: (move, ...args) => api[move === "undo" ? "undoDesign" : "redoDesign"](...args),
       applyMutation: applyDesignHistoryMutation,
@@ -5004,6 +5070,32 @@ function bindEvents() {
     state.relationPreviewError = null;
     state.relationPreviewPagingError = null;
   });
+  byId("create-model-from-schema").addEventListener("click", async () => {
+    if (schemaHandoffPending || !state.activeWorkspace) return;
+    if (!state.activeWorkspace.connectionId) {
+      askConfirmation({ title: 'Choose a live source for a model', message: 'This detached desired design has no PostgreSQL source. Copy it to a concrete PostgreSQL target and review/apply its migration, then open that database-backed workspace to create a Schemoo model. Undeployed desired DDL cannot be used as a live model source.', label: 'Choose PostgreSQL target', tone: 'primary', callback: () => designDeployment.open() });
+      return;
+    }
+    const originId = state.activeWorkspace.id, handoffTicket = ++schemaHandoffGeneration;
+    schemaHandoffPending = true; updateHeader();
+    try {
+      if (!await flushLayoutBeforeTransition()) return;
+      if (handoffTicket !== schemaHandoffGeneration) return;
+      const origin = state.activeWorkspace;
+      if (origin?.id !== originId) throw new Error('The workspace changed. Send its current live schema again.');
+      const account = await requestJson('/api/v1/auth/me'); requireContextAccount(account, 'schemoo');
+      const workspace = await api.getWorkspace(origin.id);
+      const connection = await api.getConnection(workspace.connectionId);
+      if (handoffTicket !== schemaHandoffGeneration) return;
+      if (state.activeWorkspace?.id !== origin.id || workspace.connectionId !== origin.connectionId || workspace.namespace !== origin.namespace) throw new Error('The workspace source changed. Reload it and send the current live schema.');
+      location.assign(createProductContext('schema', account, { connectionId: workspace.connectionId, connectionOwnerId: connection.ownerId || account.user.id, connectionRevision: connection.revision, namespace: workspace.namespace }));
+    } catch (error) { errorToast(error); }
+    finally { schemaHandoffPending = false; updateHeader(); }
+  });
+  byId("deploy-design-button").addEventListener("click", async () => {
+    elements.objectsDialog.close();
+    await designDeployment.open();
+  });
   elements.reviewMigrationButton.addEventListener("click", async () => {
     elements.objectsDialog.close();
     await migrationReview.open();
@@ -5050,6 +5142,7 @@ function bindEvents() {
     });
   });
   window.addEventListener("pagehide", persistCanvasView);
+  window.addEventListener("pagehide", () => { schemaHandoffGeneration++; });
   window.addEventListener("beforeunload", event => {
     if (!tableEditor.hasDraft && !designEditors.hasDraft && !sqlConsole.hasOpenTransaction()) return;
     event.preventDefault();

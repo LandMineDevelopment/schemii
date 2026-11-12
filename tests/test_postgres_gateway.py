@@ -819,3 +819,52 @@ def test_console_cancel_is_admitted_when_query_and_monitor_slots_are_occupied():
     finally:
         observer.close()
         query.close()
+
+
+@pytest.mark.parametrize('namespace', ['reporting', 'A "schema"'])
+def test_migration_binds_authored_sql_to_exact_reviewed_namespace(monkeypatch, namespace):
+    from types import SimpleNamespace
+
+    statements = ['CREATE TYPE "Status" AS ENUM (\'new\');',
+                  'CREATE FUNCTION "Value"() RETURNS integer LANGUAGE SQL AS $$ SELECT 1 $$;',
+                  'CREATE TRIGGER "Changed" AFTER INSERT ON "Rows" FOR EACH ROW EXECUTE FUNCTION external.handler();']
+    factory = FakeConnectFactory({'pg_advisory_xact_lock': [], 'pg_current_xact_id': [{'transaction_id': '42'}],
+        **{statement: [] for statement in statements}})
+    gateway = PsycopgPostgresGateway(connect_factory=factory)
+    catalog = SimpleNamespace(fingerprint='exact-reviewed-fingerprint')
+    monkeypatch.setattr(gateway, '_introspect_connection', lambda *_: catalog)
+    monkeypatch.setattr(gateway, '_target_identity', lambda *_: {'database': 'analytics'})
+    gateway.execute_migration(resolved_connection(), namespace, catalog.fingerprint, statements,
+        on_started=lambda *_: None, on_intended=lambda *_: None)
+    connection = factory.connections[0]
+    sql = [query for query, _ in connection.executed]
+    setting = 'SET LOCAL search_path TO "' + namespace.replace('"', '""') + '", pg_catalog'
+    assert sql.index(setting) < min(sql.index(statement) for statement in statements)
+    assert all(statement in sql for statement in statements)
+    assert connection.commits == 1 and connection.closed
+    # Owned connection cleanup rolls back any residual transaction after commit.
+
+
+def test_migration_namespace_or_authored_sql_denial_rolls_back_before_commit(monkeypatch):
+    from types import SimpleNamespace
+    from schemii.common.postgres.errors import PostgresGatewayError
+
+    statement = 'CREATE FUNCTION value() RETURNS integer LANGUAGE SQL AS $$ SELECT 1 $$;'
+    factory = FakeConnectFactory({'pg_advisory_xact_lock': [], 'pg_current_xact_id': [{'transaction_id': '42'}]})
+    gateway = PsycopgPostgresGateway(connect_factory=factory)
+    catalog = SimpleNamespace(fingerprint='reviewed')
+    monkeypatch.setattr(gateway, '_introspect_connection', lambda *_: catalog)
+    monkeypatch.setattr(gateway, '_target_identity', lambda *_: {'database': 'analytics'})
+    original_execute = gateway._execute_statement
+
+    def deny(connection, sql):
+        if sql == statement:
+            raise RuntimeError('denied fixture')
+        return original_execute(connection, sql)
+
+    monkeypatch.setattr(gateway, '_execute_statement', deny)
+    with pytest.raises(PostgresGatewayError):
+        gateway.execute_migration(resolved_connection(), 'restricted', catalog.fingerprint, [statement],
+            on_started=lambda *_: None, on_intended=lambda *_: None)
+    connection = factory.connections[0]
+    assert connection.commits == 0 and connection.rollbacks == 1 and connection.closed

@@ -8,6 +8,7 @@ from sqlglot import exp, parse_one
 from schemii.common.api.errors import ApiProblem
 from schemii.schemer.dashboard_models import DashboardTile, TimeAnalysis
 from schemii.schemoo.derived import type_family
+from schemii.schemoo.domain import source_identity
 from schemii.schemoo.models import ModelDefinition
 
 Catalog = Mapping[str, Any]
@@ -48,7 +49,8 @@ def source_type(
     details = next(
         c
         for t in catalog["tables"]
-        if t["name"] == node.table
+        if source_identity(catalog, t)
+        == source_identity(catalog, node.model_dump(exclude_none=True))
         for c in t["columns"]
         if c["name"] == column
     )

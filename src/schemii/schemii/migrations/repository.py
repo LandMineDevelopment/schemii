@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 import threading
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import (
@@ -372,7 +372,23 @@ class InMemoryMigrationRepository:
         self._workspace_claim_guard: (
             Callable[[str, str], ContextManager[None]] | None
         ) = None
-        self._lock = threading.RLock()
+        # Design edits and baseline publication share a lock in the in-memory
+        # adapter. This prevents a baseline race without inverse repo/design
+        # lock ordering when ordinary edits call the execution mutation guard.
+        transaction = getattr(designs, "metadata_transaction", None)
+        self._lock = transaction() if callable(transaction) else threading.RLock()
+
+    @contextmanager
+    def design_copy_guard(self, owner_id: str, source_id: str, target_id: str) -> Iterator[None]:
+        with ExitStack() as stack:
+            if self._workspace_claim_guard is not None:
+                for workspace_id in sorted((source_id, target_id)):
+                    stack.enter_context(
+                        self._workspace_claim_guard(owner_id, workspace_id)
+                    )
+            with self._lock:
+                yield
+
 
     def set_workspace_claim_guard(
         self,

@@ -126,3 +126,26 @@ def test_legacy_person_owned_dashboard_grant_cannot_resolve(shared):
     shared.profiles[shared.grant['connection_id']].ownership = 'user'
     with pytest.raises(ApiProblem, match='Schemii-owned'):
         prepare_dashboard(shared.request,'viewer',shared.dashboard.id)
+
+
+def test_shared_qualified_composite_catalog_requires_every_endpoint_column(shared):
+    _, scoped, _ = prepare_dashboard(shared.request, 'viewer', shared.dashboard.id)
+    catalog = {'namespace':'one', 'tables':[
+        {'namespace':name,'name':'same','columns':[{'name':'tenant'},{'name':'id'}], 'primaryKey':['tenant','id']}
+        for name in ['one','two']], 'relationships':[
+        {'id':'fk','sourceNamespace':'one','sourceTable':'same','targetNamespace':'two','targetTable':'same',
+         'columns':[{'source':'tenant','target':'tenant'},{'source':'id','target':'id'}]}]}
+    base = NS(get=lambda *a, **kw: deepcopy(catalog))
+    grants = {'one':{('same','tenant'),('same','id')}, 'two':{('same','tenant')}}
+    scoped.postgres = NS(readable_columns=lambda target, namespace: grants[namespace])
+    adapter = ReportCatalogs(base, scoped.report_access)
+    visible = adapter.get(scoped,'viewer',shared.grant['connection_id'],'one',namespaces=['one','two'])
+    assert visible['relationships'] == []
+    assert visible['tables'][0]['primaryKey'] == ['tenant','id']
+    assert visible['tables'][1]['primaryKey'] == []
+    grants['two'].add(('same','id'))
+    assert len(adapter.get(scoped,'viewer',shared.grant['connection_id'],'one',namespaces=['two'])['relationships']) == 1
+    grants['two'] = set()  # Revoked USAGE/SELECT is checked despite cached profile revision.
+    visible = adapter.get(scoped,'viewer',shared.grant['connection_id'],'one',namespaces=['two'])
+    assert [table['namespace'] for table in visible['tables']] == ['one']
+    assert visible['relationships'] == []

@@ -7,6 +7,8 @@ import { initializeUi, createIconButton, createIconElement } from '#common/ui.js
 import { installProductNavigation } from '#common/product-navigation.js';
 import { confirmAction } from '#common/confirmation.js';
 import { createProductAssistant } from '#common/model-assistant.js';
+import { consumeProductContext } from '#common/product-context.js';
+import { openPreviewHandoff } from './preview-handoff.js';
 import { readExecution } from '#common/query-execution.js';
 import { modelSelect, disposeSelects } from '#model/select.js';
 import { renderParameterValues } from '#model/filter-controls.js';
@@ -608,18 +610,35 @@ $('delete-dashboard').onclick = async () => {
   } });
 };
 window.addEventListener('schemii:logout', () => { upgradeReview?.dispose(); slicersDirty = false; void stopRuns(); $('tile-grid').replaceChildren(); });
-window.addEventListener('pagehide', () => { upgradeReview?.dispose(); void dashboardGroup?.close(); for (const group of streams.values()) for (const cache of [group.main, ...group.drills.values()]) void cache.close(); });
+let contextPageActive = true;
+window.addEventListener('pagehide', () => { contextPageActive = false; upgradeReview?.dispose(); void dashboardGroup?.close(); for (const group of streams.values()) for (const cache of [group.main, ...group.drills.values()]) void cache.close(); });
 window.addEventListener('beforeunload', event => { if (slicersDirty || upgradeReview?.dirty()) { event.preventDefault(); event.returnValue = ''; } });
-initializeUi(); installProductNavigation($('product-navigation'), { activeProduct: 'schemer' });
+const contextualArrival = new URLSearchParams(location.search).has('handoff');
+initializeUi(); if (!contextualArrival) installProductNavigation($('product-navigation'), { activeProduct: 'schemer' });
 async function initialize() {
   try {
     const account = await currentAccount();
+    if (contextualArrival && !contextPageActive) return;
     author = canAuthor(account); modelAuthor = canAccessProduct(account, 'schemoo'); renderAccess();
+    if (contextualArrival) {
+      installProductNavigation($('product-navigation'), { activeProduct: canAccessProduct(account, 'schemer') ? 'schemer' : null, account });
+      const context = consumeProductContext(new URLSearchParams(location.search).get('handoff'), account, 'schemer');
+      await openPreviewHandoff(context, { onCreated: async saved => {
+        const refreshed = await requestJson(API);
+        if (!contextPageActive) return;
+        library = refreshed.dashboards; renderLibrary();
+        await openDashboard(saved.id);
+      } });
+      return;
+    }
     const [dashboards, models] = await Promise.all([requestJson(API), author && modelAuthor ? requestJson('/api/v1/schemoo/models') : Promise.resolve({ models: [] })]);
     library = dashboards.dashboards; modelList = models.models; renderLibrary();
     const selected = new URLSearchParams(location.search).get('dashboard');
     if (selected || library.length) await openDashboard(selected || library[0].id);
     if (author && modelAuthor && !modelList.length) message('Create a Schemoo model before creating a dashboard.');
-  } catch (error) { message(error.message); }
+  } catch (error) {
+    message(error.message);
+    if (contextualArrival) $('notice').append(element('p', {}, [element('a', { text: 'Return to Schemoo to resend context', attrs: { href: '/schemoo' } }), ' · ', element('a', { text: 'Open dashboard library without context', attrs: { href: '/schemer' } })]));
+  }
 }
 void initialize();
