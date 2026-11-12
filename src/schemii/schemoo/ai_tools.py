@@ -116,7 +116,11 @@ execution cannot replace those rules. Preserve exposed-field restrictions and
 repair source drift explicitly without inventing a replacement catalog contract.
 Model sources carry a physical namespace separately from their table; preserve
 stable node IDs and never parse dotted names as namespaces. Read each explicitly
-selected schema through the same connection. Model edges may use kind=logical
+selected schema through the same connection.
+When creating from an inspected catalog, send its namespaces as catalogNamespaces
+alongside catalogFingerprint, including schemas inspected but not selected.
+The saved source contract still includes only the model's actual dependencies.
+Model edges may use kind=logical
 with source/target node IDs and an ordered columns list of {source, target} pairs
 for a composite equality join without a database foreign key. Legacy scalar
 sourceColumn/targetColumn pairs remain readable; do not mix conflicting forms. Omit
@@ -443,7 +447,7 @@ def execute_action(services, owner, current_model_id, action):
             current = load_model(services, owner, kwargs["model_id"], kwargs["body"].expected_revision)
             body = kwargs["body"]
             definition = body.definition.model_copy(update={"sourceContract": current.definition.sourceContract})
-            validate_model_definition(model_catalog(services, owner, current), definition)
+            validate_model_definition(model_catalog(services, owner, current, fresh=True, definition=definition), definition)
             kwargs["body"] = body.model_copy(update={"definition": definition, "catalog_fingerprint": current.catalog_fingerprint})
     result = handler(**kwargs)
     if tasks is not None:

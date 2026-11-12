@@ -692,3 +692,97 @@ def test_qualified_model_create_save_patch_and_scalar_domain_ambiguity_are_ident
     source['relationships'][0]['columns'].append({'source':'name','target':'name'})
     with pytest.raises(ApiProblem,match='explicit domain'):
         domain_query(source,scoped,body)
+
+
+@pytest.fixture
+def namespace_catalog(setup):
+    """Production cohort adapter over immutable, authorized metadata doubles."""
+    from schemii.common.postgres.models import PostgresColumn
+    api, model, _, _ = setup
+    revisions = {"public": "one", "other": "one"}
+    grants = {name: {("people", "id"), ("people", "name")} for name in revisions}
+    observations = []
+
+    def introspect(profile, namespace):
+        observations.append((profile.id, namespace))
+        return SimpleNamespace(tables=[SimpleNamespace(name="people", columns=[
+            PostgresColumn(name="id", ordinal=1, data_type="uuid", nullable=True),
+            PostgresColumn(name="name", ordinal=2, data_type="text", nullable=True)])],
+            relationships=[], fingerprint=f"{namespace}:{revisions[namespace]}")
+
+    services = replace(api.app.state.services, model_catalogs=ModelCatalogs(),
+        postgres=SimpleNamespace(introspect=introspect, readable_columns=lambda profile, namespace: grants[namespace]))
+    api.app.state.services = services
+    return SimpleNamespace(api=api, model=model, services=services, revisions=revisions,
+                           grants=grants, observations=observations)
+
+
+def test_creation_compares_the_reviewed_namespace_cohort_but_saves_only_selected_dependencies(namespace_catalog):
+    f = namespace_catalog
+    connection = f.model["connectionId"]
+    reviewed = f.api.get("/api/v1/schemoo/catalog", params={
+        "connection_id": connection, "namespace": "public", "namespaces": ["other", "public"]}).json()
+    payload = {"name": "Public selection", "connectionId": connection, "namespace": "public",
+        "definition": DEFINITION, "catalogFingerprint": reviewed["fingerprint"], "catalogNamespaces": reviewed["namespaces"]}
+    f.observations.clear()
+    response = f.api.post("/api/v1/schemoo/models", json=payload)
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert [namespace for _, namespace in f.observations] == ["other", "public"]
+    assert {table["namespace"] for table in created["definition"]["sourceContract"]["tables"]} == {"public"}
+    assert "catalogNamespaces" not in created
+    assert "catalogNamespaces" not in f.api.get(f"/api/v1/schemoo/models/{created['id']}").json()
+    f.revisions["other"] = "changed"
+    plan = f.api.post(f"/api/v1/schemoo/models/{created['id']}/plan", json={"expectedRevision": 1, "explore": EXPLORE})
+    assert plan.status_code == 200 and plan.json()["sourceIssues"] == []
+    rejected = f.api.post("/api/v1/schemoo/models", json=payload)
+    assert rejected.status_code == 409 and rejected.json()["error"]["code"] == "model_source_changed"
+
+
+def test_creation_cohort_preserves_legacy_scope_caps_and_fresh_grant_checks(namespace_catalog):
+    f = namespace_catalog
+    connection = f.model["connectionId"]
+    single = f.api.get("/api/v1/schemoo/catalog", params={"connection_id": connection, "namespace": "public"}).json()
+    base = {"name": "Legacy", "connectionId": connection, "namespace": "public", "definition": DEFINITION,
+            "catalogFingerprint": single["fingerprint"]}
+    assert f.api.post("/api/v1/schemoo/models", json=base).status_code == 201
+    for namespaces in [[], [""] , ["x" * 64], [f"schema_{index}" for index in range(17)],
+                       [f"schema_{index}" for index in range(16)]]:
+        rejected = f.api.post("/api/v1/schemoo/models", json={**base, "catalogNamespaces": namespaces})
+        assert rejected.status_code == 422, rejected.text
+    draft = deepcopy(DEFINITION)
+    draft["nodes"][0]["namespace"] = "other"
+    outside = f.api.post("/api/v1/schemoo/models", json={**base, "definition": draft, "catalogNamespaces": ["public"]})
+    assert outside.status_code == 409 and outside.json()["error"]["code"] == "model_source_changed"
+    reviewed = f.api.get("/api/v1/schemoo/catalog", params={"connection_id": connection, "namespace": "public", "namespaces": ["other"]}).json()
+    f.grants["other"] = set()
+    rejected = f.api.post("/api/v1/schemoo/models", json={**base, "definition": draft,
+        "catalogNamespaces": reviewed["namespaces"], "catalogFingerprint": reviewed["fingerprint"]})
+    assert rejected.status_code == 422 and rejected.json()["error"]["code"] == "invalid_model_source"
+
+
+def namespace_draft(model):
+    draft = deepcopy(model["definition"])
+    draft["nodes"].append({"id": "new_role", "namespace": "other", "table": "people", "label": "Other people"})
+    draft["edges"].append({"id": "cross", "kind": "logical", "source": "people", "target": "new_role",
+                           "columns": [{"source": "id", "target": "id"}]})
+    draft["exposedFields"] = [{"table": node, "column": "name"} for node in ["people", "new_role"]]
+    return draft
+
+
+def test_validation_reads_proposed_namespace_dependencies_without_saving(namespace_catalog):
+    f = namespace_catalog
+    draft = namespace_draft(f.model)
+    body = {"expectedRevision": 1, "definition": draft,
+            "explore": {"root": "people", "fields": [{"table": "new_role", "column": "name"}]}}
+    url = f"/api/v1/schemoo/models/{f.model['id']}"
+    f.observations.clear()
+    response = f.api.post(url + "/validate", json=body)
+    assert response.status_code == 200, response.text
+    assert '"other"."people"' in response.json()["sql"]
+    assert [namespace for _, namespace in f.observations] == ["other", "public"]
+    assert f.api.get(url).json() == f.model
+    f.grants["other"] = set()
+    rejected = f.api.post(url + "/validate", json=body)
+    assert rejected.status_code == 422 and rejected.json()["error"]["code"] == "model_source_drift"
+    assert f.api.get(url).json() == f.model
