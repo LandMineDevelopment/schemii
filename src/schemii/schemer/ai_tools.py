@@ -138,6 +138,21 @@ class DisplayedColumn(BaseModel):
     type: str = Field(default="unknown", max_length=256)
 
 
+class DisplayedPivotProjection(BaseModel):
+    """Bounded client view metadata; never source or execution authority."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    kind: Literal["pivot"]
+    status: Literal["data", "capacity", "invalid"]
+    rowStart: int = Field(ge=0, le=10000)
+    rowEnd: int = Field(ge=0, le=10000)
+    rowGroups: int = Field(ge=0, le=10000)
+    columnGroups: int = Field(ge=0, le=10000)
+    rowAxes: int = Field(ge=1, le=4)
+    columnAxes: int = Field(ge=1, le=3)
+    rowsOmitted: bool
+    notice: str = Field(max_length=512)
+
+
 class DisplayedResult(BaseModel):
     """Client evidence, never a query plan or a source authorization."""
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
@@ -154,6 +169,7 @@ class DisplayedResult(BaseModel):
     tileSelections: dict[str, ScopeSelection] | None = Field(default=None, max_length=20)
     reportFilters: list[ReportFilter] | None = Field(default=None, max_length=32)
     drillSelection: DrillSelection | None = None
+    projection: DisplayedPivotProjection | None = None
     columns: list[DisplayedColumn] = Field(max_length=128)
     rows: list[list[JsonValue]] = Field(max_length=10000)
     cachedRows: int = Field(ge=0, le=10000)
@@ -171,6 +187,8 @@ def validate_displayed_result(value):
         result = DisplayedResult.model_validate(value)
         if (result.displayedRows > result.cachedRows or len(result.rows) > result.displayedRows
                 or any(len(row) != len(result.columns) for row in result.rows)
+                or (result.projection is not None and not
+                    0 <= result.projection.rowStart <= result.projection.rowEnd <= result.projection.rowGroups)
                 or (result.pane == "drill") != (result.drillSelection is not None)):
             raise ValueError("Invalid displayed result shape")
         return result

@@ -375,3 +375,43 @@ test('displayed visualization captures the selected time metric and independent 
   const frozen = cacheModule.freezeDisplayedResult(displayed, { pane: 'main' });
   assert.equal(frozen.metric, 'percent'); assert.equal(frozen.chartTruncated, true); assert.equal(frozen.clientSampleTruncated, true);
 });
+
+test('displayed projection keeps calculated-only marks and every complete time-block offset', async () => {
+  const { displayedVisualization, visualizationSelection } = await import('../../src/schemii/schemer/web/visualizations.js');
+  const field = column => ({ table: 'facts', column, aggregate: 'sum' });
+  const tile = { kind: 'bar', dimensions: [field('region'), field('month')], measures: [field('amount'), field('count')],
+    calculations: [{ id: 'share', visible: true }, { id: 'ratio', visible: true }], timeAnalysis: { comparison: 'previous_period', runningTotal: true } };
+  const raw = ['East', '2026-01', 101, 202, 301, 401, 501, 601, 701, 801, 901, 1001, .25, .5];
+  const result = { snapshotAt: startFrame.snapshotAt, columns: raw.map((_, i) => ({ name: `output ${i}` })), rows: [raw],
+    plan: { calculatedMeasures: [{ id: 'share', index: 12, label: 'Share' }, { id: 'ratio', index: 13, label: 'Ratio' }] } };
+  for (const [metric, indices] of [['values', [2, 4, 3, 8, 12, 13]], ['change', [5, 9]], ['percent', [6, 10]], ['running', [7, 11]]]) {
+    const host = { dataset: { timeMetric: metric } }, selection = visualizationSelection(host, tile, result);
+    assert.deepEqual(selection.series.map(item => item.column), indices);
+    assert.deepEqual(displayedVisualization(host, tile, result).rows, [[...raw.slice(0, 2), ...indices.map(i => raw[i])]]);
+  }
+  const only = { kind: 'bar', dimensions: [field('region')], measures: [], hiddenMeasures: [field('amount')], calculations: [{ id: 'share', visible: true }] };
+  const calculated = { ...result, columns: [{ name: 'Region' }, { name: 'Share' }], rows: [['East', .25]], plan: { calculatedMeasures: [{ id: 'share', index: 1, label: 'Share' }] } };
+  assert.deepEqual(displayedVisualization({ dataset: {} }, only, calculated).rows, [['East', .25]]);
+  assert.deepEqual(displayedVisualization({ dataset: {} }, { ...only, kind: 'donut' }, calculated).rows, [['East', .25]]);
+  assert.deepEqual(displayedVisualization({ dataset: {} }, { ...tile, kind: 'donut' }, result).rows, [['East', '2026-01', 101]]);
+  const many = { ...result, rows: Array.from({ length: 750 }, (_, i) => [`Region ${i}`, ...raw.slice(1)]) };
+  const selected = displayedVisualization({ dataset: {} }, tile, many);
+  assert.equal(selected.rows.length, Math.floor(2000 / 6)); assert.equal(selected.cachedRows, 750); assert.equal(selected.visualTruncated, true);
+  const frozen = cacheModule.freezeDisplayedResult(selected, { pane: 'main' });
+  many.rows[0][12] = 'later'; assert.equal(frozen.rows[0].at(-2), .25);
+  assert.equal(frozen.rows.length, 100); assert.equal(frozen.displayedRows, 333); assert.equal(frozen.cachedRows, 750);
+  assert.equal(frozen.chartTruncated, true); assert.equal(frozen.clientSampleTruncated, true); assert.equal('plan' in frozen, false);
+});
+
+test('displayed KPI includes only the first visible value and all target/variance/status outputs', async () => {
+  const { displayedVisualization } = await import('../../src/schemii/schemer/web/visualizations.js');
+  const tile = { kind: 'kpi', dimensions: [], measures: [], calculations: [{ id: 'share', visible: true }] };
+  const result = { snapshotAt: startFrame.snapshotAt, columns: ['Share', 'Goal', 'Absolute variance', 'Variance (%)', 'KPI assessment', 'Not displayed'].map(name => ({ name })),
+    rows: [[25, 10, 15, 150, 'favorable', 999], [88, 77, 66, 55, 'unfavorable', 444]],
+    plan: { calculatedMeasures: [{ id: 'share', index: 0, unit: 'percent' }], kpiComparison: { label: 'Goal', favorable: 'higher', indices: [1, 2, 3, 4], baselineUnit: 'percent', absoluteUnit: 'percentage_points' } } };
+  const displayed = displayedVisualization({ dataset: {} }, tile, result);
+  assert.deepEqual(displayed.rows, [[25, 10, 15, 150, 'favorable']]);
+  assert.deepEqual(displayed.columns.map(item => item.name), ['Share', 'Goal', 'Absolute variance', 'Percentage variance', 'KPI assessment (higher is better)']);
+  const frozen = cacheModule.freezeDisplayedResult(displayed, { pane: 'main' });
+  assert.equal(frozen.displayedRows, 1); assert.equal(frozen.cachedRows, 2); assert.deepEqual(frozen.rows[0], [25, 10, 15, 150, 'favorable']);
+});

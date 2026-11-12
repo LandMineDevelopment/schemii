@@ -27,9 +27,10 @@ export function freezeDisplayedResult(result, provenance, { maxRows = 100, maxBy
   const attachment = copy({ ...provenance, snapshotAt: result.snapshotAt,
     metric: result.metric || 'values', barGroupIndex: result.barGroupIndex || 0,
     cachedRows: result.cachedRows ?? result.rows.length, displayedRows: result.rows.length,
-    partial: Boolean(result.loading || result.hasMore || result.error || result.limitReached),
+    partial: Boolean(result.partial || result.loading || result.hasMore || result.error || result.limitReached),
     cacheTruncated: Boolean(result.limitReached), chartTruncated: Boolean(result.visualTruncated),
     clientSampleTruncated: Boolean(result.rows.length),
+    ...(result.projection ? { projection: result.projection } : {}),
     columns: result.columns.map(column => ({ name: String(column.name), type: String(column.dataType || column.type || 'unknown') })), rows: [] });
   const bytes = () => new TextEncoder().encode(JSON.stringify(attachment)).length;
   if (bytes() + 1 > maxBytes) throw new Error('Displayed column or filter metadata exceeds the attachment limit. Choose fewer fields.');

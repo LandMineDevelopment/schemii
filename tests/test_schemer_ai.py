@@ -335,6 +335,46 @@ def test_displayed_automatic_uses_frozen_rows_zero_source_work_and_no_tools(repo
     assert "no source query" in service.store.get("viewer", chat["id"])["messages"][-1]["text"]
 
 
+def test_displayed_pivot_window_and_null_grouping_metadata_reach_provider_without_query_work(report, monkeypatch):
+    import json
+
+    service, chat, packet = _displayed(report)
+    monkeypatch.setattr(ai_tools, "model_catalog", lambda *a, **kw: pytest.fail("No catalog"))
+    monkeypatch.setattr(ai_tools, "tile_plan", lambda *a, **kw: pytest.fail("No planning"))
+    packet["projection"] = {"kind": "pivot", "status": "data", "rowStart": 40, "rowEnd": 42,
+        "rowGroups": 80, "columnGroups": 2, "rowAxes": 1, "columnAxes": 1, "rowsOmitted": True,
+        "notice": "NULL at an included depth is SQL NULL. Totals use the qualifying population before Top N."}
+    packet["columns"] = [{"name": name} for name in ["Region", "Category", "Amount", "Row depth", "Column depth", "Scope"]]
+    packet["rows"] = [[None, "A", 23.5, 1, 1, "cell"], [None, None, 101.25, 0, 0, "grand_total"]]
+    packet.update(cachedRows=180, displayedRows=2, chartTruncated=True, partial=True)
+    turn = _attach(report, service, chat, packet)
+    packet["projection"]["rowStart"] = 0
+    packet["rows"][0][2] = 999
+    service.run("viewer", chat["id"], turn["turnId"])
+    evidence = json.loads(service.runtime.calls[0][1][0]["content"])["displayedEvidence"]
+    assert evidence["projection"]["rowStart"] == 40
+    assert evidence["rows"] == [[None, "A", 23.5, 1, 1, "cell"], [None, None, 101.25, 0, 0, "grand_total"]]
+    assert evidence["chartTruncated"] is True and evidence["partial"] is True
+    assert report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_pivot_projection_metadata_is_typed_bounded_and_sanitized(report):
+    service, chat, packet = _displayed(report)
+    packet["projection"] = {"kind": "pivot", "status": "data", "rowStart": 50, "rowEnd": 1,
+        "rowGroups": 10, "columnGroups": 2, "rowAxes": 1, "columnAxes": 1, "rowsOmitted": False,
+        "notice": "Grouping metadata"}
+    with pytest.raises(ApiProblem) as problem:
+        _attach(report, service, chat, packet)
+    assert problem.value.code == "ai_displayed_result_invalid"
+    assert DISPLAYED_SECRET not in str(problem.value)
+    packet["projection"].update(rowStart=0, rowEnd=1, notice="x" * 513)
+    with pytest.raises(ApiProblem) as problem:
+        _attach(report, service, chat, packet)
+    assert problem.value.code == "ai_displayed_result_invalid"
+    assert service.runtime.calls == [] and report.calls == []
+
+
 def test_displayed_ask_pauses_before_first_disclosure_and_approval_contains_no_rows(report):
     service, chat, packet = _displayed(report, "ask")
     waiting = _attach(report, service, chat, packet)

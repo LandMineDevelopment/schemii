@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { barGroups, barDimensionValue, barMeasureName, barColor } from '../../src/schemii/schemer/web/bar-series.js';
 import { timeSeries } from '../../src/schemii/schemer/web/time-analysis.js';
 import { markSelection } from '../../src/schemii/schemer/web/dashboard-state.js';
+import { renderVisualization, displayedVisualization } from '../../src/schemii/schemer/web/visualizations.js';
 const field = (column, aggregate = 'none') => ({ table: 'personnel', column, aggregate });
 const tile = { kind: 'bar', dimensions: [field('pay_band'), field('start_date')], measures: [field('id', 'count_distinct')], timeAnalysis: { table: 'personnel', column: 'start_date', granularity: 'month', comparison: 'none' } };
 const rows = [[1, '2024-09-01', 43], [1, '2024-10-01', 47], [2, '2024-09-01', 301], [2, '2024-11-01', 498]];
@@ -70,4 +71,38 @@ test('calculated columns beyond complete time blocks use their stable named mapp
   const grouped=barGroups(current,{rows:[[1,'2024-09-01',4,0,0,0,0,0,0,2.5]]},[{column:9,drill:1}]);
   assert.equal(grouped.series[0].label,'Sep 2024');
   assert.equal(grouped.series[0].column,9);assert.equal(grouped.groups[0].bars[0].row[9],2.5);
+});
+
+class ProjectionNode {
+  constructor(tag) { this.tagName = tag; this.children = []; this.dataset = {}; this.attrs = {}; this.style = { setProperty() {} }; this.classList = { add() {}, remove() {}, toggle() {} }; }
+  append(...items) { this.children.push(...items); }
+  replaceChildren(...items) { this.ownText = ''; this.children = items; }
+  set textContent(value) { this.ownText = String(value); this.children = []; }
+  get textContent() { return (this.ownText || '') + this.children.map(child => child.textContent).join(''); }
+  setAttribute(name, value) { this.attrs[name] = String(value); }
+  getAttribute(name) { return this.attrs[name]; }
+  addEventListener() {}
+  querySelector() { return null; }
+  querySelectorAll() { return []; }
+}
+const projectionNodes = root => [root, ...root.children.flatMap(projectionNodes)];
+test('actual chart and KPI DOM render the same calculated and comparison outputs that capture projects', t => {
+  const oldDocument = globalThis.document, oldNode = globalThis.Node;
+  globalThis.Node = ProjectionNode;
+  globalThis.document = { createElement: tag => new ProjectionNode(tag), createElementNS: (_ns, tag) => new ProjectionNode(tag), createTextNode: text => { const node = new ProjectionNode('#text'); node.textContent = text; return node; } };
+  t.after(() => { globalThis.document = oldDocument; globalThis.Node = oldNode; });
+  const host = new ProjectionNode('main'), tile = { id: 'actual', title: 'Share', kind: 'bar', dimensions: [field('region')], measures: [], hiddenMeasures: [field('amount', 'sum')], calculations: [{ id: 'share', visible: true }] };
+  const result = { columns: [{ name: 'Region' }, { name: 'Share' }], rows: [['East', .25], ['West', .75]], plan: { calculatedMeasures: [{ id: 'share', index: 1, label: 'Share' }] } };
+  renderVisualization(host, tile, result);
+  assert.deepEqual(projectionNodes(host).filter(node => node.className === 'bar-number').map(node => Number(node.textContent)), [.25, .75]);
+  assert.deepEqual(displayedVisualization(host, tile, result).rows, [['East', .25], ['West', .75]]);
+  result.rows.push(['Not painted yet', 12345]);
+  assert.deepEqual(displayedVisualization(host, tile, result).rows, [['East', .25], ['West', .75]]);
+  result.rows.pop();
+  renderVisualization(host, { ...tile, kind: 'donut' }, result);
+  assert.equal(projectionNodes(host).filter(node => node.className === 'donut-entry').length, 2);
+  assert.deepEqual(displayedVisualization(host, { ...tile, kind: 'donut' }, result).rows, [['East', .25], ['West', .75]]);
+  const kpi = { ...tile, kind: 'kpi', dimensions: [] }, compared = { columns: ['Current', 'Target', 'Absolute', 'Percent', 'Status'].map(name => ({ name })), rows: [[23, 17, 6, 35.294, 'favorable']], plan: { kpiComparison: { label: 'Target', favorable: 'higher', indices: [1, 2, 3, 4], baselineUnit: 'number', absoluteUnit: 'number' } } };
+  renderVisualization(host, kpi, compared); assert.match(host.textContent, /Target: 17/); assert.match(host.textContent, /Absolute variance: 6/); assert.match(host.textContent, /Percentage variance: 35/); assert.match(host.textContent, /favorable/);
+  assert.deepEqual(displayedVisualization(host, kpi, compared).rows, [[23, 17, 6, 35.294, 'favorable']]);
 });

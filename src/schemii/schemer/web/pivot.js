@@ -2,6 +2,9 @@ import { element } from '#common/dom.js';
 import { pivotDefaults } from './dashboard-state.js';
 
 let renderSequence = 0;
+// Only the mounted host retains its existing bounded sparse matrix and current
+// window. Capture reads that view; it never rebuilds a second result cache.
+const displayedPivots = new WeakMap();
 const text = value => value === null ? 'NULL' : typeof value === 'object' ? JSON.stringify(value) : String(value);
 const key = axis => JSON.stringify([axis.depth, ...axis.values]);
 const axisCompare = (a, b) => {
@@ -52,7 +55,7 @@ export function pivotMatrix(tile, result) {
     const c = { depth: values[offset + 1], values: values.slice(rows.length, rows.length + values[offset + 1]) };
     rowKeys.set(key(r), r); columnKeys.set(key(c), c);
     if (rowKeys.size > limits.maximumRows * rows.length + 1 || columnKeys.size > limits.maximumColumns * columns.length + 1) return { error: 'The pivot exceeded its bounded grouping capacity. Filter the report and refresh.' };
-    cells.set(JSON.stringify([key(r), key(c)]), values.slice(rows.length + columns.length, offset));
+    cells.set(JSON.stringify([key(r), key(c)]), values);
     rowsOmitted ||= Boolean(values[offset + 4]); qualifyingGroups = values[offset + 5];
   }
   return { rows: [...rowKeys.values()].sort(axisCompare), columns: [...columnKeys.values()].sort(axisCompare), cells,
@@ -67,9 +70,36 @@ function action(node, label, invoke) {
   button.onclick = event => { event.stopPropagation(); invoke(); };
   node.replaceChildren(button);
 }
+/** Exact sparse groups in the rendered row window, including column totals.
+ * Depths and scope distinguish a real SQL NULL from a rollup placeholder. */
+export function displayedPivot(host, tile, result) {
+  const mounted = displayedPivots.get(host);
+  const view = mounted || { tile, result, matrix: pivotMatrix(tile, result), first: 0, end: 50 };
+  const { matrix } = view;
+  tile = view.tile; result = view.result;
+  const rowAxes = tile.rowDimensions.length, columnAxes = tile.columnDimensions.length;
+  const offset = rowAxes + columnAxes + tile.measures.length;
+  const projection = { kind: 'pivot', status: matrix.capacity ? 'capacity' : matrix.error ? 'invalid' : 'data',
+    rowStart: view.first, rowEnd: Math.min(view.end, matrix.rows?.length || 0), rowGroups: matrix.rows?.length || 0,
+    columnGroups: matrix.columns?.length || 0, rowAxes, columnAxes, rowsOmitted: Boolean(matrix.rowsOmitted),
+    notice: matrix.error || (matrix.capacity ? `Pivot column capacity reached (at least ${matrix.count} groups; maximum ${matrix.maximum}). No numeric cells are displayed.` : 'Grouping depths count included axis prefixes. Scope marks cell, row, column, subtotal or grand_total. NULL at an included depth is SQL NULL. Totals use the complete qualifying population before Top N; absent cells are not zero.') };
+  if (matrix.capacity || matrix.error) return { ...result, columns: [], rows: [], projection, cachedRows: result.rows.length, visualTruncated: true };
+  const selected = [];
+  for (const row of matrix.rows.slice(projection.rowStart, projection.rowEnd)) for (const column of matrix.columns) {
+    const values = matrix.cells.get(JSON.stringify([key(row), key(column)]));
+    if (values) selected.push([...values.slice(0, offset + 6), pivotScopeKind(tile, row.depth, column.depth)]);
+  }
+  const metadata = ['Row grouping depth', 'Column grouping depth', 'Pivot record type', 'Column group count', 'Preview row cap reached', 'Qualifying source groups'];
+  return { ...result, projection, cachedRows: result.rows.length,
+    visualTruncated: Boolean(result.visualTruncated || projection.rowStart || projection.rowEnd < projection.rowGroups),
+    partial: Boolean(matrix.partial || matrix.rowsOmitted),
+    columns: [...Array.from({ length: offset }, (_, index) => result.columns[index]), ...metadata.map(name => ({ name })), { name: 'Pivot scope' }], rows: selected };
+}
 export function renderPivot(host, tile, result, { onDrill, compact = false } = {}) {
   host.replaceChildren();
   const matrix = pivotMatrix(tile, result);
+  const view = { tile, result: { ...result, cachedRows: result.rows.length }, matrix, first: 0, end: 0 };
+  displayedPivots.set(host, view);
   if (matrix.capacity || matrix.error) {
     host.append(element('p', { className: 'pivot-notice error', attrs: { role: 'alert' }, text: matrix.error || `Pivot has at least ${matrix.count} column groups; its limit is ${matrix.maximum}. Add a source or aggregate-result filter, change column dimensions, or increase the bound in Edit tile. Full pivot CSV remains available.` }));
     return;
@@ -113,6 +143,7 @@ export function renderPivot(host, tile, result, { onDrill, compact = false } = {
     const first = Math.max(0, Math.min(Math.max(0, matrix.rows.length - windowSize), Math.floor(Math.max(0, viewport.scrollTop - headerHeight) / rowHeight) - 5));
     if (first === previous) return; previous = first;
     const end = Math.min(matrix.rows.length, first + windowSize), children = [];
+    view.first = first; view.end = end;
     const spacer = count => { const tr = element('tr', { attrs: { 'aria-hidden': 'true' } }), td = element('td', { attrs: { colspan: matrix.columns.length * measureCount + 1 } }); td.style.height = `${count * rowHeight}px`; tr.append(td); return tr; };
     if (first) children.push(spacer(first));
     for (let rowIndex = first; rowIndex < end; rowIndex++) {
@@ -122,7 +153,7 @@ export function renderPivot(host, tile, result, { onDrill, compact = false } = {
       matrix.columns.forEach((column, columnIndex) => {
         const values = matrix.cells.get(JSON.stringify([key(row), key(column)]));
         tile.measures.forEach((_, measureIndex) => {
-          const value = values?.[measureIndex], label = `${title} · ${caption(column, tile.columnDimensions.length, 'All columns')} · ${measureLabel(measureIndex)}: ${values ? text(value) : 'not displayed or no qualifying cell'}`;
+          const value = values?.[tile.rowDimensions.length + tile.columnDimensions.length + measureIndex], label = `${title} · ${caption(column, tile.columnDimensions.length, 'All columns')} · ${measureLabel(measureIndex)}: ${values ? text(value) : 'not displayed or no qualifying cell'}`;
           const td = element('td', { className: !row.depth || !column.depth ? 'pivot-total' : '', text: values ? text(value) : '—', attrs: { headers: `${id(`row-${rowIndex}`)} ${columnHeaders[columnIndex].join(' ')} ${id(`measure-${columnIndex}-${measureIndex}`)}`, title: label } });
           if (values && onDrill) action(td, `${label}. View contributing records`, () => onDrill(pivotSelection(tile, row, column, measureIndex)));
           tr.append(td);

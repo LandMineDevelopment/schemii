@@ -1,5 +1,5 @@
 import { visibleMeasures, chooseConstituent } from "./measures.js";
-import { renderPivot } from './pivot.js';
+import { renderPivot, displayedPivot } from './pivot.js';
 import { element } from '#common/dom.js';
 import { createResultGrid } from './scroll-results.js';
 import { dimensionLabel, lineSeries, linePath } from './chart-dimensions.js';
@@ -9,6 +9,7 @@ import { timeSeries } from './time-analysis.js';
 import { markSelection } from './dashboard-state.js';
 import { repetitionNotice } from '#model/repetition.js';
 const colors = ['#f4b942', '#65a9ff', '#9b82f4', '#71d49a', '#f36b74', '#55c5c2'];
+const displayedCharts = new WeakMap();
 const label = value => value === null ? 'NULL' : String(value);
 const numeric = value => value !== null && value !== '' && Number.isFinite(Number(value));
 const format = value => numeric(value) ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(Number(value)) : label(value);
@@ -24,17 +25,31 @@ function actionable(node, text, callback) {
   node.onclick = event => { event.stopPropagation(); callback(); };
   node.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); callback(); } };
 }
+/** One selection boundary for marks and deliberate displayed-result capture.
+ * Query output indices stay intact until the attachment projects its columns. */
+export function visualizationSelection(host, tile, result) {
+  const calculated = result?.plan?.calculatedMeasures || [];
+  const options = [['values', 'Period values'], ...(tile.measures.length && tile.timeAnalysis && tile.timeAnalysis.comparison !== 'none' ? [['change', 'Absolute change'], ['percent', 'Percentage change']] : []), ...(tile.measures.length && tile.timeAnalysis?.runningTotal ? [['running', 'Running totals']] : [])];
+  const metric = options.some(([value]) => value === host.dataset.timeMetric) ? host.dataset.timeMetric : 'values';
+  const selected = [...timeSeries(tile, metric), ...(metric === 'values' ? calculated.filter(item => item.index != null).map(item => ({ column: item.index, drill: visibleMeasures(tile).findIndex(output => output.kind === 'calculated' && output.column === item.id) })) : [])];
+  const series = tile.kind === 'donut' ? selected.slice(0, 1) : selected;
+  const presentationTile = { ...tile, outputMeasureNames: Object.fromEntries(calculated.filter(item => item.index != null).map(item => [item.index, item.displayLabel || item.label])) };
+  return { calculated, options, metric, series, tile: presentationTile, preview: chartPreview({ ...presentationTile, measures: series }, result) };
+}
 export function displayedVisualization(host, tile, result) {
-  const allowed = ['values', ...(tile.timeAnalysis?.comparison && tile.timeAnalysis.comparison !== 'none' ? ['change', 'percent'] : []), ...(tile.timeAnalysis?.runningTotal ? ['running'] : [])];
-  const metric = allowed.includes(host.dataset.timeMetric) ? host.dataset.timeMetric : 'values';
-  const series = timeSeries(tile, metric);
-  const selected = tile.kind === 'donut' ? series.slice(0, 1) : series;
-  const preview = chartPreview({ ...tile, measures: selected }, result);
+  if (tile.kind === 'pivot') return displayedPivot(host, { ...tile, measures: visibleMeasures(tile) }, result);
+  const mounted = displayedCharts.get(host);
+  if (mounted) { tile = mounted.tile; result = mounted.result; }
+  const { metric, series, preview } = mounted?.selection || visualizationSelection(host, tile, result);
+  const visibleRows = preview.rows.slice(0, mounted?.rowCount ?? preview.rows.length);
   if (!result.columns.length) return { ...preview, metric };
-  if (['detail', 'aggregate'].includes(tile.kind)) return { ...preview, metric: 'values' };
-  const indices = tile.kind === 'kpi' ? [0] : [...tile.dimensions.map((_, index) => index), ...selected.map(item => item.column)];
-  return { ...preview, metric, cachedRows: result.rows.length, barGroupIndex: Number(host.dataset.barGroupIndex) || 0,
-    columns: indices.map(index => result.columns[index]), rows: preview.rows.map(row => indices.map(index => row[index])) };
+  if (['detail', 'aggregate'].includes(tile.kind)) return { ...preview, rows: visibleRows, metric: 'values' };
+  const comparison = result.plan?.kpiComparison;
+  const indices = tile.kind === 'kpi' ? [0, ...(comparison?.indices || [])] : [...tile.dimensions.map((_, index) => index), ...series.map(item => item.column)];
+  const names = comparison ? [comparison.label, 'Absolute variance', 'Percentage variance', `KPI assessment (${({ higher: 'higher is better', lower: 'lower is better', equal: 'exactly at baseline is better' })[comparison.favorable]})`] : [];
+  const rows = tile.kind === 'kpi' ? visibleRows.slice(0, 1) : visibleRows;
+  return { ...preview, metric, cachedRows: result.rows.length, barGroupIndex: Math.max(0, Math.min(Number(host.dataset.barGroupIndex) || 0, tile.dimensions.length - 1)),
+    columns: indices.map((index, position) => ({ ...result.columns[index], ...(tile.kind === 'kpi' && position ? { name: names[position - 1] } : {}) })), rows: rows.map(row => indices.map(index => row[index])) };
 }
 export function renderVisualization(host, tile, result, { onDrill, compact = false, modelId } = {}) {
   const originalTile=tile, calculated=result?.plan?.calculatedMeasures || [];
@@ -45,13 +60,12 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
   };
   if (tile.kind === 'pivot') { renderPivot(host,{...tile,measures:visibleMeasures(tile)},result,{onDrill:onDrill?select:null,compact}); return; }
   const fullResult = result;
-  const options = [['values', 'Period values'], ...(tile.measures.length && tile.timeAnalysis && tile.timeAnalysis.comparison !== 'none' ? [['change', 'Absolute change'], ['percent', 'Percentage change']] : []), ...(tile.measures.length && tile.timeAnalysis?.runningTotal ? [['running', 'Running totals']] : [])];
-  const metric = options.some(([value]) => value === host.dataset.timeMetric) ? host.dataset.timeMetric : 'values';
+  const selection = visualizationSelection(host, tile, result);
+  const { options, metric, series, tile: presentationTile, preview } = selection;
+  displayedCharts.set(host, { tile, result, selection, rowCount: preview.rows.length });
   host.dataset.timeMetric = metric;
-  const selectedSeries = [...timeSeries(tile,metric),...(metric==='values'?calculated.filter(item=>item.index!=null).map(item=>({column:item.index,drill:visibleMeasures(tile).findIndex(output=>output.kind==='calculated'&&output.column===item.id)})):[])];
-  tile={...tile,outputMeasureNames:Object.fromEntries(calculated.filter(item=>item.index!=null).map(item=>[item.index,item.displayLabel || item.label]))};
-  const series = tile.kind === 'donut' ? selectedSeries.slice(0, 1) : selectedSeries;
-  result = chartPreview({ ...tile, measures: series }, result);
+  tile = presentationTile;
+  result = preview;
   const redraw = focusLabel => {
     const status = host.querySelector(':scope > .stream-progress');
     renderVisualization(host, tile, fullResult, { onDrill, compact, modelId });
