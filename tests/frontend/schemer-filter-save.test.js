@@ -38,7 +38,7 @@ function fixture() {
     { id: 'filter-a', requirement: 'optional' }, { id: 'filter-b', requirement: 'optional' }, { id: 'required', kind: 'required', requirement: 'required' },
   ] } };
   const context = vm.createContext({
-    document, window: { addEventListener() {} }, structuredClone, URLSearchParams,
+    document, window: { addEventListener() {} }, location: { search: '' }, structuredClone, URLSearchParams,
     element, dashboardUpdate, currentAccount: () => new Promise(() => {}),
     createProductAssistant: () => ({}), CacheBudget: class {}, initializeUi() {}, installProductNavigation() {},
     createIconButton: ({ label }) => element('button', { text: label }),
