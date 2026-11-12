@@ -16,6 +16,7 @@ async function fixture(t) {
   const fields = Array(22).fill('0'); fields[0] = 'S'; fields[19] = '999';
   await writeFile(join(procRoot, '100/stat'), `100 (uvicorn command) ${fields.join(' ')}\n`);
   await writeFile(join(procRoot, '100/status'), 'VmRSS:\t80 kB\nNSpid:\t100\t1\n');
+  await writeFile(join(procRoot, '100/cmdline'), ['uvicorn', 'schemii.main:app', '--host', '0.0.0.0', ''].join('\0'));
   await writeFile(join(procRoot, '100/cgroup'), '0::/owned.scope\n'); await mkdir(join(cgroupRoot, 'owned.scope'), { recursive: true });
   for (const [file, value] of Object.entries({ 'memory.current': '100000', 'memory.max': '1000000', 'cpu.stat': 'usage_usec 100000\nthrottled_usec 2000\n', 'cpu.max': '200000 100000', 'cgroup.procs': '100\n' }))
     await writeFile(join(cgroupRoot, 'owned.scope', file), value);
@@ -33,7 +34,7 @@ test('cgroup snapshot measures actual budgets/counters and aggregates RSS', asyn
   assert.equal(sample.status, 'available'); assert.equal(sample.rssBytes, 81920);
   assert.equal(sample.memoryCurrentBytes, 100000); assert.equal(sample.memoryLimitBytes, 1000000);
   assert.equal(sample.cpuUsageUsec, 100000); assert.equal(sample.quotaCpus, 2);
-  assert.deepEqual(sample.processes, [{ pid: 100, birthTick: '999', rssBytes: 81920, namespacePid: 1, threadStatus: 'not_available', fdStatus: 'not_available' }]);
+  assert.deepEqual(sample.processes, [{ pid: 100, birthTick: '999', rssBytes: 81920, namespacePid: 1, role: 'api', threadStatus: 'not_available', fdStatus: 'not_available' }]);
 });
 test('stale PID, replaced cgroup and missing counters fail unavailable without zeros', async t => {
   const f = await fixture(t);
@@ -61,6 +62,40 @@ test('busy cursor, wrong endpoint and stale internal observations never manufact
   assert(!('metadataActive' in combineObservation(receipt, { schemii: app }, internal(now - 20000), { now })));
   const unavailable = combineObservation(receipt, { schemii: { status: 'unavailable' } }, internal(now), { now });
   assert(!('appRssBytes' in unavailable));
+});
+test('API identity distinguishes the verified worker from shells, unknown sidecars and replacements', async t => {
+  const f = await fixture(t), app = await sampleContainer(f.container, f), now = Date.now();
+  const shell = { pid: 101, birthTick: '1000', namespacePid: 2, role: 'launcher_shell', rssBytes: 100 };
+  const qualified = combineObservation(receipt, { schemii: { ...app, processes: [...app.processes, shell] } }, internal(now), { now });
+  assert.equal(qualified.apiProcesses, 1);
+  for (const peer of [{ ...shell, role: 'unknown' }, { ...shell, role: 'api' }]) {
+    const value = combineObservation(receipt, { schemii: { ...app, processes: [...app.processes, peer] } }, internal(now), { now });
+    assert(!('apiProcesses' in value)); assert.equal(value.qualification.apiProcessScope, 'worker_count_unverified');
+  }
+  await rm(join(f.procRoot, '100/cmdline'));
+  const unqualified = combineObservation(receipt, { schemii: await sampleContainer(f.container, f) }, internal(now), { now });
+  assert(!('apiProcesses' in unqualified));
+  const replaced = combineObservation(receipt, { schemii: { ...app, processes: app.processes.map(value => ({ ...value, birthTick: 'replacement' })) } }, internal(now), { now, previous: qualified });
+  assert.equal(replaced.status, 'unavailable'); assert.equal(replaced.reason, 'api_process_identity_changed');
+});
+test('run-owned source/job gauges require fresh qualified independent evidence and never aggregate substitution', async t => {
+  const f = await fixture(t), app = await sampleContainer(f.container, f), now = Date.now(), runId = 'load_0123456789abcdef';
+  const owned = { version: 1, at: new Date(now).toISOString(), status: 'available', runId,
+    source: { version: 1, at: new Date(now).toISOString(), status: 'available',
+      method: 'independent_pg_stat_activity_exact_role_database_application_pid_start',
+      authority: { runId, kind: 'exclusive_source_role', exclusiveToRun: true, database: 'owned', role: 'owned', applicationName: 'schemii', provisioningReceipt: '/private/provisioned.json' }, live: [], captured: [], ownedBackends: 0 },
+    work: { version: 1, at: new Date(now).toISOString(), status: 'available', runId, activeJobs: 0, jobScope: 'immutable_adapter_creates_no_jobs' } };
+  const value = combineObservation(receipt, { schemii: app }, internal(now), { now, ownership: owned });
+  assert.equal(value.ownedBackends, 0); assert.equal(value.activeJobs, 0); assert.equal(value.qualification.capacityEligible, false);
+  for (const ownership of [{ ...owned, source: { ...owned.source, status: 'unavailable' } },
+    { ...owned, work: { ...owned.work, at: '2000-01-01' } }, { ...owned, work: { ...owned.work, status: 'unavailable' } }]) {
+    const unknown = combineObservation(receipt, { schemii: app }, internal(now), { now, ownership });
+    assert.equal(unknown.status, 'unavailable'); assert(!('ownedBackends' in unknown));
+  }
+  const changedScope = { ...owned, source: { ...owned.source, authority: { ...owned.source.authority, role: 'replacement' } } };
+  assert.equal(combineObservation(receipt, { schemii: app }, internal(now), { now, ownership: changedScope, previous: value }).reason, 'owned_authority_or_journal_changed');
+  const oldJournal = { ...value, ownership: { ...owned, work: { ...owned.work, executions: [{ id: 'private-execution' }] } } };
+  assert.equal(combineObservation(receipt, { schemii: app }, internal(now), { now, ownership: owned, previous: oldJournal }).reason, 'owned_authority_or_journal_changed');
 });
 test('busy or unqualified raw registry omits the combined session gauge without inventing zeros', async t => {
   const f = await fixture(t), app = await sampleContainer(f.container, f), now = Date.now();
