@@ -11,8 +11,9 @@ import { readExecution } from '#common/query-execution.js';
 import { modelSelect, disposeSelects } from '#model/select.js';
 import { renderParameterValues } from '#model/filter-controls.js';
 import { newTile, dashboardUpdate, TILE_TYPES } from './dashboard-state.js';
+import { modelUpgradeDraft, modelUpgradeIssues, repairUpgradeIssue } from './model-upgrade.js';
 import { appliedFilterSummary } from './filter-summary.js';
-import { ResultCache, DashboardResultGroup, CacheBudget, readResultStream } from './result-cache.js';
+import { ResultCache, DashboardResultGroup, CacheBudget, DrillCacheRegistry, readResultStream } from './result-cache.js';
 import { renderVisualization } from './visualizations.js';
 import { openTileEditor } from './tile-editor.js';
 import { openExpanded, openSql } from './result-viewer.js';
@@ -20,6 +21,7 @@ import { openExpanded, openSql } from './result-viewer.js';
 const $ = id => document.getElementById(id), API = '/api/v1/schemer/dashboards';
 let dashboard, model, catalog, library = [], modelList = [], slicerDraft, slicersDirty = false, saving = false, epoch = 0;
 let filtersExpanded = false, author = false, modelAuthor = false;
+let upgradeReview;
 let permissions = { edit: false, export: false, drill: false };
 const selectionBody = (source = dashboard) => ({ selections: source.selections });
 function renderAccess() {
@@ -54,7 +56,7 @@ const assistant = createProductAssistant({
     if (id !== dashboard?.id) return;
     library = (await requestJson(API)).dashboards;
     renderLibrary();
-    if (slicersDirty || saving) return 'The saved dashboard changed. Your current filter choices are preserved. Apply or discard them before reloading.';
+    if (slicersDirty || saving || upgradeReview) return 'The saved dashboard changed. Your current changes are preserved. Finish or cancel them before reloading.';
     if (library.some(item => item.id === id)) {
       await openDashboard(id);
       return 'Dashboard refreshed with the assistant’s saved changes.';
@@ -92,7 +94,7 @@ async function closeTileStreams(id) {
   const group = streams.get(id); streams.delete(id);
   if (group) await Promise.all([group.main, ...group.drills.values()].map(cache => cache.dispose()));
 }
-function getStream(tile, selection = null) {
+function getStream(tile, selection = null, { refresh = false } = {}) {
   let group = streams.get(tile.id);
   const create = selected => {
     const origin = dashboard;
@@ -117,14 +119,18 @@ function getStream(tile, selection = null) {
     };
     return cache;
   };
-  if (!group) { group = { main: create(null), drills: new Map() }; streams.set(tile.id, group); }
+  if (!group) { group = { main: create(null), drills: new DrillCacheRegistry() }; streams.set(tile.id, group); }
   if (!selection) return group.main;
   const key = JSON.stringify(selection);
+  if (refresh) { const previous = group.drills.get(key); group.drills.delete(key); previous?.dispose(); }
   if (!group.drills.has(key)) group.drills.set(key, create(selection));
   return group.drills.get(key);
 }
 
-function checkLeave() { return !slicersDirty || window.confirm('Discard unapplied slicer changes?'); }
+function checkLeave() {
+  if (upgradeReview?.dirty() && !window.confirm('Discard the dashboard upgrade repairs?')) return false;
+  return !slicersDirty || window.confirm('Discard unapplied slicer changes?');
+}
 function setSaving(value) {
   saving = value;
   for (const id of ['create-dashboard', 'welcome-create', 'rename-dashboard', 'duplicate-dashboard', 'delete-dashboard', 'manage-dashboard-filters', 'add-tile', 'apply-slicers', 'refresh-dashboard', 'update-dashboard-model']) $(id).disabled = value;
@@ -194,8 +200,7 @@ function renderFilterDisclosure() {
   if (applied.length > 3) $('filter-summary').append(element('span', { className: 'hint', text: `+${applied.length - 3} more`, attrs: { title: applied.slice(3).join('\n') } }));
   if (slicersDirty) $('filter-summary').append(element('span', { className: 'filter-summary-pending', text: 'Unapplied changes' }));
 }
-async function loadDomainOptions(context) {
-  const origin = model;
+async function loadDomainOptions(context, origin = model) {
   const authoring = !!context.draft, domain = context.domain || context.input?.domain;
   const binding = authoring ? { definition: origin.definition, domain } : { scopeId: context.scope.id, alternativeId: context.alternative.id, parameterId: context.input.id };
   const response = await requestJson(permissions.edit && modelAuthor ? `/api/v1/schemoo/models/${origin.id}/${authoring ? 'domain-values' : 'parameter-values'}` : `${API}/${dashboard.id}/parameter-values`, { method: 'POST', body: { expectedRevision: origin.revision, ...binding, search: context.search, consoleId: `con_${crypto.randomUUID().replaceAll('-', '')}` } });
@@ -271,7 +276,7 @@ async function runAll() {
 }
 function expand(tile) {
   if (!readyToRun()) return;
-  openExpanded({ tile, modelId: dashboard.modelId, canExport: permissions.export, canDrill: permissions.drill, canViewSql: permissions.edit, cache: getStream(tile), createDrillCache: selection => getStream(tile, selection), onRefresh: () => void runTile(tile) });
+  openExpanded({ tile, modelId: dashboard.modelId, canExport: permissions.export, canDrill: permissions.drill, canViewSql: permissions.edit, cache: getStream(tile), createDrillCache: (selection, options) => getStream(tile, selection, options), onRefresh: () => void runTile(tile) });
 }
 
 async function showTileSql(tile) {
@@ -280,13 +285,6 @@ async function showTileSql(tile) {
   if (!readyToRun()) return;
   try { const plan = await requestJson(tileUrl(tile, 'plan'), { method: 'POST', body: { expectedRevision: dashboard.revision } }); openSql(plan, `${tile.title} · generated SQL`); }
   catch (error) { message(error.message); }
-}
-async function loadCurrentModel({ catalogRequired = false } = {}) {
-  const context = await requestJson(`${API}/${dashboard.id}/context`);
-  const source = context.model;
-  catalog = context.catalog; permissions = context.permissions;
-  model = source;
-  return source;
 }
 async function refreshDashboard() {
   const origin = dashboard, previousModel = model;
@@ -336,29 +334,113 @@ async function refreshDashboard() {
 }
 async function updateDashboardModel() {
   const origin = dashboard;
-  if (!origin || saving) return;
-  setSaving(true); message('Validating this dashboard against the current model…');
-  try {
-    const source = await loadCurrentModel({ catalogRequired: true });
-    if (dashboard?.id !== origin.id) return;
-    if (source.revision !== origin.modelRevision) {
+  if (!origin || saving || upgradeReview || !checkLeave()) return;
+  const dialog = element('dialog', { className: 'ui-dialog model-upgrade-dialog', attrs: { 'aria-label': 'Review dashboard model upgrade' } });
+  const body = element('div', { className: 'model-upgrade-body' });
+  const error = element('p', { className: 'error-message', attrs: { role: 'alert' } });
+  const status = element('p', { className: 'hint', text: 'Loading the current model and checking dashboard references…', attrs: { role: 'status' } });
+  const save = element('button', { type: 'button', className: 'ui-button primary', text: 'Save repairs & upgrade' });
+  const cancel = element('button', { type: 'button', className: 'ui-button', text: 'Cancel' });
+  const retry = element('button', { type: 'button', className: 'ui-button', text: 'Retry loading model' });
+  let context, draft, initial, pending = false, blocked = false, editor;
+  const review = { dirty: () => !!draft && JSON.stringify(draft) !== initial, dispose: () => { editor?.close(); dialog.close(); } };
+  upgradeReview = review;
+  const current = () => upgradeReview === review && dashboard === origin && dialog.open;
+  const close = () => { if (!pending && (!review.dirty() || window.confirm('Discard the dashboard upgrade repairs?'))) dialog.close(); };
+  function render() {
+    body.replaceChildren();
+    const issues = modelUpgradeIssues(draft, context.model, context.catalog);
+    status.textContent = `Review v${origin.modelRevision} → v${context.model.revision}. ${issues.length ? `${issues.length} item${issues.length === 1 ? '' : 's'} need repair.` : 'All dashboard references are ready for server validation.'}`;
+    body.append(element('p', { className: 'hint', text: 'Edit or remove affected tiles and review changed filters below. Everything stays in this draft until one validated save upgrades the dashboard.' }));
+    body.append(element('a', { className: 'model-repair-link', text: 'Review or repair the source model in Schemoo', attrs: { href: `/schemoo?model=${encodeURIComponent(context.model.id)}`, target: '_blank', rel: 'noopener' } }));
+    function showIssues(host, items) {
+      for (const issue of items) {
+        const row = element('div', { className: 'upgrade-issue' }, [element('p', { text: issue.message })]);
+        if (['removeOptional', 'resetSelection', 'removeFilter', 'clearTime'].includes(issue.action)) {
+          const labels = { removeOptional: 'Remove offered filter', removeFilter: 'Remove report filter', resetSelection: 'Reset saved choice', clearTime: 'Remove time analysis' };
+          const repair = element('button', { type: 'button', className: 'ui-button', text: labels[issue.action] });
+          repair.onclick = () => { repairUpgradeIssue(draft, issue); render(); }; row.append(repair);
+        }
+        host.append(row);
+      }
+    }
+    const filters = element('section', { className: 'upgrade-section' }, [element('h3', { text: 'Dashboard filters & source' })]);
+    const dashboardIssues = issues.filter(issue => !issue.tileId);
+    if (dashboardIssues.length) showIssues(filters, dashboardIssues);
+    else filters.append(element('p', { className: 'hint', text: 'Saved filter references are compatible. Missing runtime values can be chosen after upgrading.' }));
+    body.append(filters);
+    for (const tile of draft.tiles) {
+      const card = element('section', { className: 'upgrade-section', attrs: { 'aria-label': `Upgrade tile ${tile.title}` } });
+      const actions = element('div', { className: 'actions' });
+      const edit = element('button', { type: 'button', className: 'ui-button', text: `Edit ${tile.title}` });
+      edit.onclick = () => {
+        editor = openTileEditor({ tile, model: context.model, catalog: context.catalog, saveLabel: 'Apply repair',
+          onLoadDomain: options => loadDomainOptions(options, context.model), onSave: edited => {
+            if (!current()) throw new Error('The upgrade review is no longer open. Reopen it to repair this dashboard.');
+            draft.tiles = draft.tiles.map(item => item.id === edited.id ? structuredClone(edited) : item); render();
+          } });
+      };
+      const remove = element('button', { type: 'button', className: 'ui-button', text: `Remove ${tile.title}` });
+      remove.onclick = () => { draft.tiles = draft.tiles.filter(item => item.id !== tile.id); render(); };
+      actions.append(edit, remove); card.append(element('h3', { text: tile.title }), actions);
+      const tileIssues = issues.filter(issue => issue.tileId === tile.id);
+      if (tileIssues.length) showIssues(card, tileIssues);
+      else card.append(element('p', { className: 'hint', text: 'Fields and filter references are compatible.' }));
+      body.append(card);
+    }
+    if (!draft.tiles.length) body.append(element('p', { className: 'empty-state', text: 'No tiles remain. Save an empty dashboard on the new model, then add tiles when ready.' }));
+    save.disabled = pending || blocked || issues.length > 0;
+  }
+  async function load() {
+    retry.hidden = true; save.disabled = true; error.textContent = '';
+    try {
+      const loaded = await requestJson(`${API}/${origin.id}/context`);
+      if (!current()) return;
+      if (!loaded.permissions.edit) throw new Error('Dashboard editing access is no longer available. Close this review and refresh the dashboard.');
+      context = structuredClone(loaded); draft = modelUpgradeDraft(origin, context.model); initial = JSON.stringify(draft); render();
+    } catch (failure) {
+      if (!current()) return;
+      status.textContent = 'The current model could not be loaded. Your saved dashboard is unchanged.';
+      error.textContent = failure.message; retry.hidden = false;
+    }
+  }
+  retry.onclick = load;
+  save.onclick = async () => {
+    if (pending || blocked || !draft || !current()) return;
+    if (modelUpgradeIssues(draft, context.model, context.catalog).length) { render(); return; }
+    const request = structuredClone(draft);
+    pending = true; setSaving(true); save.disabled = true; cancel.disabled = true; body.inert = true; error.textContent = '';
+    status.textContent = 'Validating and saving all repairs with the model upgrade…';
+    let saved;
+    try {
       await stopRuns();
-      const eligible = new Set(source.definition.scopes.filter(scope => scope.requirement === 'optional').map(scope => scope.id));
-      const optionalFilters = (origin.optionalFilters || []).filter(id => eligible.has(id));
-      const allowedSelections = new Set([...optionalFilters, ...source.definition.scopes.filter(scope => scope.kind === 'required' && scope.requirement !== 'optional').map(scope => scope.id)]);
-      const selections = Object.fromEntries(Object.entries(origin.selections).filter(([id]) => allowedSelections.has(id)));
-      const saved = await requestJson(`${API}/${origin.id}`, { method: 'PUT', body: dashboardUpdate(origin, { modelRevision: source.revision, optionalFilters, selections }) });
-      if (dashboard?.id !== origin.id) return;
-      dashboard = saved; library = library.map(item => item.id === saved.id ? saved : item);
+      if (!current()) return;
+      saved = await requestJson(`${API}/${origin.id}`, { method: 'PUT', body: request });
+      if (!current()) return;
+      dashboard = saved; model = context.model; catalog = context.catalog; permissions = context.permissions;
+      library = library.map(item => item.id === saved.id ? saved : item);
+      slicersDirty = false; tileStates.clear(); dialog.close();
+      renderLibrary(); renderHeading(); renderModelUpdate(); renderSlicers(); renderTiles();
+      message('Dashboard repairs and model upgrade saved.');
+    } catch (failure) {
+      if (!current()) return;
+      blocked = ['dashboard_revision_conflict', 'model_revision_conflict', 'network_error', 'request_timeout', 'invalid_response'].includes(failure.code);
+      render(); status.textContent = 'The saved dashboard has not been replaced in this view. Your repair draft is kept.';
+      const details = failure.details?.issues?.map(issue => issue.message).filter(Boolean).join(' ');
+      error.textContent = `${failure.message}${details ? ` ${details}` : ''}${blocked ? ' Close this review and refresh the dashboard before trying again.' : ''}`;
+    } finally {
+      pending = false; setSaving(false); cancel.disabled = false; body.inert = false;
+      if (current()) save.disabled = blocked || modelUpgradeIssues(draft, context.model, context.catalog).length > 0;
     }
-    slicersDirty = false; tileStates.clear(); renderLibrary(); renderHeading(); renderModelUpdate(); renderSlicers(); renderTiles();
-    message('Dashboard updated to the current model.'); await runAll();
-  } catch (error) {
-    if (dashboard?.id === origin.id) {
-      renderHeading(); renderModelUpdate();
-      message(`Dashboard was not updated. ${error.message}`);
-    }
-  } finally { setSaving(false); }
+    if (saved && dashboard === saved) void runAll();
+  };
+  cancel.onclick = close;
+  dialog.oncancel = event => { event.preventDefault(); close(); };
+  dialog.onclose = () => { editor?.close(); if (upgradeReview === review) upgradeReview = null; dialog.remove(); };
+  dialog.append(element('header', { className: 'ui-dialog__head' }, [element('h2', { text: 'Review dashboard model upgrade' }), icon('close', 'Close model upgrade review', close)]), status, body,
+    element('footer', { className: 'ui-dialog__actions' }, [error, retry, cancel, save]));
+  document.body.append(dialog); dialog.showModal(); cancel.focus();
+  await load();
 }
 function editTile(tile) {
   if (!model || saving) return;
@@ -381,6 +463,7 @@ async function deleteTile(tile) {
   } });
 }
 async function openDashboard(id) {
+  upgradeReview?.dispose();
   stopRuns(); const version = epoch; message('Loading dashboard…'); model = null; $('dashboard-content').hidden = true;
   $('filter-summary').hidden = true;
   $('toggle-dashboard-filters').setAttribute('aria-expanded', 'false');
@@ -504,9 +587,9 @@ $('delete-dashboard').onclick = async () => {
     if (library.length) await openDashboard(library[0].id); else { $('dashboard-content').hidden = true; $('empty-dashboard').hidden = false; history.replaceState(null, '', '/schemer'); }
   } });
 };
-window.addEventListener('schemii:logout', () => { slicersDirty = false; void stopRuns(); $('tile-grid').replaceChildren(); });
-window.addEventListener('pagehide', () => { void dashboardGroup?.close(); for (const group of streams.values()) for (const cache of [group.main, ...group.drills.values()]) void cache.close(); });
-window.addEventListener('beforeunload', event => { if (slicersDirty) { event.preventDefault(); event.returnValue = ''; } });
+window.addEventListener('schemii:logout', () => { upgradeReview?.dispose(); slicersDirty = false; void stopRuns(); $('tile-grid').replaceChildren(); });
+window.addEventListener('pagehide', () => { upgradeReview?.dispose(); void dashboardGroup?.close(); for (const group of streams.values()) for (const cache of [group.main, ...group.drills.values()]) void cache.close(); });
+window.addEventListener('beforeunload', event => { if (slicersDirty || upgradeReview?.dirty()) { event.preventDefault(); event.returnValue = ''; } });
 initializeUi(); installProductNavigation($('product-navigation'), { activeProduct: 'schemer' });
 async function initialize() {
   try {

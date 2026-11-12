@@ -11,7 +11,7 @@ import { TILE_TYPES, tileErrors, fieldChoices, fieldKey } from './dashboard-stat
 function icon(name, label, onClick, disabled = false) {
   const button = createIconButton({ icon: name, label, className: 'ui-button' }); button.onclick = onClick; button.disabled = disabled; return button;
 }
-export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
+export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, saveLabel = 'Apply & run' }) {
   const current = structuredClone(tile), original = JSON.stringify(tile);
   current.selections ||= {};
   const modelDraft = { ...structuredClone(model.definition), fields: [], selections: current.selections, reportFilters: current.reportFilters };
@@ -104,7 +104,7 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
     if (JSON.stringify(current) !== original && !window.confirm('Discard changes to this tile?')) return;
     dialog.close();
   }
-  const save = element('button', { type: 'button', className: 'ui-button primary', text: 'Apply & run' });
+  const save = element('button', { type: 'button', className: 'ui-button primary', text: saveLabel });
   save.onclick = async () => {
     if (pending) return;
     current.title = current.title.trim(); const errors = tileErrors(current);
@@ -121,4 +121,5 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
   dialog.oncancel = event => { event.preventDefault(); close(); };
   dialog.addEventListener('close', () => { disposeSelects(dialog); dialog.remove(); }, { once: true });
   document.body.append(dialog); render(); dialog.showModal(); name.focus();
+  return dialog;
 }

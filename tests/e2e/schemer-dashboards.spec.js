@@ -60,7 +60,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
       : tile.kind === 'kpi' ? { rows: [[3]], columns: [{ name: 'COUNT id', dataType: 'bigint' }], size: tile.limit }
         : { rows: manyBars || manyRows ? Array.from({ length: 500 }, (_, index) => [`Organization ${index + 1}`, index + 1]) : [['HQ', 3], ['Branch', 2]], columns: [{ name: 'org', dataType: 'text' }, { name: 'COUNT id', dataType: 'bigint' }], size: tile.limit };
   }
-  const requests = [], errors = []; page.on('pageerror', error => errors.push(error.message));
+  const requests = [], writes = [], errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.context().route('**/api/v1/**', async route => {
     const request = route.request(), url = new URL(request.url()), body = request.headers()['content-type']?.includes('application/x-www-form-urlencoded') ? JSON.parse(new URLSearchParams(request.postData()).get('payload')) : request.postDataJSON();
     let response;
@@ -71,7 +71,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
     else if (url.pathname === '/api/v1/schemoo/catalog') response = fixture.catalog;
     else if (url.pathname === '/api/v1/schemer/dashboards') response = { dashboards: multidimensional === 'many' ? [fixture.dashboard, ...Array.from({ length: 4 }, (_, index) => ({ ...fixture.dashboard, id: `other-${index}`, name: `Long multidimensional dashboard ${index}` }))] : [fixture.dashboard] };
     else if (url.pathname === `/api/v1/schemer/dashboards/${dashboardId}`) {
-      if (request.method() === 'PUT') fixture.dashboard = { ...fixture.dashboard, ...body, revision: fixture.dashboard.revision + 1 };
+      if (request.method() === 'PUT') { writes.push(body); fixture.dashboard = { ...fixture.dashboard, ...body, revision: fixture.dashboard.revision + 1 }; }
       response = fixture.dashboard;
     } else if (url.pathname === `/api/v1/schemer/dashboards/${dashboardId}/executions/stream`) {
       requests.push({ body, path: url.pathname });
@@ -89,7 +89,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
     } else response = {};
     await route.fulfill({ status: 200, json: response });
   });
-  return { fixture, requests, errors };
+  return { fixture, requests, writes, errors };
 }
 
 test('a changed Schemoo model blocks query refresh until the dashboard is revalidated and updated', async ({ page }) => {
@@ -103,6 +103,7 @@ test('a changed Schemoo model blocks query refresh until the dashboard is revali
   expect(requests).toHaveLength(0);
 
   await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  await page.getByRole('button', { name: 'Save repairs & upgrade', exact: true }).click();
   await expect(update).toBeHidden();
   await expect(page.locator('.analytics-tile')).toContainText('2 groups');
   expect(fixture.dashboard.modelRevision).toBe(2);
@@ -160,6 +161,7 @@ test('refresh checks for a Schemoo model update before it reruns dashboard queri
   expect(requests.filter(request => request.path.endsWith('/executions/stream')).length).toBe(executionsBeforeRefresh);
 
   await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  await page.getByRole('button', { name: 'Save repairs & upgrade', exact: true }).click();
   await expect(page.locator('#model-update')).toBeHidden();
   expect(fixture.dashboard.modelRevision).toBe(2);
   expect(errors).toEqual([]);
@@ -740,4 +742,107 @@ test('bars cluster under one dimension with consistent colors and regroup withou
     { table: 'person', column: 'name', value: 'Alex' },
   ]);
   expect(errors).toEqual([]);
+});
+
+
+test('model upgrade repairs hidden fields locally and saves the new revision in one request', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.model.definition.exposedFields = [field('id')];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('field is no longer exposed');
+  await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
+  await review.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('button', { name: 'Remove Dimensions 1', exact: true }).click();
+  await editor.getByRole('combobox', { name: 'Add dimensions', exact: true }).fill('id');
+  await page.getByRole('option', { name: 'Personnel · id', exact: true }).click();
+  await editor.getByRole('tab', { name: 'Drill-through columns' }).click();
+  await editor.getByRole('button', { name: 'Remove Drill-through columns 2', exact: true }).click();
+  await editor.getByRole('button', { name: 'Apply repair', exact: true }).click();
+  expect(writes).toHaveLength(0);
+  expect(fixture.dashboard.modelRevision).toBe(1);
+  expect(fixture.dashboard.tiles[0].dimensions).toEqual([field('org')]);
+  await expect(review).toContainText('All dashboard references are ready');
+  await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+  await expect(review).toHaveCount(0);
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toMatchObject({ expectedRevision: 1, modelRevision: 2, tiles: [{ dimensions: [field('id')], detailFields: [field('id')] }] });
+  expect(errors).toEqual([]);
+});
+
+test('cancel preserves an incompatible dashboard and explicit tile removal permits an empty upgrade', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.dashboard.tiles[0].dimensions = [{ table: 'removed_alias', column: 'old', aggregate: 'none' }];
+  const saved = structuredClone(fixture.dashboard);
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  let review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('source was removed from the model');
+  await review.getByRole('button', { name: 'Remove Positions by org', exact: true }).click();
+  page.once('dialog', dialog => dialog.accept());
+  await review.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(fixture.dashboard).toEqual(saved); expect(writes).toHaveLength(0);
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await review.getByRole('button', { name: 'Remove Positions by org', exact: true }).click();
+  await expect(review).toContainText('No tiles remain');
+  await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+  await expect(review).toHaveCount(0);
+  expect(writes).toHaveLength(1); expect(writes[0].tiles).toEqual([]);
+  expect(fixture.dashboard.modelRevision).toBe(2); expect(errors).toEqual([]);
+});
+
+test('upgrade review identifies stale comparison operands and inactive scope choices for explicit repair', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.model.definition.exposedFields = [field('org'), field('id'), field('name')];
+  fixture.dashboard.selections.organization.alternativeId = 'old-choice';
+  fixture.dashboard.optionalFilters = ['removed-filter'];
+  fixture.dashboard.selections['removed-filter'] = { active: false, values: {} };
+  fixture.dashboard.tiles[0].reportFilters = [{ id: 'compare', label: 'Old comparison', mode: 'rows', conditions: [{ ...field('id'), operator: 'eq', compareColumn: 'removed-column' }] }];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('removed-column');
+  await review.getByRole('button', { name: 'Remove offered filter', exact: true }).click();
+  await review.getByRole('button', { name: 'Reset saved choice', exact: true }).click();
+  await review.getByRole('button', { name: 'Remove report filter', exact: true }).click();
+  expect(writes).toHaveLength(0);
+  await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+  await expect(review).toHaveCount(0);
+  expect(writes[0].selections).toEqual({}); expect(writes[0].optionalFilters).toEqual([]);
+  expect(writes[0].tiles[0].reportFilters).toEqual([]); expect(errors).toEqual([]);
+});
+
+for (const [status, code] of [[503, 'dashboard_storage_unavailable'], [409, 'dashboard_revision_conflict'], [409, 'model_revision_conflict']]) {
+  test(`upgrade ${code} keeps the saved dashboard and local repairs`, async ({ page }) => {
+    const { fixture, errors } = await mock(page, { modelRevision: 2 });
+    const saved = structuredClone(fixture.dashboard);
+    await page.goto('/schemer');
+    await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+    const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+    await review.getByRole('button', { name: 'Remove Positions by org', exact: true }).click();
+    await page.route(`**/api/v1/schemer/dashboards/${dashboardId}`, route => route.request().method() === 'PUT'
+      ? route.fulfill({ status, json: { error: { code, message: 'Save rejected by server' } } }) : route.fallback());
+    await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+    await expect(review.getByRole('alert')).toContainText('Save rejected by server');
+    await expect(review).toContainText('No tiles remain');
+    expect(fixture.dashboard).toEqual(saved);
+    if (status === 409) await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
+    else await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeEnabled();
+    expect(errors).toEqual([]);
+  });
+}
+
+test('missing physical model sources give a reachable Schemoo repair path without saving', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.catalog.tables = [];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('source personnel is missing from the database');
+  await expect(review.getByRole('link', { name: 'Review or repair the source model in Schemoo' })).toHaveAttribute('href', `/schemoo?model=${modelId}`);
+  await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
+  expect(writes).toHaveLength(0); expect(fixture.dashboard.modelRevision).toBe(1); expect(errors).toEqual([]);
 });

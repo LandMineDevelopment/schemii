@@ -89,9 +89,10 @@ def test_save_checks_exposure_types_and_optional_scope_ownership(monkeypatch):
     routes.validate_dashboard(services, "alice", create(tiles=[tile]))
     routes.validate_dashboard(services, "alice", create(tiles=[tile], optionalFilters=["optional"],
         selections={"optional": {"active": True}}))
-    # Removed model scopes from an older dashboard are inert and remain readable
-    # until the next client save prunes them.
-    routes.validate_dashboard(services, "alice", create(tiles=[tile], selections={"removed": {}}))
+    # Saved historical dashboards remain readable, but a new save must explicitly
+    # repair stale references, including inactive filter choices.
+    with pytest.raises(ValueError, match="always-evaluated"):
+        routes.validate_dashboard(services, "alice", create(tiles=[tile], selections={"removed": {}}))
     with pytest.raises(ValueError, match="marked optional"):
         routes.validate_dashboard(services, "alice", create(tiles=[tile], optionalFilters=["required"]))
     with pytest.raises(ValueError, match="exposed optional"):
@@ -283,3 +284,104 @@ def test_postgres_storage_errors_do_not_leak_driver_details():
     with pytest.raises(DashboardStorageUnavailableError, match="temporarily unavailable") as caught:
         PostgresDashboardRepository(unavailable).get("alice", "dashboard")
     assert "private" not in str(caught.value)
+
+
+@pytest.mark.parametrize("target", ["dashboard", "tile"])
+@pytest.mark.parametrize("selection,message", [
+    ({"alternativeId": "removed", "active": False}, "unavailable model alternative"),
+    ({"alternativeId": "choose", "values": {"removed": "old"}}, "unavailable model input"),
+    ({"values": {"removed": "old"}}, "unavailable model input"),
+])
+def test_save_rejects_stale_inactive_selection_references(monkeypatch, target, selection, message):
+    from schemii.schemer import dashboard_routes as routes
+    from schemii.schemoo.models import ModelDefinition
+
+    scopes = [{"id": key, "kind": kind, "alternatives": [{
+        "id": "choose", "inputs": [{"id": "value", "type": "text"}], "conditions": [],
+    }]} for key, kind in [("required", "required"), ("conditional", "conditional")]]
+    model = SimpleNamespace(definition=ModelDefinition.model_validate({
+        "root": "people", "nodes": [{"id": "people", "table": "people", "label": "People"}],
+        "scopes": scopes,
+    }), catalog_fingerprint="")
+    services = SimpleNamespace(admin_config=SimpleNamespace(console=SimpleNamespace(maximum_statements_per_run=20)))
+    monkeypatch.setattr(routes, "load_model", lambda *args: model)
+    monkeypatch.setattr(routes, "model_catalog", lambda *args: {
+        "fingerprint": "", "tables": [{"name": "people", "columns": [{"name": "id", "dataType": "integer"}]}], "relationships": [],
+    })
+    tile = {"id": "tile", "title": "People", "kind": "detail", "detailFields": [FIELD]}
+    changes = {"selections": {"required": selection}} if target == "dashboard" else {
+        "tiles": [{**tile, "selections": {"conditional": selection}}],
+    }
+    with pytest.raises(ValueError, match=message):
+        routes.validate_dashboard(services, "alice", create(**changes))
+    # A model input can still be left empty for the viewer to enter later.
+    if target == "dashboard":
+        routes.validate_dashboard(services, "alice", create(selections={"required": {"alternativeId": "choose"}}))
+    else:
+        routes.validate_dashboard(services, "alice", create(tiles=[{**tile, "selections": {"conditional": {"alternativeId": "choose"}}}]))
+
+
+@pytest.mark.parametrize("change", ["removed_field", "removed_source"])
+def test_dashboard_repairs_and_model_upgrade_are_one_atomic_save(monkeypatch, change):
+    from fastapi.testclient import TestClient
+    from schemii.main import create_app, create_services
+    from schemii.schemer import dashboard_routes as routes
+    from schemii.schemer.dashboard_store import DashboardStorageUnavailableError
+    from schemii.schemoo.models import ModelCreate, ModelDefinition, ModelUpdate
+
+    services = create_services()
+    app = create_app(services=services)
+    owner = "user_local_prototype"
+    catalog = {"fingerprint": "", "namespace": "public", "tables": [{"name": "people", "columns": [
+        {"name": "id", "dataType": "integer"}, {"name": "name", "dataType": "text"},
+    ]}], "relationships": []}
+    monkeypatch.setattr(routes, "model_catalog", lambda *args: catalog)
+    definition = ModelDefinition.model_validate({
+        "root": "people", "nodes": [{"id": "people", "table": "people", "label": "People"},
+            {"id": "other", "table": "people", "label": "Other role"}],
+        "edges": [{"id": "join", "kind": "logical", "source": "people", "sourceColumn": "id",
+            "target": "other", "targetColumn": "id", "enabled": True}],
+        "exposedFields": [FIELD, {"table": "people", "column": "name"}, {"table": "other", "column": "id"}],
+    })
+    with TestClient(app, base_url="http://localhost") as client:
+        connection = client.post("/api/v1/connections", json={"name": "Warehouse", "host": "localhost",
+            "database": "warehouse", "username": "reader"}).json()
+        model = services.models.create(owner, ModelCreate(name="People", connection_id=connection["id"],
+            database="warehouse", namespace="public"))
+        model = services.models.update(owner, model.id, ModelUpdate(expected_revision=1, name="People", definition=definition))
+        old_field = {"table": "other", "column": "id"} if change == "removed_source" else {"table": "people", "column": "name"}
+        original_tile = {"id": "tile", "title": "People", "kind": "detail", "detailFields": [old_field]}
+        body = {"name": "Repairable", "modelId": model.id, "modelRevision": 2, "tiles": [original_tile]}
+        created = client.post("/api/v1/schemer/dashboards", json=body)
+        assert created.status_code == 201, created.text
+        saved = created.json()
+        path = "/api/v1/schemer/dashboards/" + saved["id"]
+        if change == "removed_source":
+            definition = definition.model_copy(update={"nodes": definition.nodes[:1], "edges": [], "exposedFields": definition.exposedFields[:2]})
+        else:
+            definition = definition.model_copy(update={"exposedFields": [definition.exposedFields[0], definition.exposedFields[2]]})
+        model = services.models.update(owner, model.id, ModelUpdate(expected_revision=2, name="People", definition=definition))
+        request = {**body, "expectedRevision": saved["revision"], "modelRevision": model.revision}
+        failed = client.put(path, json=request)
+        assert failed.status_code == 422, failed.text
+        assert client.get(path).json() == saved
+        repaired = {**request, "tiles": [{**original_tile, "detailFields": [FIELD]}]}
+        assert client.put(path, json={**repaired, "modelRevision": 2}).status_code == 409
+        assert client.get(path).json() == saved
+        update = services.dashboards.update
+
+        def unavailable(*args):
+            raise DashboardStorageUnavailableError("Storage temporarily unavailable")
+
+        monkeypatch.setattr(services.dashboards, "update", unavailable)
+        assert client.put(path, json=repaired).status_code == 503
+        assert client.get(path).json() == saved
+        monkeypatch.setattr(services.dashboards, "update", update)
+        response = client.put(path, json=repaired)
+        assert response.status_code == 200, response.text
+        upgraded = response.json()
+        assert upgraded["revision"] == saved["revision"] + 1
+        assert upgraded["modelRevision"] == model.revision
+        assert upgraded["tiles"][0]["detailFields"] == [{**FIELD, "aggregate": "none"}]
+        assert client.put(path, json=repaired).json()["error"]["code"] == "dashboard_revision_conflict"
+        assert client.get(path).json() == upgraded
