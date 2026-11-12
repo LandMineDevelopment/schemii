@@ -1489,7 +1489,9 @@ class Fixture:
         # Only this fixed input directory is mounted read-only in the fixture.
         # The enclosing run directory remains 0700; app's explicit group can
         # read declarations without acquiring access to any other host files.
-        (self.directory / "execution-input").mkdir(mode=0o750)
+        execution_input = self.directory / "execution-input"
+        execution_input.mkdir(mode=0o750)
+        execution_input.chmod(0o750)
         self.up(["metadata", "source"])
         endpoints = {}
         for name in ("metadata", "source"):

@@ -152,6 +152,32 @@ def test_execution_stdin_is_bounded_closed_data_without_paths_or_sql(monkeypatch
         c.read_execution_request()
 
 
+def test_execution_input_read_group_survives_restrictive_caller_umask(
+    tmp_path, monkeypatch
+):
+    directory = tmp_path / "run"
+    directory.mkdir(mode=0o700)
+    fixture = c.Fixture.__new__(c.Fixture)
+    fixture.directory = directory
+    fixture.secrets = lambda: None
+
+    def stop_before_runtime(*args, **kwargs):
+        raise RuntimeError("stop_before_runtime")
+
+    fixture.up = stop_before_runtime
+    monkeypatch.setattr(
+        c, "command", lambda *args, **kwargs: pytest.fail("No runtime allowed")
+    )
+    previous = os.umask(0o077)
+    try:
+        with pytest.raises(RuntimeError, match="stop_before_runtime"):
+            fixture.prepare_stack()
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE((directory / "execution-input").stat().st_mode) == 0o750
+
+
 def container(service, project, run=None, image=None):
     identifier = hashlib.sha256((project + service).encode()).hexdigest()
     limits = {
