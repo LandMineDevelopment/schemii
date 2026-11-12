@@ -25,7 +25,7 @@ The launcher runs an authenticated private deployment with local accounts, per-p
 
 ## Installation
 
-Prerequisites are Git, Docker Engine with the Compose plugin, and OpenSSL. Backup and recovery commands additionally require Python 3.10 or later on the host. On Linux, the account that starts the stack needs permission to use Docker. Optional local certificate trust for Chromium browsers needs `certutil` from `libnss3-tools`. Tailscale is optional and only needed for the private tailnet preview route.
+Prerequisites are Git, Docker Engine with the Compose plugin, and OpenSSL. Demo, backup and recovery commands additionally require Python 3.10 or later on the host. On Linux, the account that starts the stack needs permission to use Docker. Optional local certificate trust for Chromium browsers needs `certutil` from `libnss3-tools`. Tailscale is optional and only needed for the private tailnet preview route.
 
 ```bash
 git clone git@github.com:LandMineDevelopment/schemii.git
@@ -36,6 +36,28 @@ cd schemii
 Open <https://localhost:8001/login> after the launcher reports healthy services. On first launch, use the setup token file printed by the launcher to create the administrator. `./start.sh` is the supported lifecycle command: it builds current source, starts or refreshes the stack, creates the local TLS certificate and private metadata secrets, and performs health checks. Do not run Compose directly or commit/copy `.schemii/`; it contains local TLS material, database secrets, and the encryption key required to read saved connection passwords.
 
 For a Tailscale-connected device, use the configured private preview at <https://omarchy.taile4f57f.ts.net/>. It remains tailnet-only and is not a public deployment boundary.
+
+## Published interview demo
+
+The named demo snapshot is
+[`demo-v0.1.0`](https://github.com/LandMineDevelopment/schemii/releases/tag/demo-v0.1.0).
+From the main project folder, start that version with the shell script:
+
+```bash
+./start-demo.sh
+```
+
+On this machine, the equivalent command from any directory is:
+
+```bash
+schemii-demo
+```
+
+It prepares the complete backend, retained `demo-admin` login, populated bookstore
+connection and imported workspace, then verifies real database access through both
+HTTPS origins. `schemii-demo --version` reports the pinned commit. The
+[published demo guide](docs/demo-release.md) records the frozen checkout,
+installation steps, private login location and verification scope.
 
 ## Application structure
 
@@ -403,6 +425,27 @@ workflow remains under `.github/workflows/`.
 ```bash
 ./start.sh
 ```
+
+For a ready-to-present demo, run:
+
+```bash
+./start.sh --demo
+```
+
+This starts the complete HTTPS stack, prepares a dedicated `demo-admin` account
+with access to all three products, and creates its saved **Schemii interview demo**
+connection and imported **Bookstore demo** workspace. It verifies administrator login,
+database connectivity, catalog access, and real bookstore rows through both the
+local and Tailscale HTTPS origins before reporting ready. The output includes
+direct workspace links and the path to a private credentials file.
+
+Repeat the same command to resume the demo. Credentials are retained in the
+primary checkout's `.schemii/demo/` directory across linked worktrees. Existing
+demo designs and database rows are preserved. Changed, disabled, or conflicting
+demo accounts and retargeted connections stop preparation with an error rather
+than overwriting them. Use `SCHEMII_DEMO_STATE_DIRECTORY` only when intentionally
+selecting a different private state directory. This mode does not enable or
+configure an external AI provider; those connections remain account-managed.
 
 Open <https://localhost:8001/> and create a connection with:
 

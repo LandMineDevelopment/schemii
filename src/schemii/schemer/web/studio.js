@@ -129,17 +129,20 @@ function setSaving(value) {
   saving = value;
   for (const id of ['create-dashboard', 'welcome-create', 'rename-dashboard', 'duplicate-dashboard', 'delete-dashboard', 'manage-dashboard-filters', 'add-tile', 'apply-slicers', 'refresh-dashboard', 'update-dashboard-model']) $(id).disabled = value;
 }
+async function persistDashboard(original, source, patch) {
+  const optionalFilters = patch.optionalFilters || original.optionalFilters || [];
+  const allowed = source ? new Set([...optionalFilters, ...source.definition.scopes.filter(scope => scope.kind === 'required' && scope.requirement !== 'optional').map(scope => scope.id)]) : null;
+  const selections = Object.fromEntries(Object.entries(patch.selections || original.selections).filter(([id]) => !allowed || allowed.has(id)));
+  const saved = await requestJson(`${API}/${original.id}`, { method: 'PUT', body: dashboardUpdate(original, { ...patch, optionalFilters, selections }) });
+  if (dashboard !== original) return saved;
+  dashboard = saved; library = library.map(d => d.id === saved.id ? saved : d); renderLibrary(); renderHeading(); return saved;
+}
 async function update(patch) {
   if (saving) throw new Error('A dashboard change is still saving. Try again shortly.');
-  const original = dashboard;
+  const original = dashboard, source = model;
   setSaving(true);
   try {
-    const optionalFilters = patch.optionalFilters || original.optionalFilters || [];
-    const allowed = model ? new Set([...optionalFilters, ...model.definition.scopes.filter(scope => scope.kind === 'required' && scope.requirement !== 'optional').map(scope => scope.id)]) : null;
-    const selections = Object.fromEntries(Object.entries(patch.selections || original.selections).filter(([id]) => !allowed || allowed.has(id)));
-    const saved = await requestJson(`${API}/${original.id}`, { method: 'PUT', body: dashboardUpdate(original, { ...patch, optionalFilters, selections }) });
-    if (dashboard?.id !== original.id) return saved;
-    dashboard = saved; library = library.map(d => d.id === saved.id ? saved : d); renderLibrary(); renderHeading(); return saved;
+    return await persistDashboard(original, source, patch);
   } finally { setSaving(false); }
 }
 function renderLibrary() {
@@ -436,8 +439,9 @@ async function dashboardDialog(mode = 'create') {
 function manageDashboardFilters() {
   if (!model || !checkLeave()) return;
   if (saving || modelNeedsUpdate()) { if (modelNeedsUpdate()) message('Update the dashboard model before changing its available filters.'); return; }
-  const available = model.definition.scopes.filter(scope => scope.requirement === 'optional');
-  const selected = new Set(dashboard.optionalFilters || []);
+  const origin = dashboard, source = model;
+  const available = source.definition.scopes.filter(scope => scope.requirement === 'optional');
+  const selected = new Set(origin.optionalFilters || []);
   const dialog = element('dialog', { className: 'ui-dialog dashboard-dialog', attrs: { 'aria-label': 'Choose dashboard filters' } });
   const body = element('div', { className: 'dialog-form dashboard-filter-options' });
   body.append(element('p', { className: 'hint', text: 'Choose which optional model filters viewers may activate. Inactive filters do not affect dashboard queries.' }));
@@ -449,20 +453,33 @@ function manageDashboardFilters() {
   }
   const error = element('p', { className: 'error-message', attrs: { role: 'alert' } });
   const save = element('button', { type: 'button', className: 'ui-button primary', text: 'Save available filters' });
+  let pending = false;
   save.onclick = async () => {
-    save.disabled = true; body.inert = true; error.textContent = '';
+    if (pending || saving) return;
+    if (dashboard !== origin || model !== source) { error.textContent = 'This dashboard changed. Close this dialog and reopen its filters.'; return; }
+    pending = true; setSaving(true); save.disabled = true; body.inert = true; error.textContent = '';
+    let saved;
     try {
-      await stopRuns();
       const optionalFilters = available.map(scope => scope.id).filter(id => selected.has(id));
       const optionalIds = new Set(available.map(scope => scope.id));
-      const selections = Object.fromEntries(Object.entries(dashboard.selections).filter(([id]) => !optionalIds.has(id) || selected.has(id)));
-      await update({ optionalFilters, selections }); slicersDirty = false; tileStates.clear(); renderSlicers(); renderTiles(); dialog.close(); message('Available dashboard filters saved.'); await runAll();
+      const selections = Object.fromEntries(Object.entries(origin.selections).filter(([id]) => !optionalIds.has(id) || selected.has(id)));
+      await stopRuns();
+      if (!dialog.open) return;
+      if (dashboard !== origin || model !== source) { error.textContent = 'This dashboard changed. Close this dialog and reopen its filters.'; return; }
+      saved = await persistDashboard(origin, source, { optionalFilters, selections });
+      if (dashboard !== saved || !dialog.open) return;
+      slicersDirty = false; tileStates.clear(); renderSlicers(); renderTiles(); dialog.close(); message('Available dashboard filters saved.');
     } catch (failure) { error.textContent = failure.message; }
-    finally { save.disabled = false; body.inert = false; }
+    finally { pending = false; setSaving(false); save.disabled = false; body.inert = false; }
+    if (saved && dashboard === saved) {
+      try { await runAll(); }
+      catch (failure) { if (dashboard === saved) message(failure.message); }
+    }
   };
-  dialog.append(element('header', { className: 'ui-dialog__head' }, [element('h2', { text: 'Dashboard filters' }), icon('close', 'Close dashboard filters', () => dialog.close())]), body,
+  dialog.append(element('header', { className: 'ui-dialog__head' }, [element('h2', { text: 'Dashboard filters' }), icon('close', 'Close dashboard filters', () => { if (!pending) dialog.close(); })]), body,
     element('footer', { className: 'ui-dialog__actions' }, [error, element('button', { type: 'button', className: 'ui-button', text: 'Cancel' }), save]));
-  dialog.querySelector('footer .ui-button:not(.primary)').onclick = () => dialog.close();
+  dialog.querySelector('footer .ui-button:not(.primary)').onclick = () => { if (!pending) dialog.close(); };
+  dialog.oncancel = event => { if (pending) event.preventDefault(); };
   dialog.onclose = () => dialog.remove(); document.body.append(dialog); dialog.showModal();
 }
 $('create-dashboard').onclick = () => dashboardDialog(); $('welcome-create').onclick = () => dashboardDialog();

@@ -642,6 +642,185 @@ class RetainedReadGateway(ConsolePostgresGateway):
         return {"monitoringAvailable": True, "databaseState": "active", "waitEvent": "PgSleep"}
 
 
+def retained_export():
+    gateway = RetainedReadGateway()
+    api, _ = console_client(gateway)
+    workspace = target_workspace(api)
+    service = api.app.state.services.console
+    owner = "user_local_prototype"
+    receipt = service.reserve(owner, workspace["id"],
+        ConsoleExecutionCreate.model_validate(execution_body(workspace, "SELECT 1")))
+    service.run(owner, receipt.id)
+    receipt = service.get_owned(owner, receipt.id)
+    return api, gateway, service, owner, workspace, receipt, receipt.results[0].id
+
+
+def csv_response(api, owner, workspace, receipt, result_id, route):
+    from schemii.common.query_executions.routes import export_result
+    from schemii.schemii.console.routes import export_console_result_csv
+
+    request = SimpleNamespace(app=api.app)
+    principal = SimpleNamespace(user_id=owner)
+    if route == "legacy":
+        return export_console_result_csv(workspace["id"], receipt.id, result_id, request, principal)
+    return export_result(receipt.id, result_id, request, principal)
+
+
+def test_unstarted_csv_export_close_releases_lease_once():
+    _, gateway, service, owner, workspace, receipt, result_id = retained_export()
+    stream = service.export_csv(owner, workspace["id"], receipt.id, result_id)
+    service.close_result(owner, workspace["id"], receipt.id, result_id)
+    assert not gateway.sessions[0].closed
+    stream.close()
+    stream.close()
+    assert list(stream) == []
+    assert result_id not in service._transient_results
+    assert gateway.sessions[0].closed
+
+
+@pytest.mark.parametrize("route", ["legacy", "common"])
+@pytest.mark.parametrize("fail_at", ["http.response.start", "http.response.body"])
+def test_csv_http_send_failure_closes_even_unstarted_iterator(route, fail_at):
+    import asyncio
+
+    api, gateway, service, owner, workspace, receipt, result_id = retained_export()
+    response = csv_response(api, owner, workspace, receipt, result_id, route)
+    service.close_result(owner, workspace["id"], receipt.id, result_id)
+
+    async def exercise():
+        async def send(message):
+            if message["type"] == fail_at:
+                raise OSError("controlled disconnected client")
+
+        async def receive():
+            await asyncio.Event().wait()
+
+        with pytest.raises(Exception) as caught:
+            await asyncio.wait_for(response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send), 2)
+        assert all(isinstance(error, OSError) for error in getattr(caught.value, "exceptions", [caught.value]))
+
+    asyncio.run(exercise())
+    assert result_id not in service._transient_results
+    assert gateway.sessions[0].closed
+
+
+@pytest.mark.parametrize("route", ["legacy", "common"])
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_csv_request_exit_cancels_then_joins_blocked_fetch(route, disconnect):
+    import asyncio
+
+    api, gateway, service, owner, workspace, receipt, result_id = retained_export()
+    response = csv_response(api, owner, workspace, receipt, result_id, route)
+    session = gateway.sessions[0]
+    sent = []
+    original_close = session.close
+
+    def close():
+        assert session.cancelled.is_set(), "source must be signalled before close"
+        original_close()
+
+    session.close = close
+    service.close_result(owner, workspace["id"], receipt.id, result_id)
+
+    async def exercise():
+        async def send(message):
+            sent.append(message)
+
+        async def receive():
+            if disconnect:
+                assert await asyncio.to_thread(session.started.wait, 1)
+                return {"type": "http.disconnect"}
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send))
+        assert await asyncio.to_thread(session.started.wait, 1)
+        if not disconnect:
+            task.cancel()
+        try:
+            await asyncio.wait_for(task, 2)
+        except asyncio.CancelledError:
+            assert not disconnect
+        except Exception as error:
+            assert all(isinstance(item, PostgresConsoleCancelledError) for item in getattr(error, "exceptions", [error]))
+
+    asyncio.run(exercise())
+    assert session.cancelled.is_set()
+    assert session.closed
+    assert result_id not in service._transient_results
+    assert [message.get("body") for message in sent if message["type"] == "http.response.body"] == [b"value\r\n"]
+
+
+def test_csv_complete_export_keeps_result_available_without_a_lease():
+    _, gateway, service, owner, workspace, receipt, result_id = retained_export()
+    session = gateway.sessions[0]
+    session.export_page = lambda index, offset, size: ((1,), (2,)) if offset == 0 else ()
+    stream = service.export_csv(owner, workspace["id"], receipt.id, result_id)
+    assert b"".join(stream) == b"value\r\n1\r\n2\r\n"
+    stream.close()
+    assert service._transient_results[result_id].active_exports == 0
+    assert not session.cancelled.is_set()
+    assert not session.closed
+    service.close_result(owner, workspace["id"], receipt.id, result_id)
+    assert session.closed
+
+
+def test_closing_csv_waiting_for_a_peer_page_does_not_cancel_the_peer():
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    _, gateway, service, owner, workspace, receipt, result_id = retained_export()
+    session = gateway.sessions[0]
+    started, release, waiting = threading.Event(), threading.Event(), threading.Event()
+
+    def page(*args):
+        started.set()
+        assert release.wait(2), "peer page was not released"
+        return ((1,),)
+
+    session.page = page
+    stream = service.export_csv(owner, workspace["id"], receipt.id, result_id)
+    assert next(stream) == b"value\r\n"
+    original_fetching = stream.fetching
+
+    @contextmanager
+    def fetching(lock):
+        waiting.set()
+        with original_fetching(lock) as accepted:
+            yield accepted
+
+    stream.fetching = fetching
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        peer = pool.submit(service.page, owner, workspace["id"], receipt.id, result_id, None)
+        assert started.wait(1)
+        export = pool.submit(next, stream)
+        try:
+            assert waiting.wait(1)
+            stream.close()
+            with pytest.raises(StopIteration):
+                export.result(timeout=1)
+            assert not peer.done()
+            assert not session.cancelled.is_set()
+            assert not session.closed
+            assert service._transient_results[result_id].active_exports == 1
+        finally:
+            release.set()
+        assert peer.result(timeout=1).rows == [[1]]
+    assert service._transient_results[result_id].active_exports == 0
+    service.close_result(owner, workspace["id"], receipt.id, result_id)
+    assert session.closed
+
+
+def test_csv_export_rejects_another_owner_or_workspace_without_acquiring_a_lease():
+    _, gateway, service, owner, workspace, receipt, result_id = retained_export()
+    for actor, workspace_id in (("other-owner", workspace["id"]), (owner, "ws_" + "9" * 32)):
+        with pytest.raises(ConsoleServiceError) as caught:
+            service.export_csv(actor, workspace_id, receipt.id, result_id)
+        assert caught.value.status == 404
+    assert service._transient_results[result_id].active_exports == 0
+    assert not gateway.sessions[0].closed
+    service.close_result(owner, workspace["id"], receipt.id, result_id)
+
+
 def test_live_fetch_does_not_hold_global_lock_and_can_be_cancelled_after_success():
     from concurrent.futures import ThreadPoolExecutor
     from schemii.common.query_executions.errors import ConsoleServiceError
