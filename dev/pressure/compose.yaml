@@ -1,0 +1,160 @@
+# Explicit opt-in disposable project. Never merge this into compose.test.yaml.
+x-labels: &labels
+  io.schemii.pressure.run: ${PRESSURE_RUN}
+x-logging: &logging
+  driver: json-file
+  options: {max-size: 1m, max-file: "2"}
+x-database: &database
+  image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+  labels: *labels
+  logging: *logging
+  group_add: ["${PRESSURE_GID}"]
+  entrypoint: [/bin/sh, -ec]
+  command:
+    - |
+      cp /run/secrets/database_key /tls/server.key
+      cp /run/secrets/database_cert /tls/server.crt
+      chown postgres:postgres /tls/server.key /tls/server.crt
+      chmod 600 /tls/server.key
+      exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key -c max_connections=24 -c shared_buffers=32MB -c log_min_messages=panic -c log_min_error_statement=panic
+  tmpfs: ["/tls:size=4m,mode=0755", "/tmp:size=16m,mode=1777"]
+  mem_limit: 256m
+  cpus: 0.5
+  pids_limit: 64
+  restart: "no"
+  networks: [database]
+  healthcheck:
+    test: [CMD-SHELL, "pg_isready -U pressure_admin -d $$POSTGRES_DB"]
+    interval: 1s
+    timeout: 2s
+    retries: 30
+services:
+  metadata:
+    <<: *database
+    environment:
+      POSTGRES_USER: pressure_admin
+      POSTGRES_DB: pressure_metadata
+      POSTGRES_PASSWORD_FILE: /run/secrets/admin_password
+    volumes:
+      - metadata:/var/lib/postgresql/data
+      - ${PRESSURE_DIRECTORY}/admin_password:/run/secrets/admin_password:ro
+      - ${PRESSURE_DIRECTORY}/database.key:/run/secrets/database_key:ro
+      - ${PRESSURE_DIRECTORY}/database.crt:/run/secrets/database_cert:ro
+  source:
+    <<: *database
+    environment:
+      POSTGRES_USER: pressure_admin
+      POSTGRES_DB: pressure_source
+      POSTGRES_PASSWORD_FILE: /run/secrets/source_admin_password
+    volumes:
+      - source:/var/lib/postgresql/data
+      - ${PRESSURE_DIRECTORY}/source_admin_password:/run/secrets/source_admin_password:ro
+      - ${PRESSURE_DIRECTORY}/database.key:/run/secrets/database_key:ro
+      - ${PRESSURE_DIRECTORY}/database.crt:/run/secrets/database_cert:ro
+  observer-init:
+    image: ${PRESSURE_APPLICATION_IMAGE}
+    labels: *labels
+    logging: *logging
+    user: "0:0"
+    network_mode: none
+    entrypoint: [python, -c]
+    command: ["import os; os.chmod('/qualification-state',0o700); os.chown('/qualification-state',10001,10001)"]
+    volumes: ["observer:/qualification-state"]
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 16
+    restart: "no"
+  schemii:
+    image: ${PRESSURE_APPLICATION_IMAGE}
+    labels: *labels
+    logging: *logging
+    command: [uvicorn, pressure_app:observed_application, --factory, --app-dir, /qualification, --host, 0.0.0.0, --port, "8000", --no-access-log]
+    environment:
+      PRESSURE_OBSERVER_RUN: ${PRESSURE_RUN}
+      SCHEMII_DEPLOYMENT_MODE: authenticated
+      SCHEMII_AUTH_ENABLED: "1"
+      SCHEMII_SETUP_TOKEN_FILE: /run/secrets/setup_token
+      SCHEMII_STORAGE_MODE: postgresql
+      SCHEMII_METADATA_DSN: host=metadata port=5432 dbname=pressure_metadata user=pressure_app
+      SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/app_password
+      SCHEMII_METADATA_ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+      SCHEMII_METADATA_TARGET_HOST_ALIASES: metadata
+      SCHEMII_METADATA_MAXIMUM_CONNECTIONS: "2"
+      SCHEMII_METADATA_STATEMENT_TIMEOUT_MS: "3000"
+      SCHEMII_METADATA_LOCK_TIMEOUT_MS: "1500"
+      SCHEMII_METADATA_IDLE_TRANSACTION_TIMEOUT_MS: "3000"
+      SCHEMII_METADATA_SHUTDOWN_TIMEOUT_SECONDS: "2"
+      SCHEMII_TARGET_EGRESS_MODE: internal-only
+      SCHEMII_ALLOWED_TARGET_HOSTS: source
+      SCHEMII_CONFIG_FILE: /etc/schemii/schemii.toml
+    volumes:
+      - observer:/qualification-state
+      - ${PRESSURE_ROOT}/dev/pressure/app.py:/qualification/pressure_app.py:ro
+      - ${PRESSURE_ROOT}/dev/schemii.toml:/etc/schemii/schemii.toml:ro
+      - ${PRESSURE_DIRECTORY}/setup_token:/run/secrets/setup_token:ro
+      - ${PRESSURE_DIRECTORY}/app_password:/run/secrets/app_password:ro
+      - ${PRESSURE_DIRECTORY}/encryption_key:/run/secrets/encryption_key:ro
+    group_add: ["${PRESSURE_GID}"]
+    networks: [database, ingress]
+    init: true
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    restart: "no"
+  ingress:
+    image: nginx:1.29.1-alpine@sha256:42a516af16b852e33b7682d5ef8acbd5d13fe08fecadc7ed98605ba5e3b26ab8
+    labels: *labels
+    logging: *logging
+    entrypoint: [nginx]
+    command: [-g, "daemon off;", -c, /etc/nginx/nginx.conf]
+    ports: ["127.0.0.1:8001:8443"]
+    volumes:
+      - ${PRESSURE_ROOT}/dev/ingress/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${PRESSURE_DIRECTORY}/ingress.crt:/etc/nginx/tls/localhost.crt:ro
+      - ${PRESSURE_DIRECTORY}/ingress.key:/etc/nginx/tls/localhost.key:ro
+    group_add: ["${PRESSURE_GID}"]
+    networks: [ingress, loopback]
+    user: "101:101"
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 32
+    restart: "no"
+    healthcheck:
+      test: [CMD, wget, -q, --no-check-certificate, -O, /dev/null, --header, "Host: localhost", "https://127.0.0.1:8443/api/v1/readiness"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+volumes:
+  observer:
+    name: ${PRESSURE_PROJECT}-observer
+    labels: *labels
+  metadata:
+    name: ${PRESSURE_PROJECT}-metadata
+    labels: *labels
+  source:
+    name: ${PRESSURE_PROJECT}-source
+    labels: *labels
+networks:
+  database:
+    name: ${PRESSURE_PROJECT}-database
+    internal: true
+    labels: *labels
+  ingress:
+    name: ${PRESSURE_PROJECT}-ingress
+    internal: true
+    labels: *labels
+  loopback:
+    name: ${PRESSURE_PROJECT}-loopback
+    labels: *labels
