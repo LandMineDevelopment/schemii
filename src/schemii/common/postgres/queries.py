@@ -478,14 +478,15 @@ SAFETY_DEPENDENCIES_QUERY = """
       SELECT 'pg_proc'::regclass::oid,p.oid,'routine',n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)
       FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     ), edges AS (
-      SELECT CASE WHEN COALESCE(r.ev_class,con.conrelid,tr.tgrelid,ad.adrelid) IS NOT NULL THEN 'pg_class'::regclass ELSE d.classid END AS source_class,
-             COALESCE(r.ev_class,con.conrelid,tr.tgrelid,ad.adrelid,d.objid) AS source,
+      SELECT CASE WHEN COALESCE(r.ev_class,con.conrelid,tr.tgrelid,ad.adrelid,pol.polrelid) IS NOT NULL THEN 'pg_class'::regclass ELSE d.classid END AS source_class,
+             COALESCE(r.ev_class,con.conrelid,tr.tgrelid,ad.adrelid,pol.polrelid,d.objid) AS source,
              d.refclassid AS target_class,d.refobjid AS target,d.deptype::text AS kind
       FROM pg_depend d
       LEFT JOIN pg_rewrite r ON d.classid='pg_rewrite'::regclass AND r.oid=d.objid
       LEFT JOIN pg_constraint con ON d.classid='pg_constraint'::regclass AND con.oid=d.objid AND con.conrelid<>0
       LEFT JOIN pg_trigger tr ON d.classid='pg_trigger'::regclass AND tr.oid=d.objid
       LEFT JOIN pg_attrdef ad ON d.classid='pg_attrdef'::regclass AND ad.oid=d.objid
+      LEFT JOIN pg_policy pol ON d.classid='pg_policy'::regclass AND pol.oid=d.objid
       WHERE d.refclassid IN ('pg_class'::regclass,'pg_type'::regclass,'pg_proc'::regclass)
       UNION ALL SELECT 'pg_class'::regclass,inhrelid,'pg_class'::regclass,inhparent,'partition' FROM pg_inherits
     )
@@ -504,6 +505,9 @@ SAFETY_DEPENDENCIES_QUERY = """
     ORDER BY sn.namespace,sn.name,sn.signature,tn.namespace,tn.name,tn.signature,e.kind LIMIT %s
 """
 
+# Policy self-references belong to their preserved table properties. References
+# to other objects remain unknown: an external policy owner may be outside the
+# schema-local preservation inventory, even though its graph edge is collected.
 SAFETY_UNKNOWNS_QUERY = """
     /* schemii_catalog_safety_unknowns */
     SELECT
@@ -512,12 +516,15 @@ SAFETY_UNKNOWNS_QUERY = """
       EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('f','c'))
       OR EXISTS(SELECT 1 FROM pg_depend d
+        LEFT JOIN pg_policy pol ON d.classid='pg_policy'::regclass AND pol.oid=d.objid
         LEFT JOIN pg_class c ON d.refclassid='pg_class'::regclass AND c.oid=d.refobjid
         LEFT JOIN pg_type t ON d.refclassid='pg_type'::regclass AND t.oid=d.refobjid
         LEFT JOIN pg_proc p ON d.refclassid='pg_proc'::regclass AND p.oid=d.refobjid
         JOIN pg_namespace n ON n.oid=COALESCE(c.relnamespace,t.typnamespace,p.pronamespace)
         WHERE d.classid NOT IN ('pg_class'::regclass,'pg_type'::regclass,'pg_proc'::regclass,
           'pg_rewrite'::regclass,'pg_constraint'::regclass,'pg_trigger'::regclass,'pg_attrdef'::regclass)
+          AND NOT (d.classid='pg_policy'::regclass AND pol.oid IS NOT NULL
+            AND d.refclassid='pg_class'::regclass AND d.refobjid=pol.polrelid)
           AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') AS opaque_dependencies,
       NOT has_schema_privilege(%s,'USAGE') AS inaccessible
 """

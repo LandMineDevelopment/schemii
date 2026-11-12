@@ -853,27 +853,39 @@ def test_migration_binds_authored_sql_to_exact_reviewed_namespace(monkeypatch, n
     # Owned connection cleanup rolls back any residual transaction after commit.
 
 
-def test_migration_namespace_or_authored_sql_denial_rolls_back_before_commit(monkeypatch):
+@pytest.mark.parametrize("phase", ["namespace", "first_statement", "later_statement"])
+def test_migration_namespace_or_authored_sql_denial_rolls_back_before_commit(monkeypatch, phase):
     from types import SimpleNamespace
-    from schemii.common.postgres.errors import PostgresGatewayError
+    from psycopg.errors import InsufficientPrivilege
+    from schemii.common.postgres.errors import PostgresMigrationExecutionError, PostgresQueryError
 
     statement = 'CREATE FUNCTION value() RETURNS integer LANGUAGE SQL AS $$ SELECT 1 $$;'
-    factory = FakeConnectFactory({'pg_advisory_xact_lock': [], 'pg_current_xact_id': [{'transaction_id': '42'}]})
+    earlier = 'CREATE TYPE status AS ENUM (\'new\');'
+    statements = [earlier, statement] if phase == "later_statement" else [statement]
+    factory = FakeConnectFactory({'pg_advisory_xact_lock': [], 'pg_current_xact_id': [{'transaction_id': '42'}],
+                                 earlier: []})
     gateway = PsycopgPostgresGateway(connect_factory=factory)
     catalog = SimpleNamespace(fingerprint='reviewed')
     monkeypatch.setattr(gateway, '_introspect_connection', lambda *_: catalog)
     monkeypatch.setattr(gateway, '_target_identity', lambda *_: {'database': 'analytics'})
-    original_execute = gateway._execute_statement
+    original_rows = FakeConnection.rows_for
 
-    def deny(connection, sql):
-        if sql == statement:
-            raise RuntimeError('denied fixture')
-        return original_execute(connection, sql)
+    def deny(connection, query):
+        if (phase == "namespace" and query.startswith("SET LOCAL search_path")) or query == statement:
+            raise InsufficientPrivilege("denied fixture")
+        return original_rows(connection, query)
 
-    monkeypatch.setattr(gateway, '_execute_statement', deny)
-    with pytest.raises(PostgresGatewayError):
-        gateway.execute_migration(resolved_connection(), 'restricted', catalog.fingerprint, [statement],
+    monkeypatch.setattr(FakeConnection, 'rows_for', deny)
+    expected = PostgresQueryError if phase == "namespace" else PostgresMigrationExecutionError
+    with pytest.raises(expected) as denied:
+        gateway.execute_migration(resolved_connection(), 'restricted', catalog.fingerprint, statements,
             on_started=lambda *_: None, on_intended=lambda *_: None)
+    if phase == "namespace":
+        assert isinstance(denied.value, PostgresQueryError)
+        assert denied.value.sqlstate == "42501"
+    else:
+        assert isinstance(denied.value, PostgresMigrationExecutionError)
+        assert denied.value.completed_step_count == (1 if phase == "later_statement" else 0)
     connection = factory.connections[0]
     assert connection.commits == 0 and connection.rollbacks == 1 and connection.closed
 

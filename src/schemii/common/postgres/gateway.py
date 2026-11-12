@@ -921,6 +921,7 @@ class PsycopgPostgresGateway:
         conversion_locks = self._validated_table_names(conversion_tables)
         database_connection: Any | None = None
         completed = 0
+        statement_attempted = False
         commit_attempted = False
         try:
             database_connection = self._connect(connection)
@@ -969,6 +970,7 @@ class PsycopgPostgresGateway:
             for statement in statements:
                 if not isinstance(statement, str) or not statement.strip():
                     raise PostgresCatalogValidationError()
+                statement_attempted = True
                 self._execute_statement(database_connection, statement)
                 completed += 1
             result_catalog = self._introspect_connection(
@@ -995,7 +997,7 @@ class PsycopgPostgresGateway:
         ):
             raise
         except PostgresGatewayError as error:
-            if completed or commit_attempted:
+            if statement_attempted or commit_attempted:
                 raise PostgresMigrationExecutionError(completed, sqlstate=getattr(error, "sqlstate", None) if conversion_locks else None) from error
             raise
         except Exception as error:

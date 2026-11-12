@@ -305,7 +305,7 @@ def _managed_create_table_plan(fixture, actor):
     migrations = fixture.services.migrations
     plan = migrations.create_plan(actor, workspace.id, MigrationPlanCreate(
         expected_workspace_revision=workspace.revision, expected_design_revision=desired.revision))
-    assert plan.apply_capable and len(plan.steps) == 1
+    assert plan.apply_capable and len(plan.steps) == 1, plan.model_dump(mode="json")
     execution = migrations.create_execution(actor, plan.id,
         MigrationExecutionCreate(review_digest=plan.review_digest))
     return execution
@@ -335,6 +335,62 @@ def test_managed_migration_uses_only_granted_schema_ddl_identity(managed_writer_
     else:
         assert row is None
         assert terminal.error_code == "postgres_migration_failed"
+
+
+def _managed_catalog(fixture, namespace):
+    profile = fixture.profiles["developer"]
+    with fixture.services.connections.for_product("schemii").use("developer", profile.id) as selected:
+        return fixture.services.postgres.introspect(selected, namespace)
+
+
+def test_self_referencing_policy_keeps_rls_owner_protected(managed_writer_application):
+    from schemii.schemii.designs.importer import import_postgres_catalog
+    from schemii.schemii.migrations.planner import migration_compatibility
+
+    fixture = managed_writer_application
+    catalog = _managed_catalog(fixture, fixture.namespace)
+    assert catalog.safety.dependency_complete
+    imported = import_postgres_catalog(catalog)
+    assert not imported.summary.complete
+    assert any(issue.category == "row_security" for issue in imported.summary.issues)
+    desired = imported.content.model_copy(deep=True)
+    amount = next(column for column in desired.tables[0].columns if column.name == "amount")
+    amount.nullable = True
+    compatibility = migration_compatibility(catalog, imported.content, desired)
+    assert not compatibility.operation_safe
+    assert "Changes intersect the protected dependency closure" in compatibility.blocking_reasons
+    assert any(item.namespace == fixture.namespace and item.name == "sales"
+               for item in compatibility.protected_scope)
+
+
+def test_external_policy_reference_retains_graph_edge_and_unknown_boundary(managed_writer_application):
+    from schemii.common.postgres.models import PostgresObjectIdentity
+    from schemii.schemii.designs.importer import import_postgres_catalog
+    from schemii.schemii.migrations.planner import migration_compatibility
+
+    fixture = managed_writer_application
+    fixture.admin.execute(sql.SQL("CREATE TABLE {} (id integer NOT NULL)").format(
+        sql.Identifier(fixture.ddl_namespace, "policy_scope")))
+    fixture.admin.execute(sql.SQL(
+        "CREATE POLICY referenced_scope ON {} FOR SELECT TO {} "
+        "USING (EXISTS (SELECT 1 FROM {} scope WHERE scope.id=sales.id))").format(
+            sql.Identifier(fixture.namespace, "sales"), sql.Identifier(fixture.roles["east"]),
+            sql.Identifier(fixture.ddl_namespace, "policy_scope")))
+    owner = PostgresObjectIdentity(kind="relation", namespace=fixture.namespace, name="sales")
+    referenced = PostgresObjectIdentity(kind="relation", namespace=fixture.ddl_namespace, name="policy_scope")
+    for namespace in (fixture.namespace, fixture.ddl_namespace):
+        catalog = _managed_catalog(fixture, namespace)
+        assert any(edge.source == owner and edge.target == referenced
+                   for edge in catalog.safety.dependencies)
+        assert not catalog.safety.dependency_complete
+        imported = import_postgres_catalog(catalog)
+        desired = imported.content.model_copy(deep=True)
+        desired.tables[0].columns[0].nullable = True
+        compatibility = migration_compatibility(catalog, imported.content, desired)
+        assert not compatibility.operation_safe
+        assert "Dependency evidence is incomplete" in compatibility.blocking_reasons
+        if namespace == fixture.namespace:
+            assert {owner, referenced} <= set(compatibility.protected_scope)
 
 
 def test_revoked_managed_migration_and_ai_do_not_use_personal_or_peer_profile(managed_writer_application):
