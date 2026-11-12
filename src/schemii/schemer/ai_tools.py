@@ -173,6 +173,14 @@ class DisplayedPivotProjection(BaseModel):
     notice: str = Field(max_length=512)
 
 
+class DisplayedDiagnosticProjection(BaseModel):
+    """Only the bounded visible notice is shared when no facts are rendered."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    kind: Literal["bar", "line", "donut", "detail", "aggregate", "kpi"]
+    status: Literal["diagnostic", "empty", "loading", "error"]
+    notice: str = Field(min_length=1, max_length=512)
+
+
 class DisplayedResult(BaseModel):
     """Client evidence, never a query plan or a source authorization."""
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
@@ -189,7 +197,7 @@ class DisplayedResult(BaseModel):
     tileSelections: dict[str, ScopeSelection] | None = Field(default=None, max_length=20)
     reportFilters: list[ReportFilter] | None = Field(default=None, max_length=32)
     drillSelection: DrillSelection | None = None
-    projection: DisplayedPivotProjection | None = None
+    projection: DisplayedPivotProjection | DisplayedDiagnosticProjection | None = None
     columns: list[DisplayedColumn] = Field(max_length=128)
     rows: list[list[JsonValue]] = Field(max_length=10000)
     cachedRows: int = Field(ge=0, le=10000)
@@ -207,8 +215,10 @@ def validate_displayed_result(value):
         result = DisplayedResult.model_validate(value)
         if (result.displayedRows > result.cachedRows or len(result.rows) > result.displayedRows
                 or any(len(row) != len(result.columns) for row in result.rows)
-                or (result.projection is not None and not
+                or (isinstance(result.projection, DisplayedPivotProjection) and not
                     0 <= result.projection.rowStart <= result.projection.rowEnd <= result.projection.rowGroups)
+                or (isinstance(result.projection, DisplayedDiagnosticProjection) and
+                    (result.rows or result.columns or result.displayedRows))
                 or (result.pane == "drill") != (result.drillSelection is not None)):
             raise ValueError("Invalid displayed result shape")
         return result

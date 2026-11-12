@@ -45,6 +45,7 @@ export function rememberDisplayedVisualization(host, tile, result, present = cre
 export function displayedVisualization(host, tile, result) {
   if (tile.kind === 'pivot') return displayedPivot(host, { ...tile, measures: visibleMeasures(tile) }, result);
   const mounted = displayedCharts.get(host);
+  if (mounted?.terminal) return { ...mounted.result, metric: mounted.selection.metric, projection: mounted.terminal };
   if (mounted) { tile = mounted.tile; result = mounted.result; }
   const { metric, series, preview } = mounted?.selection || visualizationSelection(host, tile, result);
   const present = mounted?.present || createNumberPresentation(tile, result);
@@ -98,13 +99,25 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
     if (focusLabel) [...host.querySelectorAll('select')].find(node => node.getAttribute('aria-label') === focusLabel)?.focus();
   };
   host.replaceChildren();
+  const terminal = (status, notice, className = 'empty-state') => {
+    // A visible diagnostic is the entire displayed evidence. Retire the mark
+    // selection and raw-row references from capture state without touching the
+    // independently owned cache or the explicit RAW CSV/export path.
+    const view = displayedCharts.get(host);
+    const snapshot = { snapshotAt: fullResult.snapshotAt, cachedRows: fullResult.cachedRows ?? fullResult.rows.length,
+      loading: Boolean(fullResult.loading), hasMore: Boolean(fullResult.hasMore), error: Boolean(fullResult.error),
+      limitReached: Boolean(fullResult.limitReached), columns: [], rows: [], visualTruncated: false };
+    view.result = snapshot; view.selection = { metric, series: [], preview: snapshot };
+    view.present = null; view.rowCount = 0; view.terminal = { kind: tile.kind, status, notice };
+    host.append(element('p', { className, text: notice }));
+  };
   const formatLegend=numberFormatLegend(tile,result,element);if(formatLegend) host.append(formatLegend);
   const repetition = repetitionNotice(result?.plan, { modelId });
   if (repetition) host.append(repetition);
   if(calculated.length && (result?.loading || result?.limitReached || result?.visualTruncated)) host.append(element('p',{className:'chart-partial-notice',text:'Calculated values use the complete query population, including groups outside this preview. Chart geometry and cached-row exports show received groups only.'}));
   if (result.visualTruncated) host.append(element('p', { className: 'chart-partial-notice', text: `Chart shows the first ${result.rows.length} of ${result.cachedRows} cached groups. Export cached rows or download full results to see more.` }));
   if (!['detail', 'aggregate', 'kpi'].includes(tile.kind) && (result?.loading || result?.limitReached || result?.error || result?.visualTruncated)) host.append(element('p', { className: 'chart-partial-notice', text: tile.kind === 'donut' ? 'Partial result · percentages reflect displayed groups only.' : 'Partial result · showing received groups.' }));
-  if (!result?.rows.length) { host.append(element('p', { className: 'empty-state', text: result?.loading ? 'Waiting for the first rows…' : result?.error ? 'The query did not complete.' : 'No matching rows for these slicers and filters.' })); return; }
+  if (!result.rows.length) { terminal(result.loading ? 'loading' : result.error ? 'error' : 'empty', result.loading ? 'Waiting for the first rows…' : result.error ? 'The query did not complete.' : 'No matching rows for these slicers and filters.'); return; }
   const drill = (row, index) => onDrill && index !== null ? () => select(markSelection(tile, row, index)) : null;
   if (tile.kind === 'detail' || tile.kind === 'aggregate') {
     const grid = createResultGrid(result, (tr, rowIndex) => {
@@ -147,7 +160,7 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
     if (!compact) host.append(element('p', { className: 'hint', text: 'Only current-period values drill into records. Missing comparisons have no chart mark. Partial periods use the available filtered data.' }));
   }
   if (result.rows.some(row => series.some(({ column }) => row[column] !== null && !numeric(row[column])))) {
-    host.append(element('p', { className: 'empty-state error', text: 'This chart needs numeric measures. Very large exact values can exceed finite chart geometry; use a table or RAW CSV, or edit the measure.' })); return;
+    terminal('diagnostic', 'This chart needs numeric measures. Very large exact values can exceed finite chart geometry; use a table or RAW CSV, or edit the measure.', 'empty-state error'); return;
   }
   const legend = element('div', { className: 'chart-legend' });
   const lines = tile.kind === 'line' ? lineSeries(tile, result, series) : null;
@@ -254,7 +267,7 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
     const rawNumbers=result.rows.map(row=>Number(row[column] ?? 0)),scale=rawNumbers.reduce((max,value)=>Math.max(max,value),1);
     const values=rawNumbers.map(value=>value/scale),total=values.reduce((a,b)=>a+b,0);
     const totalText=sumDecimalText(result.rows.map(row=>row[column]));
-    if (values.some(v => v < 0) || total <= 0) { host.append(element('p', { className: 'empty-state', text: 'A donut chart requires nonnegative values and a positive total. Use a bar chart for signed values.' })); return; }
+    if (values.some(v => v < 0) || total <= 0) { terminal('diagnostic', 'A donut chart requires nonnegative values and a positive total. Use a bar chart for signed values.'); return; }
     const chart = svg('svg', { viewBox: '0 0 300 300', class: 'donut-chart', role: 'img', 'aria-label': tile.title });
     const radius = 105, circumference = 2 * Math.PI * radius;
     let offset = 0;
