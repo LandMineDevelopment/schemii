@@ -1,6 +1,85 @@
 from copy import deepcopy
+from types import SimpleNamespace
+
+import pytest
 
 from schemii.schemoo.catalog import catalog_contract, source_drift, source_issues
+
+
+def inferred_lookup_fixture():
+    from schemii.schemoo.catalog import model_source_contract
+    source = catalog()
+    source.update(namespace="public", database="warehouse", fingerprint="initial")
+    source["tables"][0]["columns"].append({"name": "name", "dataType": "text", "nullable": False})
+    rules = definition(source, [{"table": "child", "column": "id"}])
+    rules.update(nodes=rules["nodes"][:1], edges=[], sourceContract={"scope": "model", "tables": [], "relationships": []})
+    rules["scopes"] = [{"id": "parent", "kind": "conditional", "alternatives": [{"id": "pick",
+        "inputs": [{"id": "value", "type": "uuid"}],
+        "conditions": [{"table": "child", "column": "parent_id", "operator": "eq", "parameterId": "value"}]}]}]
+    rules["sourceContract"] = model_source_contract(source, rules)
+    return source, rules
+
+
+def test_inferred_lookup_contract_is_server_derived_and_tracks_its_fk_and_label():
+    source, rules = inferred_lookup_fixture()
+    contract = rules["sourceContract"]
+    assert [table["name"] for table in contract["tables"]] == ["parent", "child"]
+    assert {column["name"] for column in contract["tables"][0]["columns"]} == {"id", "name"}
+    assert [relationship["id"] for relationship in contract["relationships"]] == ["fk"]
+    for change in ("retarget", "label-type", "label-removal", "table-removal", "fk-removal"):
+        current = deepcopy(source)
+        if change == "retarget":
+            current["relationships"][0]["targetTable"] = "different_parent"
+        elif change == "label-type":
+            current["tables"][0]["columns"][1]["dataType"] = "integer"
+        elif change == "label-removal":
+            current["tables"][0]["columns"].pop()
+        elif change == "table-removal":
+            current["tables"].pop(0)
+        else:
+            current["relationships"] = []
+        assert any(issue["severity"] == "breaking" for issue in source_issues(current, rules)), change
+
+
+def test_inferred_lookup_runtime_rejects_changed_fk_before_source_query():
+    from schemii.common.api.errors import ApiProblem
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemoo.service import domain_query
+    source, rules = inferred_lookup_fixture()
+    model = SimpleNamespace(definition=ModelDefinition.model_validate(rules))
+    body = SimpleNamespace(scope_id="parent", alternative_id="pick", parameter_id="value", search="")
+    assert '"parent"' in domain_query(source, model, body)["sql"]
+    current = deepcopy(source)
+    current["relationships"][0]["targetTable"] = "different_parent"
+    with pytest.raises(ApiProblem) as caught:
+        domain_query(current, model, body)
+    assert caught.value.code == "model_source_drift"
+
+
+def test_new_foreign_keys_do_not_rebind_saved_implicit_lookups_or_suppress_new_dependencies():
+    from schemii.schemoo.catalog import model_source_contract
+    from schemii.schemoo.domain import parameter_domain
+    source, rules = inferred_lookup_fixture()
+    option = rules["scopes"][0]["alternatives"][0]
+    other = {**source["relationships"][0], "id": "other", "targetTable": "other_parent"}
+    current = {**source, "relationships": [other, *source["relationships"]]}
+    lookup = parameter_domain(current, rules, option, option["inputs"][0])
+    assert lookup["table"] == "parent" and lookup["relationshipId"] == "fk"
+    assert [item["id"] for item in model_source_contract(current, rules, rules)["relationships"]] == ["fk"]
+    current["relationships"] = []
+    with pytest.raises(ValueError, match="lookup foreign key was removed"):
+        model_source_contract(current, rules, rules)
+
+
+def test_new_parameter_on_existing_scoped_model_adds_its_actual_lookup_dependencies():
+    from schemii.schemoo.catalog import model_source_contract
+    source, rules = inferred_lookup_fixture()
+    previous = {**rules, "scopes": [], "sourceContract": None}
+    previous["sourceContract"] = model_source_contract(source, previous)
+    updated = {**rules, "sourceContract": previous["sourceContract"]}
+    contract = model_source_contract(source, updated, previous)
+    assert [item["id"] for item in contract["relationships"]] == ["fk"]
+    assert {item["name"] for item in contract["tables"]} == {"child", "parent"}
 
 
 def catalog():

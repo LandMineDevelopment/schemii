@@ -5,7 +5,7 @@ from copy import deepcopy
 import hashlib
 from threading import RLock
 from time import monotonic
-from .domain import domain_table
+from .domain import domain_table, parameter_domain
 
 
 class ModelCatalogs:
@@ -189,7 +189,13 @@ def source_dependencies(catalog, definition):
             for item in alternative.get("conditions", []):
                 condition(item)
             for parameter in alternative.get("inputs", []):
-                domain(parameter.get("domain"))
+                if parameter.get("domain"):
+                    domain(parameter["domain"])
+                    continue
+                lookup = parameter_domain(catalog, definition, alternative, parameter)
+                domain(lookup)
+                if lookup and lookup.get("relationshipId"):
+                    used_relationships.add(lookup["relationshipId"])
     for node in nodes.values():
         derivation = node.get("derivation")
         if not derivation:
@@ -242,7 +248,10 @@ def model_source_contract(catalog, definition, previous=None):
     Omitting or fabricating client entries cannot omit a required dependency or
     replace the server's prior baseline. New dependencies use live metadata.
     """
-    current = catalog_contract(catalog, definition)
+    # Only the server's prior contract may pin an implicit lookup identity.
+    # Client omissions cannot suppress dependencies during initial creation.
+    dependency_definition = {**definition, "sourceContract": (previous or {}).get("sourceContract")}
+    current = catalog_contract(catalog, dependency_definition)
     prior = (previous or {}).get("sourceContract") or {}
     proposed = definition.get("sourceContract") or {}
     prior_tables = {table["name"]: table for table in prior.get("tables", [])}
@@ -308,6 +317,10 @@ def source_drift(catalog, definition):
     for expected in contract.get("tables", []):
         live = live_tables.get(expected["name"])
         if not live:
+            if scoped and expected["name"] not in nodes_by_table:
+                issues.append({"kind": "missing_table", "severity": "breaking", "table": expected["name"],
+                               "acknowledge": False,
+                               "message": f"Parameter lookup source {expected['name']} is no longer available. Repair its domain before saving."})
             continue  # source_issues reports modeled missing tables with repair context
         node_ids = nodes_by_table.get(expected["name"], [])
         if list(expected.get("primaryKey", [])) != list(live.get("primaryKey", [])) and (node_ids or scoped):
@@ -352,11 +365,12 @@ def source_drift(catalog, definition):
     for expected in contract.get("relationships", []):
         live = live_relationships.get(expected["id"])
         if not live and expected["id"] not in used_edges:
-            issues.append({"kind": "removed_relationship", "severity": "warning", "relationshipId": expected["id"],
-                           "acknowledge": True,
-                           "message": f"Foreign key {expected.get('name') or expected['id']} was removed from the source. No model connection used it."})
-        if live and signature(expected) != signature(live) and expected["id"] in used_edges:
-            edges = used_edges[expected["id"]]
+            issues.append({"kind": "removed_relationship", "severity": "breaking" if scoped else "warning", "relationshipId": expected["id"],
+                           "acknowledge": not scoped,
+                           "message": f"Foreign key {expected.get('name') or expected['id']} was removed from the source. " +
+                           ("Repair the parameter lookup before saving." if scoped else "No model connection used it.")})
+        if live and signature(expected) != signature(live) and (scoped or expected["id"] in used_edges):
+            edges = used_edges.get(expected["id"], [])
             issues.append({"kind": "changed_relationship", "severity": "breaking", "relationshipId": expected["id"],
                            "edgeIds": [edge["id"] for edge in edges], "acknowledge": True,
                            "message": f"Foreign key {expected.get('name') or expected['id']} changed from {expected['sourceTable']}.{expected['sourceColumn']} → {expected['targetTable']}.{expected['targetColumn']} to {live['sourceTable']}.{live['sourceColumn']} → {live['targetTable']}.{live['targetColumn']}. Review every affected connection before accepting it."})

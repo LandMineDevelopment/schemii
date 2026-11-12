@@ -7,7 +7,7 @@ from .catalog import source_issues, model_source_contract
 from .models import ModelDefinition, ModelUpdate, ExploreState
 from .store import ModelConflictError
 from .prototype import analyze_model, compile_preview, validate_definition
-from .domain import domain_table
+from .domain import parameter_domain
 
 
 def document(value):
@@ -153,26 +153,16 @@ def domain_query(catalog, model, body):
     parameter = next((p for p in (alternative or {}).get("inputs", []) if p["id"] == body.parameter_id), None)
     if parameter is None:
         raise ApiProblem(422, "unknown_model_parameter", "This parameter is not part of the saved model. Save your model changes first.")
-    domain = parameter.get("domain")
-    if domain:
-        try:
-            table = domain_table(domain, definition["nodes"])
-        except ValueError as error:
-            raise ApiProblem(422, "parameter_unbound", str(error)) from error
-        column = domain["column"]
-        label = domain.get("labelColumn") or column
-    else:
-        condition = next((c for c in alternative["conditions"] if c.get("parameterId") == body.parameter_id), None)
-        node = next((n for n in definition["nodes"] if n["id"] == (condition or {}).get("table")), None)
-        if not node or not condition.get("column"):
-            raise ApiProblem(422, "parameter_unbound", "Bind this parameter to a source column before browsing values.")
-        table, column = node["table"], condition["column"]
-        fk = next((r for r in catalog["relationships"] if (r["sourceTable"], r["sourceColumn"]) == (table, column)), None)
-        if parameter["type"] != "source" and fk:
-            table, column = fk["targetTable"], fk["targetColumn"]
-        columns = next((t["columns"] for t in catalog["tables"] if t["name"] == table), [])
-        label = "name" if parameter["type"] != "source" and any(c["name"] == "name" for c in columns) else column
-    return domain_values_plan(catalog, table, column, label, body.search)
+    try:
+        lookup = parameter_domain(catalog, definition, alternative, parameter)
+    except ValueError as error:
+        raise ApiProblem(422, "parameter_unbound", str(error)) from error
+    if not lookup:
+        raise ApiProblem(422, "parameter_unbound", "Bind this parameter to a source column before browsing values.")
+    issues = source_issues(catalog, definition)
+    if any(issue.get("severity", "breaking") == "breaking" for issue in issues):
+        raise ApiProblem(422, "model_source_drift", "Source references need repair before browsing parameter values.", details={"issues": issues})
+    return domain_values_plan(catalog, lookup["table"], lookup["column"], lookup["labelColumn"], body.search)
 
 
 def domain_values_plan(catalog, table, column, label, search=""):
