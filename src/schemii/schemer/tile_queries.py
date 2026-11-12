@@ -14,7 +14,8 @@ from schemii.schemoo.models import ExploreState
 from schemii.schemoo.service import document, load_model, model_catalog, plan_query
 from schemii.schemoo.prototype import _literal
 from .models import ReportQuery
-from .time_analysis import bucket_expression, compile_time_analysis, validate_time_analysis
+from .time_analysis import bucket_expression, compile_time_analysis, validate_time_analysis, source_type
+from .dashboard_models import ReportOutput
 
 
 def _problem(message):
@@ -23,6 +24,72 @@ def _problem(message):
 
 def _key(field):
     return field.table, field.column
+
+
+def _output_key(field):
+    return field.table, field.column, field.aggregate, getattr(field, "kind", "value")
+
+
+def report_outputs(tile):
+    fields = tile.detail_fields if tile.kind == "detail" else [*tile.dimensions, *tile.measures]
+    outputs = [ReportOutput(**document(field)) for field in fields]
+    time = getattr(tile, "time_analysis", None)
+    if time:
+        for field in tile.measures:
+            kinds = (["comparison", "change", "percent_change"] if time.comparison != "none" else [])
+            if time.running_total:
+                kinds.append("running_total")
+            outputs.extend(ReportOutput(**document(field), kind=kind) for kind in kinds)
+    return outputs
+
+
+def validate_report_controls(tile, catalog, definition):
+    """Resolve selected semantic outputs and typed values, without slicer values."""
+    from datetime import date, datetime
+    from uuid import UUID
+
+    outputs = report_outputs(tile)
+    positions = {_output_key(output): index for index, output in enumerate(outputs)}
+    measure_keys = {_key(field) + (field.aggregate,) for field in tile.measures}
+    filters, ordering = [], []
+    for sort in getattr(tile, "sort", []):
+        if _output_key(sort) not in positions:
+            raise ApiProblem(422, "invalid_report_output", "A sort output is no longer selected. Repair it in the tile editor.")
+        ordering.append((positions[_output_key(sort)], sort.direction, sort.nulls))
+    for predicate in getattr(tile, "aggregate_filters", []):
+        if _output_key(predicate) not in positions or (*_key(predicate), predicate.aggregate) not in measure_keys:
+            raise ApiProblem(422, "invalid_report_output", "Aggregate filters must reference selected measures or their enabled time-analysis outputs.")
+        if predicate.kind in {"change", "percent_change", "running_total"} or predicate.aggregate in {"count", "count_distinct", "sum", "avg"}:
+            kind = "numeric"
+        else:
+            kind = source_type(catalog, definition, predicate.table, predicate.column)
+        value = predicate.value
+        if predicate.operator not in {"is_null", "not_null"}:
+            numeric = kind.split("(")[0].strip() in {"numeric", "decimal", "integer", "bigint", "smallint", "real", "double precision", "int2", "int4", "int8", "float4", "float8"}
+            valid = False
+            if numeric:
+                valid = type(value) in {int, float}
+            elif kind == "boolean":
+                valid = type(value) is bool and predicate.operator in {"eq", "ne"}
+            elif kind in {"text", "varchar", "character varying", "char", "character"}:
+                valid = isinstance(value, str)
+            elif isinstance(value, str):
+                try:
+                    if kind == "date":
+                        date.fromisoformat(value)
+                    elif kind.startswith("timestamp"):
+                        datetime.fromisoformat(value)
+                    elif kind == "uuid" and predicate.operator in {"eq", "ne"}:
+                        UUID(value)
+                    else:
+                        raise ValueError
+                    valid = True
+                except ValueError:
+                    pass
+            if not valid:
+                raise ApiProblem(422, "invalid_aggregate_filter", f"Choose a {kind} value and compatible operator for this aggregate output.")
+        filters.append((positions[_output_key(predicate)], predicate))
+    return outputs, ordering, filters
 
 
 class DashboardPlanning:
@@ -100,7 +167,7 @@ def _text_order_fields(catalog, definition, fields):
     return {index for index, field in enumerate(fields) if needs_text(field.table, field.column, field.aggregate)}
 
 
-def _ordered(plan, sql, page_size, text_order_fields=()):
+def _ordered(plan, sql, page_size, text_order_fields=(), *, ordering=(), filters=(), top_n=None):
     # One retained execution supplies forward-only batches. Sorting happens
     # once; subsequent result requests advance its cursor without rerunning SQL.
     # Keep numeric/date dimensions in their native order (not 1, 10, 2).
@@ -117,13 +184,31 @@ def _ordered(plan, sql, page_size, text_order_fields=()):
         for output, alias in zip(sql.expressions, aliases)
     ])
     sql = exp.select(*(exp.column(alias, table="page_rows", quoted=True) for alias in aliases)).from_(sql.subquery("page_rows"))
-    ordering = []
-    for index, alias in enumerate(aliases):
+    predicates = []
+    operators = {"eq": exp.EQ, "ne": exp.NEQ, "gt": exp.GT, "gte": exp.GTE, "lt": exp.LT, "lte": exp.LTE}
+    for index, predicate in filters:
+        column = exp.column(aliases[index], table="page_rows", quoted=True)
+        if predicate.operator in {"is_null", "not_null"}:
+            condition = exp.Is(this=column, expression=exp.Null())
+            if predicate.operator == "not_null":
+                condition = exp.Not(this=condition)
+        else:
+            condition = operators[predicate.operator](this=column, expression=parse_one(_literal(predicate.value), read="postgres"))
+        predicates.append(condition)
+    if predicates:
+        sql = sql.where(*predicates)
+    specified = {index for index, _, _ in ordering}
+    complete_order = [*ordering, *((index, "asc", "last") for index in range(len(aliases)) if index not in specified)]
+    ordered = []
+    for index, direction, nulls in complete_order:
+        alias = aliases[index]
         expression = exp.column(alias, table="page_rows", quoted=True)
         if index in text_order_fields:
             expression = exp.Cast(this=expression, to=exp.DataType.build("text"))
-        ordering.append(expression)
-    sql = sql.order_by(*ordering)
+        ordered.append(exp.Ordered(this=expression, desc=direction == "desc", nulls_first=nulls == "first"))
+    sql = sql.order_by(*ordered)
+    if top_n is not None:
+        sql = sql.limit(top_n)
     return {**plan, "sql": sql.sql(dialect="postgres") + ";", "rowLimit": page_size,
             "outputLabels": output_labels}
 
@@ -160,14 +245,17 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     original = plan_query(catalog, model.definition, query.explore, model.catalog_fingerprint, _bounded=False)
     time_analysis = getattr(tile, "time_analysis", None)
     time_kind = validate_time_analysis(tile, catalog, model.definition)
+    _, ordering, filters = validate_report_controls(tile, catalog, model.definition)
+    parent_statement = parse_one(original["sql"], read="postgres")
+    if time_analysis:
+        parent_statement, metadata = compile_time_analysis(tile, parent_statement, catalog, model.definition)
+        metadata["warnings"] = [*original.get("warnings", []), *metadata["warnings"]]
+        original.update(metadata)
+    parent_plan = _ordered(original, parent_statement, tile.limit,
+                          _text_order_fields(catalog, model.definition, query.explore.fields),
+                          ordering=ordering, filters=filters, top_n=getattr(tile, "top_n", None))
     if selection is None:
-        statement = parse_one(original["sql"], read="postgres")
-        if time_analysis:
-            statement, metadata = compile_time_analysis(tile, statement, catalog, model.definition)
-            metadata["warnings"] = [*original.get("warnings", []), *metadata["warnings"]]
-            original.update(metadata)
-        return model, _ordered(original, statement, tile.limit,
-                            _text_order_fields(catalog, model.definition, query.explore.fields))
+        return model, parent_plan
     if hasattr(selection, "model_dump"):
         selection = selection.model_dump(mode="json", by_alias=True)
     if tile.kind == "detail" or not tile.detail_fields:
@@ -212,10 +300,11 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
         for field, output in zip(raw_fields, statement.expressions)
     ])
     column = lambda key: exp.column(aliases[key], table="contributors", quoted=True)
-    conditions = []
+    conditions, parent_conditions = [], []
     for key, value in selected.items():
         if value is None:
             conditions.append(exp.Is(this=column(key), expression=exp.Null()))
+            literal = exp.Null()
         else:
             try:
                 literal = parse_one(_literal(value), read="postgres")
@@ -233,6 +322,14 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
                     _problem("Select a valid calendar bucket date.")
                 literal = exp.Cast(this=literal, to=exp.DataType.build("date"))
             conditions.append(exp.EQ(this=expression, expression=literal))
+        index = next(index for index, field in enumerate(tile.dimensions) if _key(field) == key)
+        parent_conditions.append(exp.NullSafeEQ(this=exp.column(f"output_{index + 1}", table="qualifying_parent", quoted=True), expression=literal.copy()))
+    # Qualify against the complete final parent relation. Never push a selected
+    # group into that relation before its windows, filters, ranking and top-N.
+    parent = exp.select(exp.Literal.number(1)).from_(parse_one(parent_plan["sql"], read="postgres").subquery("qualifying_parent"))
+    if parent_conditions:
+        parent = parent.where(*parent_conditions)
+    conditions.append(exp.Exists(this=parent))
     # SQL aggregates ignore NULL inputs, including count(column) and DISTINCT.
     # MIN/MAX drill shows all inputs used to compute the extremum, not just ties.
     measure = tile.measures[measure_index]

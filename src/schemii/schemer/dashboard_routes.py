@@ -9,6 +9,7 @@ from schemii.schemoo.derived import type_family
 from schemii.schemoo.routes import api_errors
 from schemii.schemoo.service import load_model, model_catalog, plan_query
 from .time_analysis import validate_time_analysis
+from .tile_queries import validate_report_controls
 from .access import available_dashboards, owned_report_services, prepare_dashboard
 from .dashboard_models import Dashboard, DashboardCreate, DashboardUpdate
 from .dashboard_store import (DashboardNotFoundError, DashboardConflictError,
@@ -111,6 +112,7 @@ def validate_dashboard(services, owner, body):
                 plan_query(catalog, definition, ExploreState(root=definition.root, fields=fields,
                     reportFilters=tile.report_filters, limit=tile.limit), model.catalog_fingerprint)
         validate_time_analysis(tile, catalog, definition)
+        validate_report_controls(tile, catalog, definition)
         for field in tile.measures:
             if tile.kind in {"bar", "line", "donut"} and field.aggregate not in {"count", "count_distinct"} and not numeric(field.table, field.column):
                 raise ValueError("Charts require numeric measures")

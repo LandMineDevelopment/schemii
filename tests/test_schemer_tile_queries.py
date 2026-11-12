@@ -46,7 +46,10 @@ def test_chart_and_drill_keep_join_and_group(context):
     assert 'LEFT JOIN "public"."org"' in drill["sql"]
     assert '"contributors"."field_1" = ' in drill["sql"]
     assert 'NOT "contributors"."field_2" IS NULL' in drill["sql"]
-    assert 'GROUP BY' not in drill["sql"]
+    assert 'GROUP BY' in drill["sql"]  # The qualifying parent aggregates; contributors remain raw.
+    from sqlglot import exp
+    raw = next(node for node in parse_one(drill["sql"], read="postgres").find_all(exp.Subquery) if node.alias == "contributors")
+    assert raw.this.args.get("group") is None
     assert 'LIMIT' not in drill["sql"] and 'OFFSET' not in drill["sql"]
     assert any("count once" in warning for warning in drill["warnings"])
 
@@ -166,7 +169,7 @@ def test_new_detail_branch_preserves_required_exists(context):
     assert 'LEFT JOIN "public"."cert"' in drill["sql"]
 
 
-def execute(sql):
+def execute(sql, *, extra=""):
     import sqlite3
     from sqlglot import exp
     with sqlite3.connect(":memory:") as connection:
@@ -179,6 +182,8 @@ def execute(sql):
             INSERT INTO public.people VALUES (1, 'Alice', 1), (2, 'Bob', 1), (3, 'Carol', 2), (NULL, 'Unknown', 1);
             INSERT INTO public.cert VALUES ('special', 1), ('other', 1), ('other', 2);
         """)
+        if extra:
+            connection.executescript(extra)
         sql = parse_one(sql, read="postgres").transform(
             lambda node: exp.Literal.string(node.this) if isinstance(node, exp.ByteString) else node).sql(dialect="sqlite")
         return connection.execute(sql).fetchall()
@@ -266,7 +271,7 @@ def test_json_detail_uses_text_only_for_unorderable_output(context):
     catalog = queries.model_catalog(None, None, model)
     catalog["tables"][0]["columns"][1]["dataType"] = "json"
     _, plan = queries.tile_plan(None, None, dashboard, tile.id)
-    assert 'ORDER BY "page_rows"."output_1", CAST("page_rows"."output_2" AS TEXT)' in plan["sql"]
+    assert 'ORDER BY "page_rows"."output_1" ASC, CAST("page_rows"."output_2" AS TEXT) ASC' in plan["sql"]
     assert plan["outputLabels"] == ["people.id", "people.name"]
 
 
@@ -332,3 +337,125 @@ def test_dashboard_can_save_and_plan_count_with_join_multiplication(context, mon
     })
     services = NS(admin_config=NS(console=NS(maximum_statements_per_run=20)))
     dashboard_routes.validate_dashboard(services, "alice", request)
+
+
+def controls(tile, *, sort=None, top_n=None, filters=None):
+    from schemii.schemer.dashboard_models import ReportSort, AggregateFilter
+    tile.sort = [ReportSort.model_validate(item) for item in sort or []]
+    tile.top_n = top_n
+    tile.aggregate_filters = [AggregateFilter.model_validate(item) for item in filters or []]
+    return tile
+
+
+def test_topn_ranks_complete_groups_and_drill_qualifies_parent_without_limiting_contributors(context):
+    dashboard, tile, _ = context
+    measure = {"table": "people", "column": "id", "aggregate": "count_distinct"}
+    controls(tile, sort=[{**measure, "direction": "desc"}], top_n=1,
+             filters=[{**measure, "operator": "gt", "value": 1}])
+    tile.limit = 1
+    _, plan = queries.tile_plan(None, None, dashboard, tile.id)
+    assert execute(plan["sql"]) == [("Engineering", 2)]
+    assert plan["rowLimit"] == 1
+    _, winner = queries.tile_plan(None, None, dashboard, tile.id, selection=selection())
+    _, excluded = queries.tile_plan(None, None, dashboard, tile.id, selection=selection("Sales"))
+    assert execute(winner["sql"]) == [("Alice",), ("Bob",)]
+    assert execute(excluded["sql"]) == []
+    # LIMIT belongs solely to the ranked parent relation, never contributor rows.
+    from sqlglot import exp
+    statement = parse_one(winner["sql"], read="postgres")
+    assert len(list(statement.find_all(exp.Limit))) == 1
+    raw = next(node for node in statement.find_all(exp.Subquery) if node.alias == "contributors")
+    assert not raw.this.args.get("limit") and not raw.this.args.get("group")
+
+
+def test_source_predicates_then_aggregate_predicates_then_sort_and_topn(context):
+    from schemii.schemoo.models import ReportFilter
+    dashboard, tile, _ = context
+    tile.report_filters = [ReportFilter.model_validate({"mode": "rows", "conditions": [
+        {"table": "people", "column": "name", "operator": "ne", "value": "Bob"}]} )]
+    measure = {"table": "people", "column": "id", "aggregate": "count_distinct"}
+    controls(tile, sort=[{**measure, "direction": "desc"}], top_n=1,
+             filters=[{**measure, "operator": "gte", "value": 1}, {**measure, "operator": "lte", "value": 1}])
+    _, plan = queries.tile_plan(None, None, dashboard, tile.id)
+    # Equal totals break on the remaining organization output, not source order.
+    assert execute(plan["sql"]) == [("Engineering", 1)]
+    assert "WHERE t0." in plan["sql"] and 'WHERE "page_rows"."output_2"' in plan["sql"]
+
+
+def test_null_sort_priority_and_null_safe_parent_qualification(context):
+    dashboard, tile, _ = context
+    controls(tile, sort=[{"table": "org", "column": "name", "direction": "asc", "nulls": "first"}], top_n=1)
+    extra = "INSERT INTO public.org VALUES (3,NULL); INSERT INTO public.people VALUES (4,'Dana',3);"
+    _, parent = queries.tile_plan(None, None, dashboard, tile.id)
+    assert execute(parent["sql"], extra=extra) == [(None, 1)]
+    _, drill = queries.tile_plan(None, None, dashboard, tile.id, selection=selection(None))
+    assert execute(drill["sql"], extra=extra) == [("Dana",)]
+    assert 'IS NOT DISTINCT FROM NULL' in drill["sql"]
+    _, omitted = queries.tile_plan(None, None, dashboard, tile.id, selection=selection())
+    assert execute(omitted["sql"], extra=extra) == []
+
+
+def test_explicit_null_aggregate_predicates_keep_sql_null_semantics(context):
+    dashboard, tile, _ = context
+    tile.kind = "aggregate"
+    tile.measures = [field("people", "name", "min")]
+    controls(tile, filters=[{"table": "people", "column": "name", "aggregate": "min", "operator": "is_null"}])
+    _, plan = queries.tile_plan(None, None, dashboard, tile.id)
+    extra = "INSERT INTO public.org VALUES (3,'Empty'); INSERT INTO public.people VALUES (4,NULL,3);"
+    assert execute(plan["sql"], extra=extra) == [("Empty", None)]
+
+
+def test_dimensionless_kpi_parent_filter_applies_before_any_drill_rows(context):
+    dashboard, tile, _ = context
+    tile.kind, tile.dimensions = "kpi", []
+    measure = {"table": "people", "column": "id", "aggregate": "count_distinct"}
+    controls(tile, top_n=1, filters=[{**measure, "operator": "gt", "value": 3}])
+    selected = {"dimensions": [], "measureIndex": 0}
+    _, excluded = queries.tile_plan(None, None, dashboard, tile.id, selection=selected)
+    assert execute(excluded["sql"]) == []
+    controls(tile, top_n=1, filters=[{**measure, "operator": "gte", "value": 3}])
+    _, included = queries.tile_plan(None, None, dashboard, tile.id, selection=selected)
+    assert execute(included["sql"]) == [("Alice",), ("Bob",), ("Carol",)]
+
+
+def test_detail_sort_uses_semantic_selected_output_and_independent_topn(context):
+    dashboard, tile, _ = context
+    tile.kind = "detail"; tile.detail_fields = [field("people", "name"), field("people", "id")]
+    controls(tile, sort=[{"table": "people", "column": "id", "direction": "desc"}], top_n=1)
+    _, plan = queries.tile_plan(None, None, dashboard, tile.id)
+    assert execute(plan["sql"]) == [("Carol", 3)]
+    assert '"output_2" DESC' in plan["sql"] and 'NULLS LAST' in plan["sql"]
+
+
+@pytest.mark.parametrize("change", [
+    {"sort": [{"table": "people", "column": "name"}]},
+    {"filters": [{"table": "org", "column": "name", "operator": "eq", "value": "Engineering"}]},
+    {"filters": [{"table": "people", "column": "id", "aggregate": "count_distinct", "kind": "running_total", "operator": "gt", "value": 1}]},
+    {"filters": [{"table": "people", "column": "id", "aggregate": "count_distinct", "operator": "gt", "value": "1"}]},
+    {"filters": [{"table": "people", "column": "id", "aggregate": "count_distinct", "operator": "eq", "value": True}]},
+])
+def test_unavailable_or_incompatible_report_outputs_reject(context, change):
+    dashboard, tile, _ = context
+    controls(tile, **change)
+    with pytest.raises(ApiProblem):
+        queries.tile_plan(None, None, dashboard, tile.id)
+
+
+@pytest.mark.parametrize("kind,value,valid", [
+    ("text", "O'Reilly; DROP TABLE source", True), ("text", 20, False),
+    ("date", "2024-02-29", True), ("date", "2024-02-30", False),
+    ("timestamp with time zone", "2024-01-01T10:00:00+00:00", True),
+    ("boolean", True, True), ("boolean", 1, False),
+])
+def test_aggregate_comparison_literals_follow_native_output_types(context, kind, value, valid):
+    dashboard, tile, model = context
+    catalog = queries.model_catalog(None, None, model)
+    catalog["tables"][0]["columns"][1]["dataType"] = kind
+    tile.kind = "aggregate"; tile.measures = [field("people", "name", "min")]
+    controls(tile, filters=[{"table": "people", "column": "name", "aggregate": "min", "operator": "eq", "value": value}])
+    if valid:
+        _, plan = queries.tile_plan(None, None, dashboard, tile.id)
+        assert parse_one(plan["sql"], read="postgres").key == "select"
+    else:
+        with pytest.raises(ApiProblem, match="compatible operator"):
+            queries.tile_plan(None, None, dashboard, tile.id)

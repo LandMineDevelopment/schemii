@@ -846,3 +846,74 @@ test('missing physical model sources give a reachable Schemoo repair path withou
   await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
   expect(writes).toHaveLength(0); expect(fixture.dashboard.modelRevision).toBe(1); expect(errors).toEqual([]);
 });
+
+
+test('sort priorities aggregate-result filters and semantic Top N persist through tile reopen', async ({ page }) => {
+  const { fixture, errors } = await mock(page);
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  let editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+  await editor.getByRole('button', { name: 'Add sort priority' }).click();
+  await editor.getByRole('combobox', { name: 'Sort 1 output', exact: true }).fill('COUNT');
+  await page.getByRole('option', { name: 'COUNT · Personnel · id', exact: true }).click();
+  await editor.getByRole('combobox', { name: 'Sort 1 direction', exact: true }).fill('Descending');
+  await page.getByRole('option', { name: 'Descending', exact: true }).click();
+  await editor.getByRole('combobox', { name: 'Sort 1 NULL placement', exact: true }).fill('NULLs first');
+  await page.getByRole('option', { name: 'NULLs first', exact: true }).click();
+  await editor.getByRole('spinbutton', { name: 'Top N results', exact: true }).fill('10');
+  await editor.getByRole('button', { name: 'Add aggregate-result filter' }).click();
+  await editor.getByRole('spinbutton', { name: 'Result filter 1 value', exact: true }).fill('20');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor).toHaveCount(0);
+  expect(fixture.dashboard.tiles[0]).toMatchObject({ topN: 10, limit: 2,
+    sort: [{ table: 'person', column: 'id', aggregate: 'count', kind: 'value', direction: 'desc', nulls: 'first' }],
+    aggregateFilters: [{ table: 'person', column: 'id', aggregate: 'count', kind: 'value', operator: 'gt', value: 20 }] });
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+  await expect(editor.getByRole('combobox', { name: 'Sort 1 direction', exact: true })).toHaveValue('Descending');
+  await expect(editor.getByRole('combobox', { name: 'Sort 1 NULL placement', exact: true })).toHaveValue('NULLs first');
+  await expect(editor.getByRole('spinbutton', { name: 'Top N results', exact: true })).toHaveValue('10');
+  await expect(editor.getByRole('spinbutton', { name: 'Result filter 1 value', exact: true })).toHaveValue('20');
+  const viewport = page.viewportSize();
+  const save = await editor.getByRole('button', { name: 'Apply & run' }).boundingBox();
+  expect(save.y + save.height).toBeLessThanOrEqual(viewport.height + 2);
+  expect(errors).toEqual([]);
+});
+
+test('invalid Top N stays local with a recoverable validation message', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page);
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+  await editor.getByRole('spinbutton', { name: 'Top N results', exact: true }).fill('2.5');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor.getByRole('alert')).toContainText('positive whole number');
+  expect(writes).toHaveLength(0);
+  await editor.getByRole('spinbutton', { name: 'Top N results', exact: true }).fill('3');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor).toHaveCount(0); expect(fixture.dashboard.tiles[0].topN).toBe(3);
+  expect(errors).toEqual([]);
+});
+
+test('model-upgrade review preserves unavailable sort outputs until an explicit tile repair', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.dashboard.tiles[0].sort = [{ table: 'person', column: 'removed', aggregate: 'sum', kind: 'value', direction: 'desc', nulls: 'last' }];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('Sort 1: choose a selected output');
+  await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
+  await review.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+  await expect(editor.getByRole('combobox', { name: 'Sort 1 output', exact: true })).toHaveValue('person · removed (unavailable output)');
+  await editor.getByRole('button', { name: 'Remove sort 1', exact: true }).click();
+  await editor.getByRole('button', { name: 'Apply repair', exact: true }).click();
+  expect(writes).toHaveLength(0);
+  await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+  await expect(review).toHaveCount(0);
+  expect(writes).toHaveLength(1); expect(writes[0].tiles[0].sort).toEqual([]); expect(errors).toEqual([]);
+});

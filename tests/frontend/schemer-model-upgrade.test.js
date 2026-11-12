@@ -256,3 +256,15 @@ test('pagehide disposes an upgrade review and ignores pending context responses'
   response.resolve({ model: f.model, catalog: f.catalog, permissions: { edit: true } }); await opening;
   assert.equal(f.dialog().open, false); assert.equal(f.snapshot('model').revision, 1);
 });
+
+
+test('upgrade preserves stale report sort and aggregate-filter references for explicit tile repair', () => {
+  const { dashboard, model, catalog, tile } = data();
+  tile.sort = [{ table: 'people', column: 'id', aggregate: 'count', kind: 'running_total', direction: 'desc', nulls: 'last' }];
+  tile.aggregateFilters = [{ table: 'people', column: 'gone', aggregate: 'sum', operator: 'gt', value: 10 }];
+  const before = structuredClone(tile), draft = modelUpgradeDraft(dashboard, model);
+  const issues = modelUpgradeIssues(draft, model, catalog);
+  assert(issues.some(issue => /Sort 1/.test(issue.message)));
+  assert(issues.some(issue => /Result filter 1/.test(issue.message)));
+  assert.deepEqual(draft.tiles[0].sort, before.sort); assert.deepEqual(draft.tiles[0].aggregateFilters, before.aggregateFilters);
+});

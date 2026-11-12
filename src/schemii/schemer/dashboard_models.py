@@ -1,5 +1,6 @@
 """Dashboard configuration only: no query results are retained."""
 from datetime import datetime
+import math
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field, model_validator
@@ -24,6 +25,35 @@ class TimeAnalysis(Contract):
         return self
 
 
+class ReportOutput(SelectedField):
+    """A semantic selected output, independent of position and display label."""
+
+    kind: Literal["value", "comparison", "change", "percent_change", "running_total"] = "value"
+
+
+class ReportSort(ReportOutput):
+    direction: Literal["asc", "desc"] = "asc"
+    nulls: Literal["first", "last"] = "last"
+
+
+class AggregateFilter(ReportOutput):
+    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "is_null", "not_null"]
+    value: str | int | float | bool | None = None
+
+    @model_validator(mode="after")
+    def valid_value(self):
+        if self.operator in {"is_null", "not_null"}:
+            if self.value is not None:
+                raise ValueError("NULL checks do not take a comparison value")
+        elif self.value is None:
+            raise ValueError("Choose a comparison value or an explicit NULL check")
+        if isinstance(self.value, float) and not math.isfinite(self.value):
+            raise ValueError("Aggregate filter numbers must be finite")
+        if isinstance(self.value, str) and (len(self.value) > 4000 or "\x00" in self.value):
+            raise ValueError("Aggregate filter text must contain at most 4000 characters and no null bytes")
+        return self
+
+
 class DashboardTile(Contract):
     id: str = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=128)
@@ -35,6 +65,9 @@ class DashboardTile(Contract):
     report_filters: list[ReportFilter] = Field(default_factory=list, max_length=32)
     limit: int = Field(default=100, ge=1, le=100)
     time_analysis: TimeAnalysis | None = None
+    sort: list[ReportSort] = Field(default_factory=list, max_length=32)
+    top_n: int | None = Field(default=None, strict=True, ge=1, le=2147483647)
+    aggregate_filters: list[AggregateFilter] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode="after")
     def valid_view(self):
@@ -63,6 +96,8 @@ class DashboardTile(Contract):
                 raise ValueError("The time field must be a selected dimension")
             if any(f.aggregate == "none" for f in self.measures):
                 raise ValueError("Time analysis measures require an explicit aggregation")
+        if len({(item.table, item.column, item.aggregate, item.kind) for item in self.sort}) != len(self.sort):
+            raise ValueError("Sort outputs must be unique")
         return self
 
 
