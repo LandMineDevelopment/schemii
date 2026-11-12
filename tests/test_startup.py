@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import json
 import os
 from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 START = ROOT / "start.sh"
@@ -775,3 +779,277 @@ def test_demo_launch_rejects_relative_private_state_before_runtime(tmp_path: Pat
     assert result.returncode != 0
     assert "demo state directory must be an absolute path" in result.stderr
     assert not commands.exists()
+
+
+RUNTIME_INSPECT_TEMPLATE = '{"id":{{json .Id}},"name":{{json .Name}},"status":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"restartCount":{{json .RestartCount}},"restartPolicy":{{json .HostConfig.RestartPolicy.Name}},"restartRetryLimit":{{json .HostConfig.RestartPolicy.MaximumRetryCount}},"composeProject":{{json (index .Config.Labels "com.docker.compose.project")}},"composeService":{{json (index .Config.Labels "com.docker.compose.service")}},"composeWorkingDirectory":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"composeConfigFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}}}'
+RUNTIME_ID = "a1" * 32
+RUNTIME_OTHER_ID = "b2" * 32
+
+
+def _runtime_record(identifier: str = RUNTIME_ID, **changes):
+    return {
+        "id": identifier, "name": "/foreign-workload-1", "status": "restarting",
+        "exitCode": 1, "restartCount": 25001, "restartPolicy": "on-failure",
+        "restartRetryLimit": 0, "composeProject": "another-project",
+        "composeService": "worker", "composeWorkingDirectory": "/untrusted/foreign checkout",
+        "composeConfigFiles": "/untrusted/foreign checkout/compose.yaml", **changes,
+    }
+
+
+def _runtime_inspection_fixture(tmp_path: Path, payloads=None):
+    # Deliberately no Compose file, Git metadata, or application configuration.
+    worktree = tmp_path / "runtime checkout ' dollar$ semicolon;"
+    worktree.mkdir()
+    shutil.copy2(START, worktree / "start.sh")
+    commands = tmp_path / "diagnostic-commands.jsonl"
+    payload_file = tmp_path / "diagnostic-payloads.json"
+    payload_file.write_text(json.dumps(payloads or {
+        RUNTIME_ID: {"stdout": json.dumps(_runtime_record())},
+        RUNTIME_OTHER_ID: {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID))},
+    }))
+    protected = tmp_path / "untouched"
+    protected.mkdir()
+    for name in ("secrets", "tls", "qa-state", "git-state"):
+        (protected / name).mkdir()
+        (protected / name / "retained").write_text("PRIVATE_RETAINED_STATE_SENTINEL")
+    reported_path = protected / "reported-path-must-not-open"
+    os.mkfifo(reported_path)
+    binary = tmp_path / "inspect-bin"
+    binary.mkdir()
+    for name, target in (("bash", "/bin/bash"), ("dirname", shutil.which("dirname")), ("python3", sys.executable)):
+        (binary / name).symlink_to(target)
+    docker_source = (
+        f"#!{sys.executable}\n"
+        "import json,os,re,sys\n"
+        "from pathlib import Path\n"
+        "args=sys.argv[1:]\n"
+        "with Path(os.environ['COMMAND_LOG']).open('a') as log: log.write(json.dumps(['docker',*args])+'\\n')\n"
+        "if args==['info']:\n"
+        " print('PRIVATE_INFO_STDOUT_SENTINEL')\n"
+        " print('PRIVATE_INFO_STDERR_SENTINEL',file=sys.stderr)\n"
+        " sys.exit(1 if os.environ.get('FAKE_STALE_GROUP') and not os.environ.get('FAKE_GROUP_REFRESHED') else 0)\n"
+        f"expected={RUNTIME_INSPECT_TEMPLATE!r}\n"
+        "if len(args)!=5 or args[:3]!=['container','inspect','--format'] or args[3]!=expected or not re.fullmatch('[0-9a-f]{64}',args[4]):\n"
+        " print('PRIVATE_FORBIDDEN_DOCKER_COMMAND',file=sys.stderr);sys.exit(93)\n"
+        "payload=json.loads(Path(os.environ['FAKE_INSPECT_PAYLOADS']).read_text()).get(args[4],{})\n"
+        "print(payload.get('stderr','PRIVATE_INSPECT_STDERR_SENTINEL'),file=sys.stderr)\n"
+        "sys.stdout.write(payload.get('stdout','PRIVATE_MISSING_CONTAINER_SENTINEL'))\n"
+        "sys.exit(payload.get('returncode',0))\n"
+    )
+    (binary / "docker").write_text(docker_source)
+    (binary / "docker").chmod(0o755)
+    tripwire = (
+        f"#!{sys.executable}\n"
+        "import json,os,sys\n"
+        "from pathlib import Path\n"
+        "with Path(os.environ['COMMAND_LOG']).open('a') as log: log.write(json.dumps(['FORBIDDEN',Path(sys.argv[0]).name,*sys.argv[1:]])+'\\n')\n"
+        "sys.exit(94)\n"
+    )
+    for name in ("git", "flock", "openssl", "compose", "mkdir", "mktemp", "chmod", "rm", "mv", "touch", "cat", "sed", "readlink", "node", "sudo", "newgrp", "id"):
+        (binary / name).write_text(tripwire)
+        (binary / name).chmod(0o755)
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("SCHEMII_")}
+    environment.update(
+        PATH=str(binary), COMMAND_LOG=str(commands), FAKE_INSPECT_PAYLOADS=str(payload_file),
+        PYTHONDONTWRITEBYTECODE="1", SCHEMII_TEST_APP_PORT="invalid-port",
+        SCHEMII_TEST_POSTGRES_DB="", SCHEMII_TEST_POSTGRES_PASSWORD="PRIVATE_ENV_SECRET_SENTINEL",
+        SCHEMII_STARTUP_TIMEOUT="invalid-timeout", SCHEMII_QA_LEASE_FD="invalid-fd",
+        SCHEMII_SECRET_DIRECTORY=str(protected / "secrets"),
+        SCHEMII_TLS_DIRECTORY=str(protected / "tls"),
+        SCHEMII_QA_STATE_DIRECTORY=str(protected / "qa-state"),
+        SCHEMII_LAUNCH_LOCK_FILE=str(protected / "must-not-create.lock"),
+        SCHEMII_START_TIMING_FILE=str(protected / "must-not-create-timing.json"),
+        SCHEMII_RUNTIME_RECEIPT=str(protected / "must-not-create-runtime.json"),
+    )
+    return worktree, environment, commands, protected, reported_path
+
+
+def _filesystem_snapshot(directory: Path):
+    result = {}
+    for path in directory.rglob("*"):
+        mode = path.lstat().st_mode
+        result[str(path.relative_to(directory))] = (
+            mode, path.read_bytes() if stat.S_ISREG(mode) else None,
+        )
+    return result
+
+
+def _run_runtime_inspection(worktree, environment, identifiers):
+    return subprocess.run([str(worktree / "start.sh"), "--inspect-runtime", *identifiers],
+        cwd=worktree, env=environment, capture_output=True, text=True, timeout=15, check=False)
+
+
+@pytest.mark.parametrize("identifiers", [
+    [], [RUNTIME_ID, RUNTIME_ID], ["a" * 63], ["a" * 65], ["A" * 64],
+    ["container-name"], ["--help"], ["--"], ["--format", RUNTIME_ID],
+    [RUNTIME_ID + "\n"], ["$(touch injected)"], [";touch injected"],
+    [f"{index:064x}" for index in range(9)],
+])
+def test_runtime_inspection_rejects_arguments_before_any_runtime_or_preflight(tmp_path, identifiers):
+    worktree, environment, commands, protected, _ = _runtime_inspection_fixture(tmp_path)
+    before = _filesystem_snapshot(protected)
+    result = _run_runtime_inspection(worktree, environment, identifiers)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "Schemii runtime inspection requires 1 through 8 distinct full lowercase container IDs\n"
+    assert not commands.exists()
+    assert _filesystem_snapshot(protected) == before
+    assert sorted(path.name for path in worktree.iterdir()) == ["start.sh"]
+
+
+def test_runtime_inspection_is_exact_bounded_foreign_metadata_without_side_effects(tmp_path):
+    identifiers = [f"{index:064x}" for index in range(1, 9)]
+    worktree, environment, commands, protected, reported_path = _runtime_inspection_fixture(tmp_path)
+    records = [_runtime_record(identifier, status="exited" if index % 2 else "restarting",
+        composeWorkingDirectory=str(reported_path), composeConfigFiles=str(reported_path))
+        for index, identifier in enumerate(identifiers)]
+    Path(environment["FAKE_INSPECT_PAYLOADS"]).write_text(json.dumps({
+        record["id"]: {"stdout": json.dumps(record)} for record in records
+    }))
+    before = _filesystem_snapshot(protected)
+    result = _run_runtime_inspection(worktree, environment, identifiers)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert [json.loads(line) for line in result.stdout.splitlines()] == records
+    events = [json.loads(line) for line in commands.read_text().splitlines()]
+    assert events == [["docker", "info"], *[
+        ["docker", "container", "inspect", "--format", RUNTIME_INSPECT_TEMPLATE, identifier]
+        for identifier in identifiers]]
+    assert _filesystem_snapshot(protected) == before
+    assert sorted(path.name for path in worktree.iterdir()) == ["start.sh"]
+    assert "PRIVATE_" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("changes,expected", [
+    ({key: "" for key in ("composeProject", "composeService", "composeWorkingDirectory", "composeConfigFiles")},
+     {key: None for key in ("composeProject", "composeService", "composeWorkingDirectory", "composeConfigFiles")}),
+    ({"composeProject": None, "composeService": None, "composeWorkingDirectory": None, "composeConfigFiles": None},
+     {"composeProject": None, "composeService": None, "composeWorkingDirectory": None, "composeConfigFiles": None}),
+    ({"composeProject": "foreign-project", "composeService": "", "composeWorkingDirectory": "/tmp/a\\b\"c\nline", "composeConfigFiles": "relative.yaml, /tmp/\u2603.yaml"},
+     {"composeProject": "foreign-project", "composeService": None, "composeWorkingDirectory": "/tmp/a\\b\"c\nline", "composeConfigFiles": "relative.yaml, /tmp/\u2603.yaml"}),
+])
+def test_runtime_inspection_keeps_unknown_ownership_and_json_escapes_opaque_paths(tmp_path, changes, expected):
+    record = _runtime_record(**changes)
+    worktree, environment, _, protected, _ = _runtime_inspection_fixture(tmp_path, {
+        RUNTIME_ID: {"stdout": json.dumps(record)},
+    })
+    before = _filesystem_snapshot(protected)
+    result = _run_runtime_inspection(worktree, environment, [RUNTIME_ID])
+    assert result.returncode == 0, result.stderr
+    assert len(result.stdout.splitlines()) == 1
+    assert json.loads(result.stdout) == {**record, **expected}
+    assert _filesystem_snapshot(protected) == before
+
+
+@pytest.mark.parametrize("payload", [
+    {"stdout": "PRIVATE_MALFORMED_JSON_SENTINEL"},
+    {"stdout": "[]"}, {"stdout": "null"},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_ID))},
+    {"stdout": json.dumps(_runtime_record("a" * 12))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, Env=["PRIVATE_ENV_METADATA_SENTINEL"]))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, Args=["PRIVATE_ARGS_SENTINEL"]))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, Cmd=["PRIVATE_CMD_SENTINEL"]))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, Mounts=["PRIVATE_MOUNT_SENTINEL"]))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, labels={"other": "PRIVATE_ALL_LABELS_SENTINEL"}))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, exitCode=True))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, exitCode="1"))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, restartCount=-1))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, restartRetryLimit=2**64))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, status="PRIVATE_INVALID_STATUS_SENTINEL"))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, restartPolicy="PRIVATE_POLICY_SENTINEL"))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, name=None))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, composeProject={"token": "PRIVATE_LABEL_SENTINEL"}))},
+    {"stdout": json.dumps({key: value for key, value in _runtime_record(RUNTIME_OTHER_ID).items() if key != "restartCount"})},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID))[:-1] + ',"id":"' + RUNTIME_OTHER_ID + '"}'},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID, composeConfigFiles="PRIVATE_OVERSIZE_SENTINEL" * 1000))},
+    {"stdout": json.dumps(_runtime_record(RUNTIME_OTHER_ID)), "returncode": 1, "stderr": "PRIVATE_DAEMON_ERROR_SENTINEL"},
+])
+def test_runtime_inspection_fails_closed_without_daemon_errors_or_partial_stdout(tmp_path, payload):
+    worktree, environment, commands, protected, _ = _runtime_inspection_fixture(tmp_path, {
+        RUNTIME_ID: {"stdout": json.dumps(_runtime_record())}, RUNTIME_OTHER_ID: payload,
+    })
+    before = _filesystem_snapshot(protected)
+    result = _run_runtime_inspection(worktree, environment, [RUNTIME_ID, RUNTIME_OTHER_ID])
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == f"Schemii runtime inspection failed for container {RUNTIME_OTHER_ID}\n"
+    assert "PRIVATE_" not in result.stderr
+    events = [json.loads(line) for line in commands.read_text().splitlines()]
+    assert all(event[0] == "docker" for event in events)
+    assert [event[-1] for event in events[1:]] == [RUNTIME_ID, RUNTIME_OTHER_ID]
+    assert _filesystem_snapshot(protected) == before
+
+
+def test_runtime_inspection_stale_group_genuinely_reexecutes_with_all_original_arguments(tmp_path):
+    import shlex
+
+    worktree, environment, commands, protected, _ = _runtime_inspection_fixture(tmp_path)
+    binary = Path(environment["PATH"])
+    (binary / "id").write_text(
+        "#!/bin/bash\n"
+        'case "$*" in\n'
+        '  -nG) if [[ -n "${FAKE_GROUP_REFRESHED-}" ]]; then printf "users docker\\n"; else printf "users\\n"; fi ;;\n'
+        '  -un) printf "runtime-test-account\\n" ;;\n'
+        '  "-nG runtime-test-account") printf "users docker\\n" ;;\n'
+        '  *) exit 95 ;;\n'
+        'esac\n'
+    )
+    (binary / "newgrp").write_text(
+        f"#!{sys.executable}\n"
+        "import json,os,sys\n"
+        "from pathlib import Path\n"
+        "assert sys.argv[1:3]==['docker','-c'] and len(sys.argv)==4\n"
+        "with Path(os.environ['COMMAND_LOG']).open('a') as log: log.write(json.dumps(['newgrp',*sys.argv[1:]])+'\\n')\n"
+        "environment={**os.environ,'FAKE_GROUP_REFRESHED':'1'}\n"
+        "os.execve('/bin/bash',['bash','-c',sys.argv[3]],environment)\n"
+    )
+    environment["FAKE_STALE_GROUP"] = "1"
+    before = _filesystem_snapshot(protected)
+    result = _run_runtime_inspection(worktree, environment, [RUNTIME_ID, RUNTIME_OTHER_ID])
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == "Refreshing this process with the account's Docker group membership...\n"
+    assert [json.loads(line)["id"] for line in result.stdout.splitlines()] == [RUNTIME_ID, RUNTIME_OTHER_ID]
+    events = [json.loads(line) for line in commands.read_text().splitlines()]
+    assert [event[:2] for event in events] == [
+        ["docker", "info"], ["newgrp", "docker"], ["docker", "info"],
+        ["docker", "container"], ["docker", "container"],
+    ]
+    assert shlex.split(events[1][3]) == ["exec", str(worktree / "start.sh"), "--inspect-runtime", RUNTIME_ID, RUNTIME_OTHER_ID]
+    assert _filesystem_snapshot(protected) == before
+    assert "PRIVATE_" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("failure", ["missing-docker", "no-group-access", "missing-newgrp"])
+def test_runtime_inspection_runtime_access_failure_is_sanitized_without_side_effects(tmp_path, failure):
+    worktree, environment, commands, protected, _ = _runtime_inspection_fixture(tmp_path)
+    binary = Path(environment["PATH"])
+    if failure == "missing-docker":
+        (binary / "docker").unlink()
+    else:
+        environment["FAKE_STALE_GROUP"] = "1"
+        groups = "users docker" if failure == "missing-newgrp" else "users"
+        (binary / "id").write_text(
+            '#!/bin/bash\n'
+            'case "$*" in\n'
+            '  -nG) printf "users\\n" ;;\n'
+            '  -un) printf "runtime-test-account\\n" ;;\n'
+            f'  "-nG runtime-test-account") printf "{groups}\\n" ;;\n'
+            '  *) exit 95 ;;\n'
+            'esac\n'
+        )
+        if failure == "missing-newgrp":
+            (binary / "newgrp").unlink()
+    before = _filesystem_snapshot(protected)
+    result = _run_runtime_inspection(worktree, environment, [RUNTIME_ID])
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "PRIVATE_" not in result.stderr
+    expected = {
+        "missing-docker": "Docker is not installed or is not on PATH",
+        "no-group-access": "Docker is unavailable; confirm that the daemon is running and the current account belongs to the docker group",
+        "missing-newgrp": "the account has Docker access, but this session is stale and newgrp is unavailable; start a new login session",
+    }
+    assert result.stderr == f"Schemii startup error: {expected[failure]}\n"
+    assert _filesystem_snapshot(protected) == before
+    if commands.exists():
+        assert [json.loads(line) for line in commands.read_text().splitlines()] == [["docker", "info"]]
