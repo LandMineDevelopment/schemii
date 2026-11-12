@@ -80,6 +80,7 @@ function fixture({ budget = new cacheModule.CacheBudget(), pending = false, wait
     select: () => nodes('expanded-chart-body')[0].onDrill(selection),
     drill: () => handlers.getStream(tile, selection),
     button: label => find(dialog, node => node.attributes['aria-label'] === label)[0],
+    paneTitle: text => find(dialog, node => node.className === 'pane-title' && node.textContent === text)[0],
     detailButton: text => find(nodes('drill-pane')[0], node => node.textContent === text)[0],
     text: className => nodes(className)[0].textContent,
     detailRows: () => find(nodes('drill-body')[0], node => node.tag === 'grid')[0].data.rows,
@@ -134,6 +135,32 @@ test('freshness: refreshing an unfinished drill aborts and disposes its old rows
     assert.ok(f.text('drill-request-times').includes(displayTime(refreshedAt)));
     assert.equal(f.budget.rows, 2); assert.equal(f.dashboardGroup.controller.signal.aborted, false);
     assert.equal(f.main.loading, true); assert.equal(fresh.loading, true);
+  } finally { await f.finish(); }
+});
+
+test('returning to the report pane stops hidden unfinished drill work and retains its partial preview', async () => {
+  const f = fixture({ pending: true });
+  try {
+    await Promise.resolve(); f.select(); const drill = f.drill();
+    f.paneTitle('Report').click(); f.flush();
+    assert.equal(f.requests[0].signal.aborted, true); assert.equal(drill.loading, false);
+    assert.match(drill.error, /Query stopped/); assert.deepEqual(drill.rows, [['original']]);
+    assert.equal(f.main.loading, true); assert.equal(f.dashboardGroup.controller.signal.aborted, false);
+    f.gates[0].resolve(); await drill.pending; f.flush();
+    f.paneTitle('Model detail rows').click(); f.flush();
+    assert.equal(f.requests.length, 1); assert.deepEqual(f.detailRows(), [['original']]);
+    f.setSource(['explicit-refresh']); f.button('Refresh detail rows').click(); f.flush();
+    assert.equal(f.requests.length, 2); assert.deepEqual(f.detailRows(), [['explicit-refresh']]);
+  } finally { await f.finish(); }
+});
+
+test('returning to the report pane preserves a completed drill for zero-query reopen', async () => {
+  const f = fixture();
+  try {
+    await Promise.resolve(); f.select(); const drill = f.drill(); await drill.pending; f.flush();
+    f.paneTitle('Report').click(); f.paneTitle('Model detail rows').click(); f.flush();
+    assert.equal(f.requests[0].signal.aborted, false); assert.equal(f.requests.length, 1);
+    assert.deepEqual(f.detailRows(), [['original']]); assert.equal(drill.error, '');
   } finally { await f.finish(); }
 });
 

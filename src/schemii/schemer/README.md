@@ -16,7 +16,8 @@ Completed drill previews are bounded browser results. Reopening one issues no ne
 query, retains its original request time, and labels it as an earlier cached
 result. **Refresh detail rows** disposes that selection's old preview and queries
 current data again, without refreshing or cancelling the report. Closing or
-switching away from an unfinished drill stops its request; the main dashboard's
+switching away from an unfinished drill, including returning to the report pane,
+stops its request; the main dashboard's
 eager stream keeps running. Cache eviction and browser row/byte limits remain in
 force, including after Refresh. If no browser budget is available, no new source
 query starts.

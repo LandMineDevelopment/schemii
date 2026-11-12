@@ -62,7 +62,8 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
   const scheduleMain = () => { if (!mainScheduled) { mainScheduled = true; requestAnimationFrame(() => { mainScheduled = false; renderMain(); }); } };
   const scheduleDetails = () => { if (!detailScheduled) { detailScheduled = true; requestAnimationFrame(() => { detailScheduled = false; renderDetails(); }); } };
   function pane(which) { dialog.classList.toggle('show-details', which === 'details'); chartTitle.setAttribute('aria-expanded', which === 'chart'); detailTitle.setAttribute('aria-expanded', which === 'details'); }
-  chartTitle.onclick = () => pane('chart'); detailTitle.onclick = () => pane('details');
+  chartTitle.onclick = () => { if (detailCache?.hasMore) void detailCache.close(); pane('chart'); };
+  detailTitle.onclick = () => pane('details');
   function releaseDrill() {
     unsubscribeDrill?.(); unsubscribeDrill = null;
     if (detailCache?.hasMore) void detailCache.close();
