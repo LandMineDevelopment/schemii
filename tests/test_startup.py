@@ -664,3 +664,114 @@ def test_startup_rejects_a_concurrent_lifecycle_before_mutating_state(
     commands = command_log.read_text(encoding="utf-8")
     assert "build schemii" not in commands
     assert "rm --stop" not in commands
+
+
+def _demo_launcher_fixture(tmp_path: Path):
+    primary, worktree = tmp_path / "primary", tmp_path / "demo-checkout"
+    _copy_launcher_worktree(primary)
+    _copy_launcher_worktree(worktree)
+    command_log = tmp_path / "demo-commands.log"
+    environment = _mock_launcher_environment(
+        tmp_path,
+        [primary, worktree],
+        command_log,
+        tls_directory=tmp_path / "tls",
+        lock_file=tmp_path / "launch.lock",
+        qa_state_directory=tmp_path / "qa",
+    )
+    environment["SCHEMII_SECRET_DIRECTORY"] = str(tmp_path / "secrets")
+    helper = worktree / "dev/demo/prepare.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "mode = sys.argv[1]\n"
+        "with Path(os.environ['COMMAND_LOG']).open('a') as log:\n"
+        "    log.write('helper:' + ' '.join(sys.argv[1:]) + '\\n')\n"
+        "if mode == 'request':\n"
+        "    if os.environ.get('FAIL_DEMO_REQUEST'): sys.exit(41)\n"
+        "    print(json.dumps({'password': 'PRIVATE_DEMO_STDIN_SENTINEL'}))\n"
+        "else:\n"
+        "    assert json.load(sys.stdin)['workspace_id'].startswith('ws_')\n"
+        "    if os.environ.get('FAIL_DEMO_VERIFY'): sys.exit(43)\n"
+        "    print('Verified demo workspace and actual database rows')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "mock-bin/docker").write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *' exec -T schemii python -c '*)\n"
+        "    printf 'runtime:provision\\n' >> \"$COMMAND_LOG\"\n"
+        "    cat >/dev/null\n"
+        "    [ -z \"$FAIL_DEMO_PROVISION\" ] || exit 42\n"
+        "    printf '{\"workspace_id\":\"ws_0123456789abcdef0123456789abcdef\"}\\n' ;;\n"
+        "  *'up --detach --remove-orphans --wait'*)\n"
+        "    printf 'runtime:health-reset=%s\\n' \"$SCHEMII_RESET_MIGRATION_DEMO\" >> \"$COMMAND_LOG\"\n"
+        "    [ -z \"$FAIL_DEMO_HEALTH\" ] || exit 40 ;;\n"
+        "  *) printf 'runtime:%s\\n' \"$*\" >> \"$COMMAND_LOG\" ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    return primary, worktree, environment, command_log
+
+
+def _run_demo_launcher(worktree: Path, environment: dict[str, str]):
+    return subprocess.run(
+        [str(worktree / "start.sh"), "--demo"],
+        cwd=worktree,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+
+def test_demo_launch_prepares_after_health_and_verifies_before_ready(tmp_path: Path):
+    primary, worktree, environment, commands = _demo_launcher_fixture(tmp_path)
+    environment["SCHEMII_RESET_MIGRATION_DEMO"] = "1"
+    result = _run_demo_launcher(worktree, environment)
+
+    assert result.returncode == 0, result.stderr
+    events = commands.read_text()
+    assert events.index("runtime:health-reset=0") < events.index("helper:request")
+    assert events.index("runtime:provision") < events.index("helper:verify")
+    assert f"--state-directory {primary}/.schemii/demo" in events
+    assert "--target-database schemii_test --target-username schemii" in events
+    assert "--origin https://localhost:8123" in events
+    assert "--preview-origin https://omarchy.taile4f57f.ts.net" in events
+    assert "demo-fixture" not in events
+    assert "PRIVATE_DEMO_STDIN_SENTINEL" not in result.stdout + result.stderr
+    assert result.stdout.index("Verified demo workspace") < result.stdout.index("Schemii is ready")
+
+
+def test_demo_launch_propagates_each_failure_without_announcing_ready(tmp_path: Path):
+    failures = {
+        "FAIL_DEMO_HEALTH": "the application service did not become healthy",
+        "FAIL_DEMO_REQUEST": "demo account and database preparation failed",
+        "FAIL_DEMO_PROVISION": "demo account and database preparation failed",
+        "FAIL_DEMO_VERIFY": "demo readiness verification failed",
+    }
+    for flag, message in failures.items():
+        case = tmp_path / flag
+        case.mkdir()
+        _, worktree, environment, commands = _demo_launcher_fixture(case)
+        environment[flag] = "1"
+        result = _run_demo_launcher(worktree, environment)
+
+        assert result.returncode != 0
+        assert message in result.stderr
+        assert "Schemii is ready" not in result.stdout
+        assert "PRIVATE_DEMO_STDIN_SENTINEL" not in result.stdout + result.stderr
+        if flag == "FAIL_DEMO_HEALTH":
+            assert "helper:request" not in commands.read_text()
+
+
+def test_demo_launch_rejects_relative_private_state_before_runtime(tmp_path: Path):
+    _, worktree, environment, commands = _demo_launcher_fixture(tmp_path)
+    environment["SCHEMII_DEMO_STATE_DIRECTORY"] = "relative-demo-state"
+    result = _run_demo_launcher(worktree, environment)
+
+    assert result.returncode != 0
+    assert "demo state directory must be an absolute path" in result.stderr
+    assert not commands.exists()
