@@ -22,30 +22,12 @@ def source_type(
 ) -> str:
     node = next(node for node in definition.nodes if node.id == table)
     if node.derivation:
-        output = next(
-            (item for item in node.derivation.outputs if item.id == column), None
+        from schemii.schemoo.prototype import model_field_details
+
+        details = model_field_details(
+            catalog, definition.model_dump(exclude_none=True), table, column
         )
-        if output:
-            if output.operation in {
-                "count",
-                "count_distinct",
-                "sum",
-                "avg",
-                "add",
-                "subtract",
-                "multiply",
-                "divide",
-            }:
-                return "numeric"
-            if output.operation == "list":
-                return "text"
-            return source_type(
-                catalog,
-                definition,
-                output.nodeId or node.derivation.source,
-                output.column,
-            )
-        return source_type(catalog, definition, node.derivation.source, column)
+        return details.get("dataType", "")
     details = next(
         c
         for t in catalog["tables"]
