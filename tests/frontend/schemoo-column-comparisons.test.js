@@ -79,3 +79,14 @@ test("qualified same-named sources never borrow another schema's comparison type
   scope.alternatives[0].inputs[0].domain.namespace="one";
   assert.match(modelFilterIssue(scope,draft,catalog),/valid domain value column/);
 });
+
+test("calculated comparisons use validated output types and retain invalid references for repair",()=>{
+  const {draft,catalog}=fixture();
+  draft.nodes.push({id:"summary",table:"orders_table",derivation:{kind:"aggregate",source:"orders",groupBy:["delivered"],outputs:[
+    {id:"n",operation:"count",column:"status"},{id:"total",operation:"sum",column:"target"},{id:"date",operation:"min",column:"delivered"},{id:"bad",operation:"sum",column:"status"}]}});
+  const condition={table:"summary",column:"n",operator:"gt",compareColumn:"total"};
+  assert.deepEqual(comparisonColumns(condition,draft,catalog).map(column=>column.name),["n","total"]);
+  assert.equal(columnComparisonIssue(condition,draft,catalog),"");
+  assert.match(columnComparisonIssue({...condition,compareColumn:"date"},draft,catalog),/compatible/);
+  assert.match(columnComparisonIssue({...condition,compareColumn:"bad"},draft,catalog),/compatible/);
+});

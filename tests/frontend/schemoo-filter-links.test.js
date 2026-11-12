@@ -105,10 +105,10 @@ test("column bindings preserve scopes, alternatives and AND positions without in
   assert.deepEqual(columnFilterBindings(draft, "certs", "missing"), []);
 });
 
-test("column bindings never manufacture references for derived or missing nodes", () => {
+test("column bindings preserve explicitly authored derived bindings and omit missing nodes", () => {
   const {draft} = fixture();
   draft.scopes.push(rule("invalid calculated binding", "summary"));
-  assert.deepEqual(columnFilterBindings(draft, "summary", "id"), []);
+  assert.equal(columnFilterBindings(draft, "summary", "id").length, 1);
   assert.deepEqual(columnFilterBindings(draft, "missing", "id"), []);
 });
 
