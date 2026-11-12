@@ -169,8 +169,10 @@ def test_provisioner_revocation_applies_to_existing_session(client):
     client.post('/api/v1/auth/login',json=dict(username='operator',password='operator-password-123'))
     operator_cookie=client.cookies.get(COOKIE)
     assert client.get('/api/v1/admin/accounts').status_code==200
+    client.cookies.clear()
     client.cookies.set(COOKIE,bootstrap_cookie)
     assert client.patch('/api/v1/admin/accounts/'+provisioner['id'],json={'is_admin':False}).status_code==200
+    client.cookies.clear()
     client.cookies.set(COOKIE,operator_cookie)
     assert client.get('/api/v1/admin/accounts').status_code==403
     assert client.get('/api/v1/auth/me').json()['capabilities']==[]
@@ -224,11 +226,13 @@ def test_direct_app_access_needs_no_database_and_is_separate_from_roles(client,a
     user_cookie=client.cookies.get(COOKIE)
     assert client.get('/api/v1/schemii/workspaces').status_code==200
     assert client.get('/api/v1/schemoo/models').status_code==403
+    client.cookies.clear()
     client.cookies.set(COOKIE,admin_cookie)
     assert client.patch('/api/v1/admin/accounts/'+user['id'],json={
         'direct_access':{'capabilities':['schemer:access']}}).status_code==200
     assert client.put('/api/v1/admin/roles/role_personal_'+user['id'],json={
         'name':'Forged', 'capabilities':['schemii:access']}).status_code==403
+    client.cookies.clear()
     client.cookies.set(COOKIE,user_cookie)
     assert client.get('/api/v1/schemii/workspaces').status_code==403
     assert client.get('/api/v1/schemer/dashboards').status_code==200
@@ -248,6 +252,7 @@ def test_admin_removes_account_sessions_and_memberships(client,app):
     assert client.post('/api/v1/auth/login',json=dict(
         username='temporary',password='temporary-password-123')).status_code==200
     temporary_cookie=client.cookies.get(COOKIE)
+    client.cookies.clear()
     client.cookies.set(COOKIE,admin_cookie)
     assert client.delete('/api/v1/admin/accounts/'+user['id']).status_code==204
     assert app.state.auth.resolve(temporary_cookie) is None
@@ -267,8 +272,10 @@ def test_schemer_viewer_cannot_edit_and_author_can(client,app):
     viewer_cookie=client.cookies.get(COOKIE)
     assert client.get('/api/v1/schemer/dashboards').status_code==200
     assert client.post('/api/v1/schemer/dashboards').status_code==403
+    client.cookies.clear()
     client.cookies.set(COOKIE,admin_cookie)
     assert client.put('/api/v1/admin/roles/'+role['id'],json=dict(name='Report access',capabilities=['schemer:access','schemer:author'],user_ids=[user['id']])).status_code==200
+    client.cookies.clear()
     client.cookies.set(COOKIE,viewer_cookie)
     assert client.post('/api/v1/schemer/dashboards').status_code==200
 
