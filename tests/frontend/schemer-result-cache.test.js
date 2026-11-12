@@ -226,3 +226,77 @@ for (const limit of [{ rows: 0 }, { bytes: 0 }, { rows: 1 }, { bytes: 112 }]) {
     } finally { await fixture.finish(); }
   });
 }
+
+function reservedCaches({ rows: rowLimit = 4, bytes = 100000, ids = ['detail', 'kpi'] } = {}) {
+  const budget = new CacheBudget({ rows: rowLimit, bytes });
+  const group = new DashboardResultGroup({ budget, tileIds: ids, start: async () => {} });
+  const caches = new Map(ids.map(id => [id, new ResultCache({ budget: group.budgetFor(id), start: async () => {} })]));
+  for (const [id, cache] of caches) group.listeners.set(id, frame => cache.accept(frame));
+  group.accept({ type: 'start', tiles: ids.map(tileId => ({ tileId, plan: {} })) });
+  return { budget, group, caches };
+}
+
+test('early detail and drill cannot spend the later main tile protected row allocation', () => {
+  const { budget, group, caches } = reservedCaches();
+  assert.equal(budget.available, false, 'drills see only unreserved capacity');
+  group.accept({ ...rows([1, 2, 3, 4]), tileId: 'detail' });
+  assert.deepEqual(caches.get('detail').rows, [[1], [2]]);
+  assert.equal(caches.get('detail').reason, 'browser_dashboard_budget');
+  assert.equal(group.controller.signal.aborted, false);
+  assert.equal(budget.take(['drill']), 0);
+  group.accept({ ...rows([9, 10]), tileId: 'kpi' });
+  group.accept({ ...complete, tileId: 'kpi' });
+  assert.deepEqual(caches.get('kpi').rows, [[9], [10]]);
+  assert.equal(budget.rows, 4);
+  for (const cache of caches.values()) cache.dispose();
+  assert.equal(budget.rows, 0); assert.equal(budget.bytes, 0); assert.equal(budget.reservations.size, 0);
+});
+
+test('decoded wide Unicode rows respect protected byte shares without starving siblings', () => {
+  const { budget, group, caches } = reservedCaches({ bytes: 600 });
+  group.accept({ ...rows(['😀'.repeat(100)]), tileId: 'detail' });
+  assert.equal(caches.get('detail').rows.length, 0);
+  assert.equal(caches.get('detail').limitReached, true);
+  group.accept({ ...rows(['é', 'small']), tileId: 'kpi' });
+  assert.equal(caches.get('kpi').rows.length, 2);
+  assert.ok(budget.bytes <= 600);
+});
+
+test('unused completed and invalid tile reservations reclaim once while retained rows stay charged', () => {
+  const { budget, group, caches } = reservedCaches({ rows: 6, ids: ['detail', 'empty', 'bad'] });
+  group.accept({ type: 'start', tiles: [{ tileId: 'detail', plan: {} }, { tileId: 'empty', plan: {} }], tileErrors: [{ tileId: 'bad', message: 'Invalid' }] });
+  assert.equal(caches.get('bad').error, 'Invalid');
+  group.accept({ ...rows([1]), tileId: 'detail' });
+  group.accept({ ...complete, tileId: 'empty' });
+  group.accept({ ...complete, tileId: 'empty' });
+  assert.equal(budget.rows, 1); assert.equal(budget.spare('rows'), 3);
+  assert.ok(budget.take(['drill']));
+  group.accept({ ...complete, tileId: 'detail' });
+  assert.equal(budget.rows, 2);
+  caches.get('detail').dispose(); caches.get('detail').dispose();
+  assert.equal(budget.rows, 1);
+});
+
+test('zero-share main tile stops before transport and group close releases unused reservations', async () => {
+  const budget = new CacheBudget({ rows: 1 });
+  const group = new DashboardResultGroup({ budget, tileIds: ['first', 'second'], start: async () => {} });
+  let starts = 0;
+  const second = new ResultCache({ budget: group.budgetFor('second'), start: async () => { starts++; } });
+  await second.loadMore();
+  assert.equal(starts, 0); assert.equal(second.reason, 'browser_dashboard_budget');
+  await group.close(); await group.close();
+  assert.equal(budget.reservations.size, 0); assert.equal(budget.available, true);
+});
+
+
+test('main reservations honor per-cache ceilings and leave excess root capacity for drills', () => {
+  const budget = new CacheBudget({ rows: 30000, bytes: 128 * 1024 * 1024 });
+  const views = budget.register(['first', 'second', 'second']);
+  assert.equal(views.size, 2); assert.equal(budget.reservations.size, 2);
+  assert.equal(views.get('first').rows, 10000);
+  assert.equal(views.get('second').rows, 10000);
+  assert.equal(budget.spare('rows'), 10000);
+  assert.equal(views.get('first').bytes, 24 * 1024 * 1024);
+  assert.ok(budget.take(['drill']));
+  assert.equal(views.get('second').rows, 10000);
+});

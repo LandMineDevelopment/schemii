@@ -304,3 +304,191 @@ def test_revoked_report_stops_before_delivering_pending_rows():
     assert not [event for event in events if event['type'] == 'rows']
     assert next(event for event in events if event['type'] == 'error')['code'] == 'report_access_revoked'
     assert console.cancelled and console.closed == ['result']
+
+
+class MultiConsole(Console):
+    def __init__(self, pages):
+        super().__init__([])
+        self.by_result = {key: list(value) for key, value in pages.items()}
+        self.execution.results = [NS(id=key) for key in pages]
+        self.fetches = []
+        self.reservations = []
+        self.runs = 0
+
+    def reserve_read_target(self, *args, **kwargs):
+        self.reservations.append(kwargs)
+        return self.execution
+
+    def run(self, *args):
+        self.runs += 1
+
+    def page(self, owner, workspace, execution, result, cursor, **kwargs):
+        self.fetches.append((result, cursor, kwargs))
+        pages = self.by_result[result]
+        rows = pages.pop(0)
+        return NS(rows=rows, columns=[ConsoleResultColumn(name="value", data_type="text")],
+                  next_cursor=f"next-{len(pages)}" if pages else None, truncated=False)
+
+    def close_result(self, *args):
+        assert args[-1] not in self.closed, "already closed result must never be retired twice"
+        super().close_result(*args)
+
+
+def multi_collect(console, *, priority=()):
+    services = NS(console=console)
+    model = NS(connection_id="c", database="d", namespace="public")
+    tiles = [{"tileId": key, "plan": {"sql": f"select '{key}'"}, "scalarKpi": key in priority}
+             for key in console.by_result]
+
+    async def run():
+        return [event async for event in streaming.events(services, "owner", model, tiles)]
+    return asyncio.run(run())
+
+
+def test_pages_interleave_without_changing_one_execution_or_statement_mapping():
+    console = MultiConsole({"detail": [[[1]], [[2]]], "other": [[[9]], [[10]]]})
+    events = multi_collect(console)
+    assert [(item["tileId"], item["rows"]) for item in events if item["type"] == "rows"] == [
+        ("detail", [[1]]), ("other", [[9]]), ("detail", [[2]]), ("other", [[10]])]
+    assert console.runs == len(console.reservations) == 1
+    assert console.reservations[0]["statements"] == ["select 'detail'", "select 'other'"]
+    assert console.closed == ["detail", "other"]
+
+
+def test_scalar_kpi_first_fetch_precedes_detail_and_uses_one_row_batch():
+    console = MultiConsole({"detail": [[[1]], [[2]]], "kpi": [[[9]], []]})
+    events = multi_collect(console, priority={"kpi"})
+    assert [item["tileId"] for item in events[0]["tiles"]] == ["detail", "kpi"]
+    assert console.fetches[0] == ("kpi", None, {"page_size": 1})
+    assert [item["tileId"] for item in events if item["type"] == "rows"] == ["kpi", "detail", "detail"]
+    assert console.closed == ["kpi", "detail"]
+
+
+def test_dashboard_row_shares_protect_later_tiles_and_keep_pending_page_suffix(monkeypatch):
+    monkeypatch.setitem(streaming.LIMITS, "totalRows", 5)
+    console = MultiConsole({"first": [[[1], [2], [3], [4]]], "later": [[[10], [11], [12], [13]]]})
+    events = multi_collect(console)
+    rows = {key: [row for event in events if event["type"] == "rows" and event["tileId"] == key
+                  for row in event["rows"]] for key in console.by_result}
+    assert rows == {"first": [[1], [2], [3]], "later": [[10], [11]]}
+    assert len(console.fetches) == 2
+    assert {item["reason"] for item in events if item["type"] == "complete"} == {"dashboard_row_limit"}
+
+
+def test_empty_tile_returns_row_and_byte_share_to_unfinished_tile(monkeypatch):
+    monkeypatch.setitem(streaming.LIMITS, "totalRows", 4)
+    monkeypatch.setitem(streaming.LIMITS, "totalBytes", 32)
+    console = MultiConsole({"first": [[[1], [2], [3]], [[4]]], "empty": [[]]})
+    events = multi_collect(console)
+    assert [row for item in events if item["type"] == "rows" for row in item["rows"]] == [[1], [2], [3], [4]]
+    assert next(item for item in events if item["type"] == "complete" and item["tileId"] == "first")["rowCount"] == 4
+    assert all(not item["limitReached"] for item in events if item["type"] == "complete")
+
+
+def test_fragmented_byte_shares_lend_one_head_without_skipping_or_looping(monkeypatch):
+    row = ["12345"]
+    size = len(streaming.encode(row))
+    monkeypatch.setitem(streaming.LIMITS, "totalBytes", size * 2 - 1)
+    console = MultiConsole({"first": [[row, ["later"]]], "second": [[row]]})
+    events = multi_collect(console)
+    assert [row for item in events if item["type"] == "rows" for row in item["rows"]] == [row]
+    assert len(console.fetches) == 2
+    assert [item["reason"] for item in events if item["type"] == "complete"] == ["dashboard_byte_limit"] * 2
+
+
+def test_budget_smaller_than_participant_count_has_stable_original_order_remainder(monkeypatch):
+    monkeypatch.setitem(streaming.LIMITS, "totalRows", 1)
+    console = MultiConsole({key: [[[key]]] for key in ["first", "second", "third"]})
+    events = multi_collect(console, priority={"third"})
+    assert [row for item in events if item["type"] == "rows" for row in item["rows"]] == [["first"]]
+    assert len(console.fetches) == 3  # Every participant receives its initial opportunity.
+    assert set(console.closed) == set(console.by_result)
+
+
+def test_failure_after_earlier_result_completion_closes_only_outstanding_and_delivers_error():
+    console = MultiConsole({"first": [[[1]]], "second": [[[2]]]})
+    page = console.page
+
+    def fail(*args, **kwargs):
+        if args[3] == "second":
+            raise RuntimeError("private source value")
+        return page(*args, **kwargs)
+
+    console.page = fail
+    events = multi_collect(console)
+    assert console.closed == ["first", "second"]
+    assert console.cancelled
+    error = next(item for item in events if item["type"] == "error")
+    assert error["message"] == "The report stream stopped. Refresh to try again."
+    assert events[-1] == {"type": "end"}
+
+
+def test_cancel_after_completed_peer_joins_fetch_before_closing_remaining_result():
+    import threading
+    console = MultiConsole({"first": [[[1]]], "second": [[[2]]]})
+    entered, release, exited = threading.Event(), threading.Event(), threading.Event()
+    page, close = console.page, console.close_result
+
+    def blocked(*args, **kwargs):
+        if args[3] == "second":
+            entered.set()
+            assert release.wait(2)
+            exited.set()
+        return page(*args, **kwargs)
+
+    def cancel(*args):
+        console.cancelled = True
+        release.set()
+
+    def close_after_join(*args):
+        if args[-1] == "second":
+            assert exited.is_set()
+        close(*args)
+
+    console.page, console.cancel, console.close_result = blocked, cancel, close_after_join
+    model = NS(connection_id="c", database="d", namespace="public")
+    tiles = [{"tileId": key, "plan": {"sql": "select 1"}} for key in console.by_result]
+
+    async def run():
+        async def consume():
+            async for _ in streaming.events(NS(console=console), "owner", model, tiles):
+                pass
+        task = asyncio.create_task(consume())
+        while not entered.is_set():
+            await asyncio.sleep(.001)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert console.cancelled
+    assert console.closed == ["first", "second"]
+
+
+def test_revocation_blocks_parked_rows_after_a_completed_peer_returns_its_share(monkeypatch):
+    from schemii.common.api.errors import ApiProblem
+    monkeypatch.setitem(streaming.LIMITS, "totalRows", 2)
+    console = MultiConsole({"detail": [[[1], [2]]], "empty": [[]]})
+    revoked = False
+
+    def check():
+        if revoked:
+            raise ApiProblem(403, "report_access_revoked", "Report access was removed.")
+
+    services = NS(console=console, report_access=NS(check=check))
+    model = NS(connection_id="c", database="d", namespace="public")
+    tiles = [{"tileId": key, "plan": {"sql": "select 1"}} for key in console.by_result]
+
+    async def run():
+        nonlocal revoked
+        seen = []
+        async for event in streaming.events(services, "owner", model, tiles):
+            seen.append(event)
+            if event["type"] == "complete" and event["tileId"] == "empty":
+                revoked = True
+        return seen
+
+    events = asyncio.run(run())
+    assert [row for event in events if event["type"] == "rows" for row in event["rows"]] == [[1]]
+    assert next(event for event in events if event["type"] == "error")["code"] == "report_access_revoked"
+    assert console.closed == ["empty", "detail"]

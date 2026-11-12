@@ -450,3 +450,23 @@ def test_stream_and_export_revision_checks(dashboard):
         response = client.post(url + "/" + action, json={"expectedRevision": 99})
         assert response.status_code == 409
     assert not hasattr(console, "target")
+
+
+@pytest.mark.parametrize("planning_source", ["managed", "shared"], indirect=True)
+def test_scalar_kpi_priority_is_derived_from_validated_aggregation(planning_source, monkeypatch):
+    import asyncio
+    from schemii.schemer import routes, streaming
+    from schemii.schemer.dashboard_models import DashboardUpdate
+    source = planning_source
+    tiles = [{"id": kind, "title": kind, "kind": "kpi",
+              "measures": [{"table": "people", "column": "name", "aggregate": aggregate}], "limit": 3}
+             for kind, aggregate in [("raw", "none"), ("scalar", "count")]]
+    dashboard = source.services.dashboards.update(source.owner, source.dashboard.id, DashboardUpdate(
+        expected_revision=source.dashboard.revision, name="Priority", model_id=source.model.id,
+        model_revision=1, tiles=tiles))
+    monkeypatch.setattr(streaming, "response", lambda services, owner, model, planned, errors: planned)
+    planned = asyncio.run(routes.stream_dashboard(dashboard.id,
+        routes.DashboardExecutionRequest(expected_revision=dashboard.revision), source.request,
+        Principal(user_id="viewer", authentication_source="local_prototype")))
+    assert [(tile["tileId"], tile["scalarKpi"]) for tile in planned] == [("raw", False), ("scalar", True)]
+    assert source.console.runs == []
