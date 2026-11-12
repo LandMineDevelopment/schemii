@@ -319,6 +319,17 @@ def test_save_rejects_stale_inactive_selection_references(monkeypatch, target, s
         routes.validate_dashboard(services, "alice", create(selections={"required": {"alternativeId": "choose"}}))
     else:
         routes.validate_dashboard(services, "alice", create(tiles=[{**tile, "selections": {"conditional": {"alternativeId": "choose"}}}]))
+    # Other valid options retain their inputs while the viewer switches back
+    # and forth; both dashboard slicers and tile overrides may save that state.
+    for scope in model.definition.scopes:
+        scope.alternatives.append(type(scope.alternatives[0]).model_validate({
+            "id": "other", "inputs": [{"id": "retained", "type": "text"}], "conditions": [],
+        }))
+    retained = {"alternativeId": "choose", "values": {"value": "current", "retained": "other option"}}
+    if target == "dashboard":
+        routes.validate_dashboard(services, "alice", create(selections={"required": retained}))
+    else:
+        routes.validate_dashboard(services, "alice", create(tiles=[{**tile, "selections": {"conditional": retained}}]))
 
 
 @pytest.mark.parametrize("change", ["removed_field", "removed_source"])
