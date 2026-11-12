@@ -34,6 +34,9 @@ def _services(request: Request):
 
 class CreateRequest(ModelCreate):
     database: str = Field(default="", max_length=63)
+    catalog_namespaces: list[Annotated[str, Field(min_length=1, max_length=63)]] | None = Field(
+        default=None, min_length=1, max_length=16,
+        description="The schema set returned with catalogFingerprint; creation review only, not saved model scope.")
 
 
 class ModelList(Contract):
@@ -156,17 +159,22 @@ def create_model(body: CreateRequest, request: Request, principal: Principal = D
         services = _services(request)
         try:
             namespaces = definition_namespaces(body.namespace, document(body.definition))
+            cohort = sorted(set([body.namespace, *(body.catalog_namespaces or namespaces)]))
+            if len(cohort) > 16:
+                raise ValueError("Choose at most 16 source schemas for one model.")
         except ValueError as error:
             raise ApiProblem(422, "model_source_limit", str(error)) from error
+        if not set(namespaces).issubset(cohort):
+            raise ApiProblem(409, "model_source_changed", "The model selects a schema outside the reviewed source catalog. Reload sources and review your selection before creating the model.")
         catalog = services.model_catalogs.get(services, principal.user_id, body.connection_id, body.namespace, fresh=True,
-                                             **({"namespaces": namespaces} if namespaces != [body.namespace] else {}))
+                                             **({"namespaces": cohort} if cohort != [body.namespace] else {}))
         profile = services.connections.get(principal.user_id, body.connection_id)
         if body.catalog_fingerprint and body.catalog_fingerprint != catalog["fingerprint"]:
             raise ApiProblem(409, "model_source_changed", "The source schema changed while you were choosing sources. Reload sources and review your selection before creating the model.")
         if any(edge.kind == "logical" for edge in body.definition.edges):
             _validate_connections(catalog, body.definition)
         definition = _scoped_definition(catalog, body.definition, creating=True)
-        record = ModelCreate.model_validate({**body.model_dump(), "definition": definition,
+        record = ModelCreate.model_validate({**body.model_dump(exclude={"catalog_namespaces"}), "definition": definition,
                                              "database": catalog["database"],
                                              "catalog_fingerprint": catalog["fingerprint"]})
         return services.models.create(principal.user_id, record,
@@ -269,7 +277,8 @@ def validate_model(model_id: str, body: ValidateRequest, request: Request, princ
     with api_errors():
         services = _services(request)
         model = load_model(services, principal.user_id, model_id, body.expected_revision)
-        return plan_query(model_catalog(services, principal.user_id, model), body.definition or model.definition,
+        definition = body.definition or model.definition
+        return plan_query(model_catalog(services, principal.user_id, model, fresh=True, definition=definition), definition,
                           body.explore, model.catalog_fingerprint)
 
 

@@ -100,6 +100,39 @@ def test_saved_no_fk_lookup_stays_local_when_the_first_foreign_key_appears():
     assert saved.sourceContract.relationships == []
 
 
+@pytest.mark.parametrize("already_bound", [False, True])
+def test_new_input_on_same_column_cannot_steal_an_unchanged_inputs_domain(already_bound):
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemoo.routes import _scoped_definition
+    from schemii.schemoo.service import document, domain_query
+    source, rules = inferred_lookup_fixture()
+    if not already_bound:
+        source["relationships"] = []
+    saved = _scoped_definition(source, ModelDefinition.model_validate(rules), creating=True)
+    body = SimpleNamespace(scope_id="parent", alternative_id="pick", parameter_id="value", search="")
+    old_sql = domain_query(source, SimpleNamespace(definition=saved), body)["sql"]
+    current = deepcopy(source)
+    other = deepcopy(current["tables"][0]); other["name"] = "other_parent"
+    current["tables"].append(other)
+    current["relationships"].insert(0, {**catalog()["relationships"][0], "id": "new_fk",
+                                         "targetTable": "other_parent"})
+    updated_rules = document(saved)
+    new_scope = deepcopy(updated_rules["scopes"][0]); new_scope["id"] = "new_scope"
+    if already_bound:
+        # Two live FKs are intentionally ambiguous for a new inferred lookup.
+        # A local source input must not steal the unchanged positive FK binding.
+        new_scope["alternatives"][0]["inputs"][0]["type"] = "source"
+    updated_rules["scopes"].append(new_scope)
+    updated = _scoped_definition(current, ModelDefinition.model_validate(updated_rules), saved)
+    assert domain_query(current, SimpleNamespace(definition=updated), body)["sql"] == old_sql
+    body.scope_id = "new_scope"
+    assert ('"child"' if already_bound else '"other_parent"') in domain_query(current, SimpleNamespace(definition=updated), body)["sql"]
+    bindings = updated.sourceContract.parameterDomains
+    assert len(bindings) == 2
+    assert {item.scopeId for item in bindings} == {"parent", "new_scope"}
+    assert source_issues(current, document(updated)) == []
+
+
 def catalog():
     return {"tables": [
         {"name": "parent", "primaryKey": ["id"], "columns": [{"name": "id", "dataType": "uuid", "nullable": False}]},
@@ -264,3 +297,67 @@ def test_qualified_composite_dependencies_and_acknowledgement_never_cross_namesp
     assert preserved["tables"][1]["columns"][1]["dataType"] == "integer"
     current["relationships"][0]["columns"][1]["target"] = "value"
     assert any(issue["kind"] == "changed_relationship" for issue in source_drift(current, rules))
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_qualified_per_input_provenance_keeps_local_and_foreign_namespace_distinct(bound):
+    from schemii.schemoo.domain import qualified_relationship_id
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemoo.routes import _scoped_definition
+    from schemii.schemoo.service import document, domain_query
+    source, rules = inferred_lookup_fixture()
+    source["namespace"] = "one"
+    source["tables"][0]["namespace"] = "two.with.dot"
+    source["tables"][1]["namespace"] = "one"
+    relation = source["relationships"][0]
+    relation.update(id=qualified_relationship_id("one", "child", relation["name"]),
+                    sourceNamespace="one", targetNamespace="two.with.dot")
+    if not bound:
+        source["relationships"] = []
+    saved = _scoped_definition(source, ModelDefinition.model_validate(rules), creating=True)
+    body = SimpleNamespace(scope_id="parent", alternative_id="pick", parameter_id="value", search="")
+    before = domain_query(source, SimpleNamespace(definition=saved), body)["sql"]
+    if not bound:
+        source["relationships"] = [relation]
+    changed = document(saved)
+    new_scope = deepcopy(changed["scopes"][0]); new_scope["id"] = "independent"
+    if bound:
+        new_scope["alternatives"][0]["inputs"][0]["type"] = "source"
+    changed["scopes"].append(new_scope)
+    updated = _scoped_definition(source, ModelDefinition.model_validate(changed), saved)
+    assert domain_query(source, SimpleNamespace(definition=updated), body)["sql"] == before
+    body.scope_id = "independent"
+    sql = domain_query(source, SimpleNamespace(definition=updated), body)["sql"]
+    assert ('"one"."child"' if bound else '"two.with.dot"."parent"') in sql
+    assert len(updated.sourceContract.parameterDomains) == 2
+    assert source_issues(source, document(updated)) == []
+
+
+def test_parameter_provenance_resolves_legacy_fk_ids_and_rejects_composite_drift():
+    from schemii.common.api.errors import ApiProblem
+    from schemii.schemoo.domain import qualified_relationship_id, legacy_relationship_id
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemoo.routes import _scoped_definition
+    from schemii.schemoo.service import document, domain_query
+    source, rules = inferred_lookup_fixture()
+    source["namespace"] = "one.with.dot"
+    for table in source["tables"]:
+        table["namespace"] = source["namespace"]
+    relation = source["relationships"][0]
+    legacy = legacy_relationship_id(relation)
+    relation.update(id=qualified_relationship_id(source["namespace"], "child", relation["name"]),
+                    sourceNamespace=source["namespace"], targetNamespace=source["namespace"])
+    saved = _scoped_definition(source, ModelDefinition.model_validate(rules), creating=True)
+    historical = document(saved)
+    historical["sourceContract"]["parameterDomains"][0]["relationshipId"] = legacy
+    historical["sourceContract"]["relationships"][0]["id"] = legacy
+    model = SimpleNamespace(definition=ModelDefinition.model_validate(historical))
+    body = SimpleNamespace(scope_id="parent", alternative_id="pick", parameter_id="value", search="")
+    assert '"one.with.dot"."parent"' in domain_query(source, model, body)["sql"]
+    composite = deepcopy(source)
+    relation = composite["relationships"][0]
+    relation.pop("sourceColumn"); relation.pop("targetColumn")
+    relation["columns"] = [{"source": "parent_id", "target": "id"}, {"source": "id", "target": "tenant"}]
+    with pytest.raises(ApiProblem, match="explicit domain") as rejected:
+        domain_query(composite, model, body)
+    assert rejected.value.code == "parameter_unbound"
