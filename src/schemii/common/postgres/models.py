@@ -113,6 +113,14 @@ class PostgresNotNullConstraint(_PostgresModel):
     columns: Annotated[tuple[PostgresIdentifier, ...], Field(min_length=1, max_length=1)]
     definition: CatalogText
     validated: bool
+    # Absent historical evidence stays absent in canonical fingerprints.
+    is_local: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    inheritance_count: Annotated[int, Field(ge=0)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    no_inherit: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class PostgresExclusionConstraint(_PostgresModel):
@@ -442,6 +450,20 @@ class PostgresCatalog(_PostgresCatalogContent):
 
     @model_validator(mode="after")
     def require_matching_fingerprint(self) -> "PostgresCatalog":
+        if any(
+            constraint.is_local is not None
+            or constraint.inheritance_count is not None
+            or constraint.no_inherit is not None
+            for table in self.tables
+            for constraint in table.not_null_constraints
+        ) and (
+            self.fingerprint_version != 2
+            or self.safety is None
+            or self.safety.version != 2
+        ):
+            raise ValueError(
+                "historical catalog cannot carry new NOT NULL ownership evidence"
+            )
         if (self.fingerprint_version == 2) != (self.safety is not None):
             raise ValueError("version2 requires safety evidence; historical catalogs cannot acquire it")
         if self.safety is not None and self.safety.dependency_complete:

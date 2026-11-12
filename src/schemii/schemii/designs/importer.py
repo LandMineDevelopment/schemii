@@ -12,6 +12,7 @@ from schemii.common.postgres.models import (
     PostgresColumn,
     PostgresObjectIdentity,
     PostgresPreservation,
+    PostgresTable,
     dependency_closure,
 )
 from schemii.common.postgres.query_analysis import QueryDefinitionError, parse_query_definition
@@ -176,6 +177,39 @@ def _structured_issues(
     return output
 
 
+def _ordinary_not_null_names(
+    catalog: PostgresCatalog, table: PostgresTable
+) -> dict[str, str]:
+    """Import exact native names only when their entire supported contract is known."""
+    if (
+        catalog.fingerprint_version != 2
+        or catalog.safety is None
+        or catalog.safety.version != 2
+        or catalog.server_version_num < 180000
+        or table.is_partition
+        or table.partition_key is not None
+    ):
+        return {}
+    result = {}
+    for column in table.columns:
+        candidates = [
+            item
+            for item in table.not_null_constraints
+            if item.columns == (column.name,)
+        ]
+        if len(candidates) != 1 or column.nullable:
+            continue
+        constraint = candidates[0]
+        if (
+            constraint.validated
+            and constraint.is_local is True
+            and constraint.inheritance_count == 0
+            and constraint.no_inherit is False
+        ):
+            result[column.name] = constraint.name
+    return result
+
+
 def _proven_identity_sequence(
     catalog: PostgresCatalog, descriptor: PostgresPreservation
 ) -> bool:
@@ -281,6 +315,7 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
         table_id = _semantic_id(catalog, "table", source_table.name)
         table_ids[source_table.name] = table_id
         columns: list[DesignColumn] = []
+        not_null_names = _ordinary_not_null_names(catalog, source_table)
         for source_column in sorted(source_table.columns, key=lambda item: item.ordinal):
             column_id = _semantic_id(
                 catalog,
@@ -338,6 +373,7 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     name=source_column.name,
                     data_type=source_column.data_type,
                     nullable=source_column.nullable,
+                    not_null_constraint_name=not_null_names.get(source_column.name),
                     default_expression=(
                         source_column.default_expression
                         if source_column.generated is None
@@ -535,11 +571,13 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 ),
             )
         for constraint in source_table.not_null_constraints:
+            if not_null_names.get(constraint.columns[0]) == constraint.name:
+                continue
             _issue(
                 issues,
                 "constraint",
                 f"{object_name}.{constraint.name}",
-                "Named NOT NULL constraint identity is represented only as column nullability",
+                "NOT NULL constraint locality, inheritance, validation, or uniqueness is not fully represented by the desired-design model",
                 identity=PostgresObjectIdentity(
                     kind="relation",
                     namespace=source_table.namespace,

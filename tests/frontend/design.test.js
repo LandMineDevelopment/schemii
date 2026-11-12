@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+
+
 import {
   alignRelationshipColumnTypes,
   createDesignRelationship,
@@ -994,4 +996,17 @@ test("key editing and deletion preserve referenced target keys", () => {
 
   const withoutRelationship = { ...content, relationships: [] };
   assert.equal(deleteDesignKey(withoutRelationship, parent.id, parent.keys[0].id).content.tables[0].keys.length, 0);
+});
+
+test("ordinary named NOT NULL metadata survives editor-value rebuilds by stable column ID", () => {
+  const table = createDesignTable("source", [{ name: "value", dataType: "integer", nullable: false, primary: false }], () => uuids[0]);
+  table.columns[0].notNullConstraintName = 'exact "NN"';
+  const content = { tables: [table], relationships: [], functions: [], views: [] };
+  const row = { id: table.columns[0].id, name: "renamed", dataType: "integer", nullable: false, primary: false };
+  const kept = updateDesignTable(content, table.id, "renamed_table", [row]);
+  assert.equal(kept.columns[0].notNullConstraintName, 'exact "NN"');
+  const nullable = updateDesignTable(content, table.id, table.name, [{ ...row, nullable: true }]);
+  assert.equal(Object.hasOwn(nullable.columns[0], "notNullConstraintName"), false);
+  const renamed = updateDesignTable(content, table.id, table.name, [{ ...row, notNullConstraintName: "new.name" }]);
+  assert.equal(renamed.columns[0].notNullConstraintName, "new.name");
 });

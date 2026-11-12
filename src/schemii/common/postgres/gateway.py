@@ -1655,7 +1655,12 @@ class PsycopgPostgresGateway:
                 )
             elif kind == "n":
                 not_null_constraints.setdefault(table_name, []).append(
-                    PostgresNotNullConstraint(**common)
+                    PostgresNotNullConstraint(
+                        **common,
+                        is_local=row.get("is_local"),
+                        inheritance_count=row.get("inheritance_count"),
+                        no_inherit=row.get("no_inherit"),
+                    )
                 )
             elif kind == "x":
                 exclusion_constraints.setdefault(table_name, []).append(

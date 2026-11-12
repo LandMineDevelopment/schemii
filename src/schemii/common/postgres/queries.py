@@ -220,6 +220,9 @@ CONSTRAINTS_QUERY = """
            con.convalidated AS validated,
            con.condeferrable AS deferrable,
            con.condeferred AS initially_deferred,
+           con.conislocal AS is_local,
+           con.coninhcount AS inheritance_count,
+           con.connoinherit AS no_inherit,
            CASE WHEN constraint_definition.byte_count <= %s
                 THEN constraint_definition.value
                 ELSE NULL

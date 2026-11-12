@@ -228,6 +228,15 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
         }
         for column in table.columns:
             _valid_identifier(column.name, category="column name")
+            if column.not_null_constraint_name is not None:
+                _valid_identifier(
+                    column.not_null_constraint_name, category="NOT NULL constraint name"
+                )
+                if column.nullable:
+                    raise DesignValidationError(
+                        "A named NOT NULL constraint requires a non-nullable column",
+                        details={"table": table.name, "column": column.name},
+                    )
             _safe_fragment(column.data_type, category=f"data type for {table.name}.{column.name}")
             value_generators = sum(
                 value is not None
@@ -289,7 +298,12 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
                 )
             all_ids.append(column.id)
         _unique(
-            [constraint.name for constraint in [*table.keys, *table.checks]],
+            [constraint.name for constraint in [*table.keys, *table.checks]]
+            + [
+                column.not_null_constraint_name
+                for column in table.columns
+                if column.not_null_constraint_name is not None
+            ],
             category=f"constraints in {table.name}",
         )
         if sum(key.kind == "primary" for key in table.keys) > 1:
@@ -399,6 +413,14 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
                 details={"relationship": relationship.name},
             )
         relationship_identity = (source.id, relationship.name)
+        if any(
+            column.not_null_constraint_name == relationship.name
+            for column in source.columns
+        ):
+            raise DesignValidationError(
+                "A constraint with this name already exists on the source table",
+                details={"table": source.name, "name": relationship.name},
+            )
         if relationship_identity in relationship_names:
             raise DesignValidationError(
                 "Relationship names must be unique on their source table",
