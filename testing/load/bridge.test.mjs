@@ -235,6 +235,7 @@ test('actual controller prepares before observation exists and admits no arrival
     export function ordinaryRequest(){throw new Error('fixture_no_http');}
     export function streamRequest(){throw new Error('fixture_no_http');}
     export function resourceFingerprint(){throw new Error('fixture_no_metadata');}
+    export async function fixtureExecutions(){throw new Error('fixture_no_execution_observation');}
   `);
   const engine = join(checkout, 'testing/load/engine.mjs'), source = await readFile(engine, 'utf8');
   const marker = '  const results = [], before = await observation(observerFile);';
