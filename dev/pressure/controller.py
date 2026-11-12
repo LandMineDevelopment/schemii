@@ -61,7 +61,17 @@ REQUIRED_SOURCE_WITNESS_SHA256 = (
 )
 # Integration must pin the independently reviewed constrained #135 consumer tree.
 # Empty intentionally denies attachment; it cannot authorize older detached engines.
-REQUIRED_CONSUMER_TREE_SHA256 = "3fcc08b190c528bf890969e60b02d9901f767661a7e6cd3cbb53de753fcb005d"
+# Version 2 binds the load code plus its declared local runtime companions.
+# Only the coordinator may set this after independent review of the full manifest.
+REQUIRED_CONSUMER_TREE_SHA256 = ""
+CONSUMER_SOURCE_INVENTORY_VERSION = 2
+CONSUMER_SOURCE_COMPANIONS = (
+    "testing/harness/store.mjs",
+    "testing/harness/deployment.mjs",
+    "testing/harness/leases.mjs",
+    "testing/load/fixture-spec.json",
+)
+CONSUMER_SOURCE_DOMAIN = b"schemii-constrained-load-consumer-source\0"
 SERVICES = {"metadata", "source", "observer-init", "schemii", "ingress"}
 ASSETS = (
     "start.sh",
@@ -575,6 +585,97 @@ def process_identity(pid: int) -> dict:
     }
 
 
+def consumer_source_manifest(checkout: Path) -> dict:
+    """Small declared runtime closure, independent of a later prepared-run baseline.
+
+    Local imports/data added outside the load .mjs/.py tree must be declared in
+    CONSUMER_SOURCE_COMPANIONS, with an inventory-version review and a new pin.
+    """
+    check(
+        checkout.is_dir() and checkout == checkout.resolve(), "consumer_source_checkout"
+    )
+    load = checkout / "testing/load"
+    paths = set(CONSUMER_SOURCE_COMPANIONS)
+    try:
+        for relative in ("testing", "testing/load"):
+            info = (checkout / relative).lstat()
+            check(
+                stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode),
+                "consumer_source_directory",
+            )
+        for count, path in enumerate(load.rglob("*"), start=1):
+            check(count <= 1024, "consumer_source_inventory")
+            check(not path.is_symlink(), "consumer_source_symlink")
+            if path.suffix in {".mjs", ".py"}:
+                paths.add(path.relative_to(checkout).as_posix())
+        check(
+            "testing/load/controller.mjs" in paths and 0 < len(paths) <= 128,
+            "consumer_source_inventory",
+        )
+        fingerprint = hashlib.sha256(
+            CONSUMER_SOURCE_DOMAIN + f"v{CONSUMER_SOURCE_INVENTORY_VERSION}\0".encode()
+        )
+        files = []
+        for relative in sorted(paths):
+            check(
+                re.fullmatch(r"[A-Za-z0-9_./-]+", relative) is not None,
+                "consumer_source_path",
+            )
+            path = checkout / relative
+            for parent in path.relative_to(checkout).parents:
+                info = (checkout / parent).lstat()
+                check(
+                    stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode),
+                    "consumer_source_directory",
+                )
+            before = path.lstat()
+            check(
+                stat.S_ISREG(before.st_mode)
+                and before.st_mode & 0o444
+                and before.st_size <= 262144,
+                "consumer_source_leaf",
+            )
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as stream:
+                opened = os.fstat(stream.fileno())
+                check(
+                    stat.S_ISREG(opened.st_mode)
+                    and (opened.st_dev, opened.st_ino)
+                    == (before.st_dev, before.st_ino),
+                    "consumer_source_changed",
+                )
+                raw = stream.read(262145)
+                after = os.fstat(stream.fileno())
+            current = path.lstat()
+
+            def identity(value):
+                return (
+                    value.st_dev,
+                    value.st_ino,
+                    value.st_size,
+                    value.st_mode,
+                    value.st_mtime_ns,
+                    value.st_ctime_ns,
+                )
+
+            check(
+                len(raw) <= 262144
+                and identity(before) == identity(after) == identity(current)
+                and path == path.resolve(),
+                "consumer_source_changed",
+            )
+            content = hashlib.sha256(raw).digest()
+            fingerprint.update(relative.encode() + b"\0" + content)
+            files.append({"path": relative, "sha256": content.hex(), "bytes": len(raw)})
+    except OSError:
+        raise Refused("consumer_source_unavailable") from None
+    return {
+        "version": CONSUMER_SOURCE_INVENTORY_VERSION,
+        "files": files,
+        "sha256": fingerprint.hexdigest(),
+    }
+
+
 def consumer_identity(pid: int, root: Path) -> dict:
     identity = process_identity(pid)
     base = Path(f"/proc/{pid}")
@@ -639,30 +740,35 @@ def consumer_identity(pid: int, root: Path) -> dict:
             "testing/load/controller.mjs",
         ]
     )
-    sources = sorted(
-        path
-        for path in (checkout / "testing/load").rglob("*")
-        if path.suffix in {".mjs", ".py"} and path.is_file()
+    manifest = consumer_source_manifest(checkout)
+    command(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "ls-files",
+            "--error-unmatch",
+            "--",
+            *[item["path"] for item in manifest["files"]],
+        ]
     )
-    check(0 < len(sources) <= 128, "consumer_source_inventory")
-    fingerprint = hashlib.sha256()
-    for path in sources:
-        check(
-            not path.is_symlink() and path.stat().st_size <= 262144,
-            "consumer_source_leaf",
-        )
-        fingerprint.update(
-            path.relative_to(checkout).as_posix().encode()
-            + b"\0"
-            + bytes.fromhex(sha(path))
-        )
     check(
         REQUIRED_CONSUMER_TREE_SHA256
-        and fingerprint.hexdigest() == REQUIRED_CONSUMER_TREE_SHA256,
+        and manifest["sha256"] == REQUIRED_CONSUMER_TREE_SHA256,
         "reviewed_consumer_source_required",
     )
     command(
-        ["git", "-C", str(checkout), "diff", "--quiet", "HEAD", "--", "testing/load"]
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "diff",
+            "--quiet",
+            "HEAD",
+            "--",
+            "testing/load",
+            *CONSUMER_SOURCE_COMPANIONS,
+        ]
     )
     return identity
 

@@ -1365,6 +1365,10 @@ def test_old_consumer_source_is_denied_even_with_known_entrypoint_same_repositor
     root = setup[0]
     script = root / "testing/load/controller.mjs"
     script.write_text("// old controller may detach workload children\n")
+    for name in c.CONSUMER_SOURCE_COMPANIONS:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("offline declared companion\n")
     identity = {"pid": 1234, "start": "556"}
     monkeypatch.setattr(c, "process_identity", lambda pid: identity)
     import io
@@ -1388,14 +1392,9 @@ def test_old_consumer_source_is_denied_even_with_known_entrypoint_same_repositor
     )
     with pytest.raises(c.Refused, match="reviewed_consumer_source_required"):
         c.consumer_identity(1234, root)
-    fingerprint = hashlib.sha256()
-    for path in sorted((root / "testing/load").glob("*")):
-        fingerprint.update(
-            path.relative_to(root).as_posix().encode()
-            + b"\0"
-            + hashlib.sha256(path.read_bytes()).digest()
-        )
-    monkeypatch.setattr(c, "REQUIRED_CONSUMER_TREE_SHA256", fingerprint.hexdigest())
+    monkeypatch.setattr(
+        c, "REQUIRED_CONSUMER_TREE_SHA256", c.consumer_source_manifest(root)["sha256"]
+    )
     assert c.consumer_identity(1234, root) == identity
     script.write_text("// changed child-spawn behavior after review\n")
     with pytest.raises(c.Refused, match="reviewed_consumer_source_required"):
@@ -1822,3 +1821,246 @@ def test_held_authority_refuses_missing_or_changed_os_receipt(setup):
     with pytest.raises(c.Refused, match="os_authority_receipt_changed"):
         owned.authority("held")
     assert not (owned.directory / "authority.json").exists()
+
+
+@pytest.fixture
+def source_gate_checkout(tmp_path, monkeypatch):
+    """Actual gate/Git and copied runtime closure; only process metadata is fake."""
+    import io
+    import subprocess
+
+    source = Path(__file__).resolve().parents[1]
+    checkout = tmp_path / "consumer"
+    checkout.mkdir()
+    for path in sorted((source / "testing/load").rglob("*")):
+        if path.is_file() and path.suffix in {".mjs", ".py"}:
+            target = checkout / path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
+    for name in c.CONSUMER_SOURCE_COMPANIONS:
+        target = checkout / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((source / name).read_bytes())
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(checkout), *args], stderr=subprocess.STDOUT
+        ).decode()
+
+    git("init", "--quiet")
+    git("add", "testing")
+    git(
+        "-c",
+        "user.name=Offline Gate",
+        "-c",
+        "user.email=gate@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "reviewed closure",
+    )
+    identity = {
+        "pid": 1234,
+        "start": "556",
+        "uid": os.getuid(),
+        "argvSha256": "offline",
+    }
+    argv = (
+        "node\0" + str(checkout / "testing/load/controller.mjs") + "\0load-example123\0"
+    ).encode()
+    original_open, original_readlink = Path.open, c.os.readlink
+    monkeypatch.setattr(c, "process_identity", lambda _pid: identity)
+    monkeypatch.setattr(
+        Path,
+        "open",
+        lambda path, *args, **kwargs: (
+            io.BytesIO(argv)
+            if str(path) == "/proc/1234/cmdline"
+            else original_open(path, *args, **kwargs)
+        ),
+    )
+    monkeypatch.setattr(
+        c.os,
+        "readlink",
+        lambda path: (
+            "/usr/bin/node"
+            if str(path) == "/proc/1234/exe"
+            else original_readlink(path)
+        ),
+    )
+    manifest = c.consumer_source_manifest(checkout)
+    monkeypatch.setattr(c, "REQUIRED_CONSUMER_TREE_SHA256", manifest["sha256"])
+    return checkout, git, identity, manifest
+
+
+def test_actual_source_gate_admits_unchanged_versioned_local_closure(
+    source_gate_checkout,
+):
+    checkout, git, identity, manifest = source_gate_checkout
+    assert git("status", "--porcelain") == ""
+    assert manifest["version"] == 2
+    names = [item["path"] for item in manifest["files"]]
+    assert names == sorted(names) and len(names) == len(set(names))
+    assert set(c.CONSUMER_SOURCE_COMPANIONS) <= set(names)
+    assert len(names) == 34
+    assert c.consumer_identity(1234, checkout) == identity
+    assert c.consumer_source_manifest(checkout) == manifest
+
+
+@pytest.mark.parametrize("name", c.CONSUMER_SOURCE_COMPANIONS)
+@pytest.mark.parametrize("committed", [False, True], ids=["dirty", "committed"])
+def test_actual_gate_rejects_each_changed_runtime_companion_before_prepare(
+    source_gate_checkout, name, committed
+):
+    checkout, git, _, manifest = source_gate_checkout
+    path = checkout / name
+    if name.endswith(".json"):
+        value = json.loads(path.read_text())
+        value["definition"]["nodes"][0]["table"] = "offline_unreviewed_table"
+        path.write_text(json.dumps(value) + "\n")
+    else:
+        path.write_text(
+            path.read_text() + '\nthrow new Error("OFFLINE_UNREVIEWED_COMPANION");\n'
+        )
+    if committed:
+        git("add", name)
+        git(
+            "-c",
+            "user.name=Offline Gate",
+            "-c",
+            "user.email=gate@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "unreviewed runtime companion",
+        )
+    assert bool(git("status", "--porcelain")) is not committed
+    assert c.consumer_source_manifest(checkout)["sha256"] != manifest["sha256"]
+    with pytest.raises(c.Refused, match="reviewed_consumer_source_required"):
+        c.consumer_identity(1234, checkout)
+
+
+@pytest.mark.parametrize("name", c.CONSUMER_SOURCE_COMPANIONS)
+@pytest.mark.parametrize("defect", ["missing", "unreadable", "symlink"])
+def test_actual_gate_refuses_missing_unreadable_or_symlink_runtime_companion(
+    source_gate_checkout, tmp_path, name, defect
+):
+    checkout, _, _, _ = source_gate_checkout
+    path = checkout / name
+    if defect == "missing":
+        path.unlink()
+    elif defect == "unreadable":
+        path.chmod(0)
+    else:
+        target = tmp_path / "outside-reviewed-closure"
+        target.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(target)
+    try:
+        with pytest.raises(c.Refused):
+            c.consumer_identity(1234, checkout)
+    finally:
+        if defect == "unreadable":
+            path.chmod(0o644)
+
+
+def test_actual_gate_rejects_old_subtree_pin_and_empty_delivery_pin(
+    source_gate_checkout, monkeypatch
+):
+    checkout, _, _, manifest = source_gate_checkout
+    old = hashlib.sha256()
+    for path in sorted((checkout / "testing/load").rglob("*")):
+        if path.is_file() and path.suffix in {".mjs", ".py"}:
+            old.update(
+                path.relative_to(checkout).as_posix().encode()
+                + b"\0"
+                + hashlib.sha256(path.read_bytes()).digest()
+            )
+    assert old.hexdigest() != manifest["sha256"]
+    for value in (old.hexdigest(), ""):
+        monkeypatch.setattr(c, "REQUIRED_CONSUMER_TREE_SHA256", value)
+        with pytest.raises(c.Refused, match="reviewed_consumer_source_required"):
+            c.consumer_identity(1234, checkout)
+
+
+def test_actual_gate_rejects_changed_included_load_source_and_untracked_companions(
+    source_gate_checkout,
+):
+    checkout, git, _, _ = source_gate_checkout
+    path = checkout / "testing/load/controller.mjs"
+    path.write_text(path.read_text() + "\n// unreviewed controller mutation\n")
+    with pytest.raises(c.Refused):
+        c.consumer_identity(1234, checkout)
+    git("restore", "testing/load/controller.mjs")
+    git("rm", "--cached", "testing/harness/store.mjs")
+    with pytest.raises(c.Refused, match="command_failed"):
+        c.consumer_identity(1234, checkout)
+
+
+def test_actual_gate_rejects_symlink_companion_directory_and_fifo(
+    source_gate_checkout, tmp_path
+):
+    checkout, _, _, _ = source_gate_checkout
+    original = checkout / "testing/harness"
+    renamed = tmp_path / "displaced-harness"
+    original.rename(renamed)
+    original.symlink_to(renamed, target_is_directory=True)
+    with pytest.raises(c.Refused):
+        c.consumer_identity(1234, checkout)
+    original.unlink()
+    renamed.rename(original)
+    path = original / "store.mjs"
+    path.unlink()
+    os.mkfifo(path, 0o600)
+    with pytest.raises(c.Refused):
+        c.consumer_identity(1234, checkout)
+
+
+def test_source_gate_companions_cover_current_shared_runtime_import_closure():
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    declared = set(c.CONSUMER_SOURCE_COMPANIONS)
+    for name in declared - {"testing/load/fixture-spec.json"}:
+        source = (root / name).read_text()
+        imports = re.findall(r"(?:from\s+|import\s*\(?\s*)['\"]([^'\"]+)['\"]", source)
+        for specifier in imports:
+            if specifier.startswith("node:"):
+                continue
+            assert specifier.startswith(".")
+            assert (root / name).parent.joinpath(specifier).resolve().relative_to(
+                root
+            ).as_posix() in declared
+    assert (
+        "new URL('./fixture-spec.json', import.meta.url)"
+        in (root / "testing/load/fixtures.mjs").read_text()
+    )
+    assert (
+        "run.plan.engine !== 'incremental-node'"
+        in (root / "testing/load/controller.mjs").read_text()
+    )
+
+
+def test_source_manifest_refuses_oversized_companion_before_reading_content(
+    source_gate_checkout,
+):
+    checkout, _, _, _ = source_gate_checkout
+    (checkout / "testing/harness/store.mjs").write_bytes(b"x" * 262145)
+    with pytest.raises(c.Refused, match="consumer_source_leaf"):
+        c.consumer_source_manifest(checkout)
+
+
+def test_source_manifest_sanitizes_unreadable_companion_io(
+    source_gate_checkout, monkeypatch
+):
+    checkout, _, _, _ = source_gate_checkout
+    original = c.os.open
+
+    def unavailable(path, *args, **kwargs):
+        if Path(path) == checkout / "testing/harness/store.mjs":
+            raise PermissionError("private-source-error-must-not-escape")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(c.os, "open", unavailable)
+    with pytest.raises(c.Refused, match="^consumer_source_unavailable$"):
+        c.consumer_source_manifest(checkout)
