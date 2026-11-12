@@ -64,6 +64,35 @@ def empty_design_check(workspace_id: str) -> dict:
             "equals": {"content." + key + ".length": 0 for key in
                        ("tables", "relationships", "types", "functions", "views", "triggers")}}
 
+
+def pilot_writer(fixture: dict, seeded: dict, username: str, prefix: str) -> tuple[dict, list]:
+    """Fail before dispatch unless COPY has an exact, empty, marked writer target."""
+    source = fixture.get("resources", {})
+    schema = "qa_write_designer_" + username[-3:]
+    connection = source.get("writableConnectionId")
+    workspace = seeded.get("writerWorkspaceId")
+    if (not isinstance(connection, str) or not re.fullmatch(r"pg_[0-9a-f]{32}", connection)
+            or connection == source.get("connectionId") or source.get("writableSchema") != schema
+            or not isinstance(workspace, str) or not re.fullmatch(r"ws_[0-9a-f]{32}", workspace)
+            or seeded.get("writerCreated") is not True
+            or workspace in (seeded.get("localWorkspaceId"), seeded.get("readerWorkspaceId"))):
+        raise ValueError(f"Pilot requires an exact fresh marked writer profile/workspace for {username}")
+    resources = {"writableConnectionId": connection, "writableSchema": schema, "writerWorkspaceId": workspace,
+                 "copyTable": prefix + "copy_items", "copyRows": [[1, "Alpha", 2], [2, "Beta", 3], [3, "Gamma", 0]],
+                 "copyCSV": "id,label,qty\n1,Alpha,2\n2,Beta,3\n3,Gamma,0\n",
+                 "writerCleanup": {"status": "pending", "owner": "coordinator",
+                                   "scope": schema, "command": f"./test.sh reset-writer --account {username}",
+                                   "note": "After all lanes stop and ownership is reconciled, reset only this marked writer target; cleanup-sweep does not delete SQL objects. Verify with verify-writer. No cleanup pass is implied."}}
+    checks = [
+        {"path": f"/api/v1/connections/{connection}?product=schemii", "status": 200,
+         "equals": {"id": connection, "host": "qa-postgres", "database": "schemii_qa", "username": schema}},
+        {"path": f"/api/v1/schemii/workspaces/{workspace}", "status": 200,
+         "equals": {"id": workspace, "connectionId": connection, "namespace": schema}},
+        {"path": f"/api/v1/schemii/workspaces/{workspace}/catalog", "status": 200, "phase": "initial",
+         "equals": {"catalog.namespace": schema, "catalog.tables.length": 0, "catalog.views.length": 0}},
+    ]
+    return resources, checks
+
 # Each mission is deliberately broader than a single component. A scenario is a
 # multistep acceptance contract, expanded by the harness into desktop and mobile.
 MISSIONS = (
@@ -204,8 +233,6 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
                            "status": 200, "equals": {"catalog.namespace": resources["writableSchema"],
                                                       "catalog.tables.length": 0, "catalog.views.length": 0}})
         operations = ["create/edit/delete own prefixed app workspaces/designs/queries/chats", "download own exports"]
-        if username == "qa_designer_005":
-            operations.append("upload test-owned design JSON into own scratch workspace")
         if username in CHAT:
             operations += ["send AI chat on own workspace", "review/reject/approve proposals against own scratch design"]
         if username in WRITERS:
@@ -257,6 +284,7 @@ def build_pilot(source: dict, tag: str, workspaces: dict,
             raise ValueError(f"Pilot needs exact effective designer grants for {username}")
         mapped = workspaces["lanes"][username]
         prefix = f"qa_{tag}_{username[-3:]}_"
+        writer, writer_checks = pilot_writer(fixture, mapped, username, prefix)
         if mapped.get("prefix") != prefix:
             raise ValueError("Pilot workspace marker differs")
         resources = {key: fixture["resources"][key] for key in ("schema", "connectionId")}
@@ -264,6 +292,7 @@ def build_pilot(source: dict, tag: str, workspaces: dict,
                          readerWorkspaceId=mapped["readerWorkspaceId"],
                          seedOwnership={key: mapped[key] for key in ("localCreated", "readerCreated", "writerCreated")},
                          cleanupOwner="coordinator: exact seed receipts; extra app objects require cleanupReceipts")
+        resources.update(writer)
         context = (f"Use only owned local workspace {local} at /?workspace={local}; prefix {prefix}. "
                    "Your peer owns a different workspace: never enter or mutate it. Initial design is empty. "
                    "The saved table oracle is qa_pilot_items with id integer NOT NULL primary key, label text NOT NULL, "
@@ -272,10 +301,10 @@ def build_pilot(source: dict, tag: str, workspaces: dict,
                    "Preserve each first attempt outcome. Inspect saved state before repeating an uncertain write. ")
         cases = [
             ("pilot-create", "Create, save and reopen", "Create the exact table, save once, switch away/back and reload. Verify all three exact names/types/nullability and PK in inspector and exported desired SQL. Leave table for subsequent cases."),
-            ("pilot-files", "Real JSON/SQL download and owned upload", "Requires the saved pilot-create table; block prerequisite if creation failed. Open summary[aria-label=\"Download\"] before #download-catalog-button or #export-design-sql-button. Download JSON and SQL, inspect actual private bytes and exact three columns/PK. Create a new prefixed import workspace through UI; record exact creation ID/time receipt before further work. Upload the downloaded <=1 MiB JSON through its file input. Save/reload and compare content; original remains unchanged. Inspect downloads; an unsupported picker is blocked browser capability, not a pass."),
+            ("pilot-files", "Design downloads and Console CSV COPY", f"Requires saved pilot-create table. Download JSON and desired SQL from summary[aria-label=\"Download\"] and inspect exact three columns/PK. Switch visibly to writer workspace {writer['writerWorkspaceId']}, confirm PostgreSQL role/schema {writer['writableSchema']}, open Console, create ONLY {writer['writableSchema']}.{writer['copyTable']}(id integer PRIMARY KEY,label text NOT NULL,qty integer NULL). Record exact SQL object ownership before creation; inspect catalog if write outcome is uncertain. Execute COPY {writer['writableSchema']}.{writer['copyTable']} (id,label,qty) FROM STDIN WITH (FORMAT CSV, HEADER true) through Console upload using the exact resources.copyCSV bytes, <=1 MiB. Verify SELECT id,label,qty ORDER BY id returns exactly resources.copyRows, count 3 and SUM(qty)=5, after reload too. Download COPY TO STDOUT CSV, inspect exact header and all three ordered rows (not just file existence). Never upload JSON or write retained reader tables. Leave owned table for explicit coordinator writer reset; cleanup-sweep does not remove SQL objects. Unsupported picker is blocked browser capability."),
             ("pilot-recovery", "Validation, keyboard save and recovery", "Requires the saved pilot-create table; block prerequisite if creation failed. On owned table attempt a blank or duplicate column name and verify clear validation with no partial saved change. Restore valid input, make label->description, Tab to the visible Save control and activate it with Enter once, switch away/back and reload. Verify the renamed column persists once, peers remain separate and the browser session can recover after reload. Leave exact final state and receipts for coordinator cleanup."),
         ]
-        checks = list(fixture.get("checks", [])) + [
+        checks = list(fixture.get("checks", [])) + writer_checks + [
             {"path": "/api/v1/auth/me", "status": 200, "equals": {"user.username": username}},
             {"path": f"/api/v1/schemii/workspaces/{local}", "status": 200,
              "equals": {"id": local, "name": prefix + "seed", "connectionId": None}},
@@ -286,9 +315,9 @@ def build_pilot(source: dict, tag: str, workspaces: dict,
             "url": f"/?workspace={local}", "persona": "designer", "expectedCapabilities": ["schemii:access"],
             "independentReviewer": username == reviewer,
             "deniedProducts": list(fixture.get("deniedProducts", [])), "checks": checks, "resources": resources,
-            "writeAuthorization": {"enabled": True, "resources": [f"owned seed workspace {local}", f"own prefixed import workspace {prefix}import"],
-                                   "operations": ["create/edit/save own local design", "download own design JSON and SQL", "upload <=1 MiB own JSON into own prefixed workspace"]},
-            "scenarios": [scenario_contract(sid, title, context + steps) for sid, title, steps in cases],
+            "writeAuthorization": {"enabled": True, "resources": [f"owned seed workspace {local}", f"exact SQL table {writer['writableSchema']}.{writer['copyTable']}", f"writer workspace {writer['writerWorkspaceId']}"],
+                                   "operations": ["create/edit/save own local design", "download own design JSON and SQL", "upload <=1 MiB exact three-row CSV with Console COPY FROM STDIN only into assigned table"]},
+            "scenarios": [{**scenario_contract(sid, title, context + steps), **({"downloadOracle": True} if sid == "pilot-files" else {})} for sid, title, steps in cases],
         }
     return result
 

@@ -400,3 +400,20 @@ unresolved, including the reviewer lane. Worker receipts must match their record
 PID/birth/generation; delayed old receipts remain history and cannot clear a fresh
 owner's pending cleanup. Verified cleanup retains a failed worker exit as a failure,
 and native transport teardown does not establish native thread termination.
+
+### Supported pilot upload and writer cleanup
+
+The native adoption pilot uses Console `COPY FROM STDIN` with the exact three-row
+CSV in `resources.copyCSV`, followed by ordered row verification and content-inspected
+`COPY TO STDOUT`. There is no design JSON-upload UI. Provision a separately marked
+writer profile and fresh writer workspace for every pilot account before generating
+its manifest, including the reviewer. Missing or mismatched writer IDs/schema,
+reader-profile substitution and unowned starting state fail before dispatch.
+Desktop performs the upload; mobile is explicitly saved-state readback.
+
+`cleanup-sweep` owns app workspace receipts only. SQL objects remain pending cleanup
+until all lanes stop and the coordinator reconciles the marked writer ownership,
+runs the declared `reset-writer --account ACCOUNT`, then `verify-writer --account ACCOUNT`.
+These existing launcher operations validate the exact private QA marker/credentials;
+never issue generic SQL drops or reset another account. A generated mission is
+not cleanup evidence. Retain the actual reset/verification outcomes with the run.
