@@ -2,6 +2,7 @@ import { element, emptyPanel, normalizedSearch, replace } from "#common/dom.js";
 import { unavailableButton } from "./unavailable.js";
 import { installSortableList } from "/assets/common/sortable.js";
 import { createIconButton } from "./ui.js";
+import { desiredViewColumnSummary } from "./view-analysis.js";
 
 const MAX_BROWSER_ITEMS = 250;
 const MAX_INSPECTOR_ITEMS = 250;
@@ -586,7 +587,7 @@ export function renderTypes(container, catalog, query = "", filter = "all", { on
   return { shown: visible.length, matching: types.length, total: available.length };
 }
 
-function objectDescriptors(catalog) {
+function objectDescriptors(catalog, getViewAnalysis) {
   const objects = [];
   const hasTopLevelTriggers = Array.isArray(catalog.triggers);
   for (const table of catalog.tables) {
@@ -598,7 +599,16 @@ function objectDescriptors(catalog) {
       for (const trigger of table.triggers) objects.push({ designId: trigger.designId, kind: "trigger", name: trigger.name, meta: trigger.definition, target: "table", table: table.name });
     }
   }
-  for (const view of allViews(catalog)) objects.push({ designId: view.designId, kind: view.catalogKind, name: `${view.namespace}.${view.name}`, meta: `${view.columns.length} columns`, target: "view", view });
+  for (const view of allViews(catalog)) objects.push({
+    designId: view.designId,
+    kind: view.catalogKind,
+    name: `${view.namespace}.${view.name}`,
+    meta: catalog.source === "design"
+      ? desiredViewColumnSummary(getViewAnalysis?.(view))
+      : `${view.columns.length} columns`,
+    target: "view",
+    view,
+  });
   for (const routine of catalog.functions) objects.push({ designId: routine.designId, kind: routine.kind, name: `${routine.namespace}.${routine.name}(${routine.identityArguments})`, meta: routine.language, target: "routine" });
   for (const trigger of catalog.triggers || []) objects.push({
     designId: trigger.designId,
@@ -619,30 +629,50 @@ function objectDescriptors(catalog) {
   return objects.sort((left, right) => left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name));
 }
 
-export function renderObjects(container, catalog, query = "", onOpen) {
+export function renderObjects(container, catalog, query = "", onOpen, {
+  getViewAnalysis = null,
+  onAnalyzeView = null,
+  onRetryViewAnalysis = null,
+} = {}) {
+  const viewUpdates = new Map();
+  const updateViewAnalysis = (viewId, analysisState) => viewUpdates.get(viewId)?.(analysisState);
+  const expandedIds = new Set(Array.from(
+    container.querySelectorAll("details.catalog-object[open]"),
+    node => node.dataset.changeObjectId,
+  ));
   replace(container);
   if (!catalog) {
     container.append(emptyPanel("DB", "No catalog loaded", "Open a workspace to browse its database objects."));
-    return { shown: 0, matching: 0 };
+    return { shown: 0, matching: 0, updateViewAnalysis };
   }
   const needle = normalizedSearch(query);
-  const objects = objectDescriptors(catalog).filter(item => !needle || `${item.kind} ${item.name} ${item.meta}`.toLocaleLowerCase().includes(needle));
+  const objects = objectDescriptors(catalog, getViewAnalysis).filter(item => !needle || `${item.kind} ${item.name} ${item.meta}`.toLocaleLowerCase().includes(needle));
   if (!objects.length) {
     container.append(emptyPanel("0", "No matching objects", "No workspace objects match this search."));
-    return { shown: 0, matching: 0 };
+    return { shown: 0, matching: 0, updateViewAnalysis };
   }
   const visible = objects.slice(0, MAX_BROWSER_ITEMS);
   for (const object of visible) {
+    let analysisState = null;
+    if (catalog.source === "design" && object.target === "view") {
+      analysisState = getViewAnalysis?.(object.view);
+      if (!analysisState || analysisState.status === "idle") onAnalyzeView?.(object.view);
+      analysisState = getViewAnalysis?.(object.view);
+      object.meta = desiredViewColumnSummary(analysisState);
+    }
     const wrapper = element("details", {
       className: "catalog-object",
       dataset: object.designId ? { changeObjectId: object.designId, changeRoot: "" } : {},
     });
+    if (object.designId && expandedIds.has(object.designId)) wrapper.open = true;
     const summary = element("summary");
     const identity = element("span");
-    identity.append(element("strong", { text: object.name }), element("small", { text: object.meta }));
+    const summaryText = element("small", { text: object.meta });
+    identity.append(element("strong", { text: object.name }), summaryText);
     summary.append(identity, element("span", { className: "object-kind", text: object.kind.replaceAll("_", " ") }));
     const body = element("div", { className: "catalog-object-body" });
-    body.append(metadataGrid([["Type", object.kind], ["Identity", object.name], ["Catalog detail", object.meta]]));
+    const metadata = metadataGrid([["Type", object.kind], ["Identity", object.name], ["Catalog detail", object.meta]]);
+    body.append(metadata);
     if (object.target === "table") {
       const action = element("button", { className: "ui-button compact", type: "button", text: "Show table inspector" });
       action.addEventListener("click", () => onOpen(object));
@@ -651,6 +681,25 @@ export function renderObjects(container, catalog, query = "", onOpen) {
       const action = element("button", { className: "ui-button compact", type: "button", text: "Open view definition" });
       action.addEventListener("click", () => onOpen(object));
       body.append(action);
+      if (catalog.source === "design") {
+        let retryAction = null;
+        const update = next => {
+          const text = desiredViewColumnSummary(next);
+          summaryText.textContent = text;
+          metadata.lastElementChild.lastElementChild.textContent = text;
+          if (next?.status === "error" && onRetryViewAnalysis) {
+            if (!retryAction) {
+              retryAction = actionButton("Retry column analysis", () => onRetryViewAnalysis(object.view));
+              body.append(retryAction);
+            }
+          } else {
+            retryAction?.remove();
+            retryAction = null;
+          }
+        };
+        viewUpdates.set(object.designId, update);
+        update(analysisState);
+      }
     } else if (object.target === "routine") {
       const action = element("button", { className: "ui-button compact", type: "button", text: "Open routines browser" });
       action.addEventListener("click", () => onOpen(object));
@@ -668,5 +717,5 @@ export function renderObjects(container, catalog, query = "", onOpen) {
     container.append(wrapper);
   }
   if (objects.length > visible.length) container.append(element("p", { className: "none-reported", text: `Showing the first ${visible.length} of ${objects.length} matching objects. Refine the search to narrow the list.` }));
-  return { shown: visible.length, matching: objects.length };
+  return { shown: visible.length, matching: objects.length, updateViewAnalysis };
 }

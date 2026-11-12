@@ -225,7 +225,9 @@ test("redo restores a removed view as one fully assembled analyzed surface", asy
 
   const workspaceId = await createDetachedWorkspace(page, workspaceName);
   const complete = designFixture(tableName, viewName);
+  complete.views[0].definition = `SELECT * FROM ${tableName}`;
   await seedDesign(request, workspaceId, { ...complete, views: [] });
+  complete.tables[0].columns = complete.tables[0].columns.slice(0, 1);
   await seedDesign(request, workspaceId, complete);
   await page.reload();
   // Wait for URL restoration and the saved design before changing layers.
@@ -266,6 +268,7 @@ test("redo restores a removed view as one fully assembled analyzed surface", asy
   await expect(detail.locator(".query-story h2")).toHaveText(viewName);
   await expect(detail.locator(".query-sql-panel")).toBeVisible();
   await expect(detail.locator(".query-story-loading")).toHaveCount(0);
+  await expect(detail.locator(".query-result.final .query-step-output")).toHaveCount(1);
   await expect.poll(() => page.evaluate(() => window.__schemiiE2eRedoBlankSeen)).toBe(false);
   expect(new URL(page.url()).searchParams.get("view")).toBe(viewName);
 });
