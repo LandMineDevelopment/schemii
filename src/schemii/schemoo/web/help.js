@@ -7,7 +7,7 @@ export const helpTopics = Object.freeze({
   connectionColors: {
     title: "Connection colors",
     intro: "Enabled connections and the current preview path are different things. A gray connection can still be correctly connected and ready to use.",
-    sections: [["Purple · current preview", "The current valid preview uses this connection. Add a field from a historical alias in Preview to include its path; exposing a field on the canvas alone does not select it for Preview."], ["Solid gray · enabled", "Available to the model, but not needed by the current preview selections and filters. No change is required to enable it."], ["Dashed gray · disabled", "Not available to queries. Select the connection or its table inspector to enable it."], ["Red · cycle", "The enabled connections form a cycle that must be resolved before running a preview."]],
+    sections: [["Purple · current preview", "The current valid preview uses this connection. Add a field from a historical alias in Preview to include its path; exposing a field on the canvas alone does not select it for Preview."], ["Solid gray · enabled", "Available to the model, but not needed by the current preview selections and filters. No change is required to enable it."], ["Dashed gray · disabled", "Not available to queries. Select the connection or its table inspector to enable it."], ["Red · cycle", "The enabled connections form a cycle. Resolve ambiguous paths used by the current preview; unused cycles can stay enabled."]],
   },
   columnBinding: {
     title: "Column filter binding",
@@ -35,7 +35,7 @@ export const helpTopics = Object.freeze({
   overview: {
     title: "Building and exploring a model",
     intro: "A model describes which data can be combined and which filters should be applied. It does not copy or change your warehouse tables.",
-    steps: ["Model: choose the starting table and connections; use table inspectors to create aliases and expose fields.", "Filters: use the funnel toolbar button to define evaluation reach, requirement, and row matching. Table and summary inspectors link to their relevant filters.", "Preview: pick output fields, supply parameter values, add report filters, and run a read-only query. Red cycle connections must be resolved first."],
+    steps: ["Model: choose the starting table and connections; use table inspectors to create aliases and expose fields.", "Filters: use the funnel toolbar button to define evaluation reach, requirement, and row matching. Table and summary inspectors link to their relevant filters.", "Preview: pick output fields, supply parameter values, add report filters, and run a read-only query. Participating sources need unambiguous connection paths; unused cycles can stay enabled."],
     note: "Save stores model rules, layout, and Explore choices on the server, independently of PostgreSQL. Save changed model rules before running previews or browsing configured parameter values. Existing browser prototypes can be imported explicitly without being erased.",
   },
   scopes: {
