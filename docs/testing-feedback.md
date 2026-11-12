@@ -594,7 +594,12 @@ recipe uses an explicit fixture-only ASGI owner sampler for saturated peak count
 and original stock shutdown-completion accounting; missing/stale/forced outcomes
 remain incomplete. This instrumentation has unmeasured overhead and cannot prove
 uninstrumented stock capacity. The bounded held-consumer mode preserves exclusive
-leases and joins its exact consumer group before restoration. Authored controls
+leases and joins its exact consumer group before restoration. Exactly two fixed
+versioned profiles separate small metadata-pressure budgets from representative
+one-API load allocations; `--hold-load-fixture` selects the latter. Actual stock
+metadata composition (normal16/readiness2 for load), source admission and effective
+runtime allocations are checked without changing production defaults. Profile
+binding and a simulated1800s held lifecycle are pure/fake controls. Authored controls
 do not establish a live peak/lifespan/restore pass. Reuse unchanged native/real-PostgreSQL/assembled receipts
 where their original source and scope still apply; run only the missing served
 qualification after independent review and explicit coordinator scheduling.

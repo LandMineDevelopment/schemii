@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from contextlib import suppress
 from datetime import datetime, timezone
+from dataclasses import dataclass
 import fcntl
 import hashlib
 import io
@@ -84,6 +85,149 @@ class NoRedirect(HTTPRedirectHandler):
 def check(condition: bool, reason: str) -> None:
     if not condition:
         raise Refused(reason)
+
+
+@dataclass(frozen=True)
+class Allocation:
+    service: str
+    memory_bytes: int
+    nano_cpus: int
+    pids: int
+
+    def receipt(self) -> dict:
+        return {
+            "memoryBytes": self.memory_bytes,
+            "nanoCpus": self.nano_cpus,
+            "pids": self.pids,
+        }
+
+
+@dataclass(frozen=True)
+class FixtureProfile:
+    name: str
+    purpose: str
+    allocations: tuple[Allocation, ...]
+    normal_maximum: int
+    statement_ms: int
+    lock_ms: int
+    idle_ms: int
+    shutdown_seconds: int
+    database_maximum: int
+    shared_buffers: str
+
+    def receipt(self) -> dict:
+        return {
+            "name": self.name,
+            "version": 1,
+            "purpose": self.purpose,
+            "allocations": {item.service: item.receipt() for item in self.allocations},
+            "metadata": {
+                "normalMaximum": self.normal_maximum,
+                "readinessMaximum": 2,
+                "statementTimeoutMs": self.statement_ms,
+                "lockTimeoutMs": self.lock_ms,
+                "idleTransactionTimeoutMs": self.idle_ms,
+                "shutdownTimeoutSeconds": self.shutdown_seconds,
+            },
+            "sourceAdmission": {
+                "ordinaryTotal": 20,
+                "ordinaryPerIdentity": 4,
+                "retainedTotal": 19,
+                "retainedPerIdentity": 3,
+            },
+            "database": {
+                "maximumConnections": self.database_maximum,
+                "sharedBuffers": self.shared_buffers,
+            },
+            "apiProcesses": 1,
+            "instrumentation": "fixture_only_stock_asgi_lifespan_and_owner_sampler",
+            "instrumentationOverheadMeasured": False,
+            "stockCapacityEligible": False,
+        }
+
+    def environment(self) -> dict[str, str]:
+        values = {
+            "PRESSURE_PROFILE": self.name,
+            "PRESSURE_METADATA_MAXIMUM": str(self.normal_maximum),
+            "PRESSURE_METADATA_STATEMENT_MS": str(self.statement_ms),
+            "PRESSURE_METADATA_LOCK_MS": str(self.lock_ms),
+            "PRESSURE_METADATA_IDLE_MS": str(self.idle_ms),
+            "PRESSURE_METADATA_SHUTDOWN_SECONDS": str(self.shutdown_seconds),
+            "PRESSURE_DATABASE_MAXIMUM": str(self.database_maximum),
+            "PRESSURE_DATABASE_SHARED_BUFFERS": self.shared_buffers,
+        }
+        for item in self.allocations:
+            prefix = "PRESSURE_" + item.service.upper().replace("-", "_")
+            values.update(
+                {
+                    prefix + "_MEMORY": str(item.memory_bytes),
+                    prefix + "_CPUS": str(item.nano_cpus / 1_000_000_000),
+                    prefix + "_PIDS": str(item.pids),
+                }
+            )
+        return values
+
+
+PRESSURE_PROFILE = FixtureProfile(
+    "pressure-v1",
+    "metadata-pressure-qualification",
+    (
+        Allocation("schemii", 536870912, 1000000000, 128),
+        Allocation("metadata", 268435456, 500000000, 64),
+        Allocation("source", 268435456, 500000000, 64),
+        Allocation("ingress", 67108864, 250000000, 32),
+        Allocation("observer-init", 67108864, 250000000, 16),
+    ),
+    2,
+    3000,
+    1500,
+    3000,
+    2,
+    24,
+    "32MB",
+)
+LOAD_PROFILE = FixtureProfile(
+    "representative-load-v1",
+    "representative-one-api-load-fixture",
+    (
+        Allocation("schemii", 2147483648, 2000000000, 256),
+        Allocation("metadata", 1073741824, 1000000000, 256),
+        Allocation("source", 2147483648, 2000000000, 256),
+        Allocation("ingress", 134217728, 500000000, 64),
+        Allocation("observer-init", 67108864, 250000000, 16),
+    ),
+    16,
+    5000,
+    1000,
+    5000,
+    15,
+    100,
+    "128MB",
+)
+PROFILES = (PRESSURE_PROFILE, LOAD_PROFILE)
+
+
+def selected_profile(name: str) -> FixtureProfile:
+    for profile in PROFILES:
+        if type(name) is str and name == profile.name:
+            return profile
+    raise Refused("fixed_fixture_profile_required")
+
+
+def bound_profile(value: dict) -> FixtureProfile:
+    check(type(value) is dict, "profile_receipt_required")
+    profile = selected_profile(value.get("name"))
+    try:
+        supplied = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, ValueError):
+        raise Refused("profile_receipt_changed") from None
+    expected = json.dumps(
+        profile.receipt(), sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    check(supplied == expected, "profile_receipt_changed")
+    return profile
 
 
 def now() -> str:
@@ -311,7 +455,14 @@ def instant(value: str) -> datetime:
     return parsed
 
 
-def validate_observation(value: dict, run: str, native: dict, *, fresh: bool) -> None:
+def validate_observation(
+    value: dict,
+    run: str,
+    native: dict,
+    *,
+    fresh: bool,
+    profile: FixtureProfile = PRESSURE_PROFILE,
+) -> None:
     check(
         type(value) is dict
         and value.get("version") == 1
@@ -354,8 +505,8 @@ def validate_observation(value: dict, run: str, native: dict, *, fresh: bool) ->
             "observer_owner_unknown",
         )
     check(
-        value["normal"]["counts"]["maximum"] == 2
-        and value["readiness"]["counts"]["maximum"] == 1,
+        value["normal"]["counts"]["maximum"] == profile.normal_maximum
+        and value["readiness"]["counts"]["maximum"] == 2,
         "observer_fixed_owner_limits",
     )
 
@@ -562,7 +713,11 @@ def attachment_request(
         and journal.get("assets") == {name: sha(root / name) for name in ASSETS},
         "attachment_journal",
     )
+    profile = bound_profile(journal.get("profile"))
     authority = private_read(directory / "authority.json")
+    check(
+        bound_profile(authority.get("profile")) is profile, "authority_profile_changed"
+    )
     check(
         authority.get("kind") == "launcher_owned_disposable_pressure"
         and authority.get("status") == "held"
@@ -681,6 +836,7 @@ class Fixture:
             runtime,
         )
         self.journal = directory / "journal.json"
+        self.profile = bound_profile(state.get("profile"))
         self.environment = {
             key: value
             for key, value in os.environ.items()
@@ -699,6 +855,7 @@ class Fixture:
             PRESSURE_GID=str(os.getgid()),
             PRESSURE_APPLICATION_IMAGE=state["applicationImage"],
         )
+        self.environment.update(self.profile.environment())
         self.compose = [
             "compose",
             "--env-file",
@@ -765,16 +922,14 @@ class Fixture:
                 ]
             )
             check(record["image"] == expected, "disposable_image")
-            limits = {
-                "metadata": (268435456, 500000000, 64),
-                "source": (268435456, 500000000, 64),
-                "schemii": (536870912, 1000000000, 128),
-                "ingress": (67108864, 250000000, 32),
-                "observer-init": (67108864, 250000000, 16),
-            }
+            allocation = self.profile.receipt()["allocations"][service]
             check(
                 (record["memory"], record["nanoCpus"], record["pids"])
-                == limits[service],
+                == (
+                    allocation["memoryBytes"],
+                    allocation["nanoCpus"],
+                    allocation["pids"],
+                ),
                 "disposable_runtime_limits",
             )
             old = self.state.get("containers", {}).get(service)
@@ -1060,7 +1215,9 @@ class Fixture:
             and current.get("startedAt") == owned.get("startedAt"),
             "observer_native_changed_during_copy",
         )
-        validate_observation(value, self.state["run"], owned, fresh=not stopped)
+        validate_observation(
+            value, self.state["run"], owned, fresh=not stopped, profile=self.profile
+        )
         return {
             "containerId": owned["id"],
             "containerStartedAt": owned["startedAt"],
@@ -1312,6 +1469,11 @@ class Fixture:
             and prepared["sourceBaseline"]["releaseVerified"] is False,
             "preparation_baseline_missing",
         )
+        check(
+            bound_profile(prepared.get("profile")) is self.profile
+            and prepared.get("databaseSettings") == self.database_settings(),
+            "preparation_profile_mismatch",
+        )
         private_write(self.directory / "preparation.json", prepared)
         self.up(["observer-init"])
         initialized = self.state["containers"]["observer-init"]
@@ -1326,7 +1488,83 @@ class Fixture:
         self.up(["ingress"])
         restored_readiness()
 
+    def capture_runtime(self, api: dict) -> dict:
+        """Bind fixed launch allocation to actual owners and authenticated API process."""
+        observed = self.observation()
+        metadata = api.get("sources", {}).get("metadata", {})
+        source = api.get("sources", {}).get("source", {})
+        ordinary = source.get("counts", {}).get("ordinary", {})
+        check(
+            api.get("version") == 1
+            and api.get("processPid") == observed["observation"]["process"]["pid"]
+            and metadata.get("status") == "available"
+            and metadata.get("counts", {}).get("maximum_connections")
+            == self.profile.normal_maximum
+            and source.get("status") == "available"
+            and ordinary.get("maximum") == 20
+            and ordinary.get("maximumPerProfileRevision") == 4,
+            "effective_application_budget_mismatch",
+        )
+        preparation = private_read(self.directory / "preparation.json")
+        check(
+            bound_profile(preparation.get("profile")) is self.profile
+            and preparation.get("databaseSettings") == self.database_settings(),
+            "effective_database_budget_mismatch",
+        )
+        allocations = {
+            name: {
+                "containerId": record["id"],
+                "created": record["created"],
+                "image": record["image"],
+                "memoryBytes": record["memory"],
+                "nanoCpus": record["nanoCpus"],
+                "pids": record["pids"],
+            }
+            for name, record in self.state["containers"].items()
+        }
+        check(set(allocations) == SERVICES, "effective_service_inventory_missing")
+        receipt = {
+            "version": 1,
+            "run": self.state["run"],
+            "at": now(),
+            "scope": "startup-effective-configuration",
+            "profile": self.profile.receipt(),
+            "effectiveAllocations": allocations,
+            "metadata": {
+                "normalMaximum": observed["observation"]["normal"]["counts"]["maximum"],
+                "readinessMaximum": observed["observation"]["readiness"]["counts"][
+                    "maximum"
+                ],
+            },
+            "sourceOrdinaryMaximum": ordinary["maximum"],
+            "sourcePerIdentityMaximum": ordinary["maximumPerProfileRevision"],
+            "sourceRetainedBudgetEvidence": "stock-source-and-config-bound; declared19/3, not a live retained-permit measurement",
+            "databaseSettings": preparation["databaseSettings"],
+            "application": observed,
+            "apiProcesses": 1,
+            "apiProcessEvidence": "fixed --workers 1 launch plus authenticated API PID matches observer incarnation",
+            "instrumentation": self.profile.receipt()["instrumentation"],
+            "instrumentationOverheadMeasured": False,
+            "stockCapacityEligible": False,
+            "capacityAcceptance": False,
+        }
+        self.save("effective-profile-observed", runtimeReceipt=receipt)
+        private_write(self.directory / "runtime.json", receipt)
+        return receipt
+
+    def database_settings(self) -> dict:
+        return {
+            name: {
+                "maximumConnections": self.profile.database_maximum,
+                "sharedBuffers": self.profile.shared_buffers,
+            }
+            for name in ("metadata", "source")
+        }
+
     def run(self) -> dict:
+        check(
+            self.profile is PRESSURE_PROFILE, "pressure_qualification_profile_required"
+        )
         outcome = "failed"
         try:
             self.prepare_stack()
@@ -1337,6 +1575,7 @@ class Fixture:
                 and result.get("capacityAcceptance") is False,
                 "qualification_incomplete",
             )
+            self.capture_runtime(result.get("runtimeObservation", {}))
             outcome = "qualified"
             return result
         finally:
@@ -1351,6 +1590,8 @@ class Fixture:
             "status": status,
             "run": self.state["run"],
             "nonce": hold["nonce"],
+            "profile": self.state["profile"],
+            "runtimeReceipt": self.state.get("runtimeReceipt"),
             "directory": str(self.directory),
             "owner": self.state["owner"],
             "heartbeatAt": now(),
@@ -1462,6 +1703,7 @@ class Fixture:
             self.prepare_stack()
             result = self.probe("bootstrap")
             check(result.get("phase") == "bootstrapped", "hold_bootstrap_missing")
+            self.capture_runtime(result.get("runtimeObservation", {}))
             credentials = {
                 "version": 1,
                 "run": self.state["run"],
@@ -1604,8 +1846,16 @@ class Fixture:
 
 
 def begin(
-    root: Path, primary: Path, directory: Path | None, runtime=command
+    root: Path,
+    primary: Path,
+    directory: Path | None,
+    runtime=command,
+    *,
+    profile_name: str = PRESSURE_PROFILE.name,
 ) -> Fixture:
+    profile = selected_profile(
+        profile_name
+    )  # Reject ambiguity before runtime inspection or private writes.
     run = directory.name if directory is not None else "pressure_" + uuid.uuid4().hex
     check(bool(re.fullmatch(r"pressure_[0-9a-f]{32}", run)), "run_directory_name")
     base = primary / ".schemii/metadata-pressure"
@@ -1622,6 +1872,7 @@ def begin(
         "project": "schemii-pressure-" + run[9:],
         "applicationImage": "",
         "images": {},
+        "profile": profile.receipt(),
     }
     fixture = Fixture(root, primary, directory, minimal, runtime)
     runtime_context = fixture.context()
@@ -1868,6 +2119,7 @@ def main() -> int:
             "--qualify-metadata-pressure",
             "--recover-metadata-pressure",
             "--hold-metadata-pressure",
+            "--hold-load-fixture",
             "--metadata-pressure-attach",
             "--metadata-pressure-heartbeat",
             "--metadata-pressure-detach",
@@ -1905,7 +2157,7 @@ def main() -> int:
             fixture.cleanup()
         else:
             seconds = None
-            if args.action == "--hold-metadata-pressure":
+            if args.action in {"--hold-metadata-pressure", "--hold-load-fixture"}:
                 check(
                     args.directory is not None
                     and args.argument is None
@@ -1915,7 +2167,12 @@ def main() -> int:
                 seconds = int(str(args.directory))
                 check(60 <= seconds <= 3600, "hold_duration_bound")
             fixture = begin(
-                args.root, args.primary, None if seconds is not None else args.directory
+                args.root,
+                args.primary,
+                None if seconds is not None else args.directory,
+                profile_name=LOAD_PROFILE.name
+                if args.action == "--hold-load-fixture"
+                else PRESSURE_PROFILE.name,
             )
             print(
                 json.dumps(

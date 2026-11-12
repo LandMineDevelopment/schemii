@@ -36,6 +36,7 @@ def test_pressure_errors_preserve_cookie_and_do_not_accept_safe_looking_200():
 
 def test_private_fixture_requires_independent_nonloopback_database_endpoints(tmp_path):
     manifest = {
+        "profile": p.PRESSURE_PROFILE.receipt(),
         "bootstrapConsent": "explicit-disposable-fixture-only",
         "run": "pressure_" + "a" * 32,
         "endpoints": {"metadata": "172.30.0.2", "source": "172.30.0.3"},
@@ -156,6 +157,7 @@ def test_source_provision_receipt_binds_endpoint_server_and_owned_database_marke
     probe.directory = tmp_path
     probe.run = "pressure_" + "a" * 32
     probe.manifest = {"endpoints": {"source": "172.30.0.3"}}
+    probe.profile = p.PRESSURE_PROFILE
     probe.identities = []
     for name in ("app", "monitor", "blocker", "source"):
         path = tmp_path / (name + "_password")
@@ -188,6 +190,8 @@ def test_source_provision_receipt_binds_endpoint_server_and_owned_database_marke
                 "started": started,
                 "database_oid": 16384,
                 "marker": "schemii-load:" + fixture_id,
+                "maximum_connections": 24,
+                "shared_buffers": "32MB",
             }
 
     monkeypatch.setattr(probe, "connect", lambda *_: Connection())
@@ -310,7 +314,7 @@ def test_fixture_wrapper_preserves_stock_messages_and_observes_real_owner_counts
 
     normal = MetadataConnectionFactory(config, connect=offline_connect)
     ready = MetadataConnectionFactory(
-        config, connect=offline_connect, maximum_connections=1
+        config, connect=offline_connect, maximum_connections=2
     )
     held = [normal(), normal(), ready()]
     with pytest.raises(MetadataCapacityError):
@@ -447,7 +451,7 @@ def test_actual_metadata_owners_are_observed_without_connecting_before_and_after
     )
     normal = MetadataConnectionFactory(config, connect=forbidden_connect)
     readiness = MetadataConnectionFactory(
-        config, connect=forbidden_connect, maximum_connections=1
+        config, connect=forbidden_connect, maximum_connections=2
     )
     app = SimpleNamespace(
         state=SimpleNamespace(
@@ -530,3 +534,177 @@ def test_incomplete_or_new_owner_contract_stays_unknown(shape):
         "status": "unknown",
         "reason": "owner_snapshot_failed",
     }
+
+
+@pytest.mark.parametrize("profile_name", ["pressure-v1", "representative-load-v1"])
+def test_actual_repository_composition_observer_matches_stock_readiness_budget(
+    tmp_path, monkeypatch, profile_name
+):
+    import base64
+    import psycopg
+    from dev.pressure import controller as c
+    from dev.pressure.app import ObservedApplication
+    import schemii.common.metadata.factory as factory
+    from schemii.common.metadata.database import MetadataConnectionFactory
+
+    calls, migrations = [], []
+
+    def forbidden_connect(*args, **kwargs):
+        calls.append(True)
+        raise AssertionError("Database contact forbidden")
+
+    def offline_migration(migrator):
+        migrations.append(migrator._connection_factory)
+        assert (
+            migrator._connection_factory.admission_snapshot().maximum_connections == 1
+        )
+        return 0
+
+    monkeypatch.setattr(psycopg, "connect", forbidden_connect)
+    monkeypatch.setattr(factory.MetadataMigrator, "migrate", offline_migration)
+    tmp_path.chmod(0o700)
+    key = tmp_path / "test-owned-key"
+    key.write_text(base64.b64encode(bytes(32)).decode() + "\n")
+    key.chmod(0o600)
+    profile = c.selected_profile(profile_name)
+    environment = {
+        "SCHEMII_STORAGE_MODE": "postgresql",
+        "SCHEMII_METADATA_DSN": "host=metadata dbname=offline user=offline",
+        "SCHEMII_METADATA_PASSWORD_FILE": "/never-open/password",
+        "SCHEMII_METADATA_ENCRYPTION_KEY_FILE": str(key),
+    }
+    if profile is c.PRESSURE_PROFILE:
+        environment.update(
+            {
+                "SCHEMII_METADATA_MAXIMUM_CONNECTIONS": "2",
+                "SCHEMII_METADATA_STATEMENT_TIMEOUT_MS": str(profile.statement_ms),
+                "SCHEMII_METADATA_LOCK_TIMEOUT_MS": str(profile.lock_ms),
+                "SCHEMII_METADATA_IDLE_TRANSACTION_TIMEOUT_MS": str(profile.idle_ms),
+                "SCHEMII_METADATA_SHUTDOWN_TIMEOUT_SECONDS": str(
+                    profile.shutdown_seconds
+                ),
+            }
+        )
+    repositories = factory.create_metadata_repositories(environment)
+    assert isinstance(repositories.connection_factory, MetadataConnectionFactory)
+    normal = repositories.connection_factory
+    assert normal.admission_snapshot().maximum_connections == profile.normal_maximum
+    assert normal._statement_timeout_ms == profile.statement_ms
+    assert normal._lock_timeout_ms == profile.lock_ms
+    assert normal._idle_transaction_timeout_ms == profile.idle_ms
+    assert normal._config.shutdown_timeout_seconds == profile.shutdown_seconds
+    readiness = repositories.readiness_probe._connection_factory
+    assert isinstance(readiness, MetadataConnectionFactory)
+    assert readiness.admission_snapshot().maximum_connections == 2
+    assert len(migrations) == 1 and migrations[0].admission_snapshot().closed is True
+    application = SimpleNamespace(
+        state=SimpleNamespace(services=SimpleNamespace(metadata=repositories))
+    )
+    wrapper = ObservedApplication(application, "pressure_" + "a" * 32, tmp_path)
+    wrapper.stage, wrapper.startup_complete = "running", True
+    value = wrapper.snapshot()
+    # The owner data is the actual composition. Only host UID differs from the
+    # launcher's fixed container UID in this no-runtime policy control.
+    value["process"]["uid"] = 10001
+    c.validate_observation(
+        value,
+        wrapper.run,
+        {"startedAt": "2026-01-01T00:00:00Z"},
+        fresh=True,
+        profile=profile,
+    )
+    repositories.close()
+    closed = wrapper.snapshot()
+    assert closed["normal"]["counts"]["closed"] is True
+    assert closed["readiness"]["counts"]["closed"] is True
+    assert (
+        closed["normal"]["counts"]["active"]
+        == closed["readiness"]["counts"]["active"]
+        == 0
+    )
+    assert calls == []
+
+
+def test_fixed_source_admission_profile_matches_actual_stock_config_and_owner_without_io(
+    monkeypatch,
+):
+    from pathlib import Path
+    import psycopg
+    from dev.pressure import controller as c
+    from schemii.common.admin_config import AdminConfig
+    from schemii.common.postgres.gateway import PsycopgPostgresGateway
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Database/query contact forbidden")
+
+    monkeypatch.setattr(psycopg, "connect", forbidden)
+    config = AdminConfig.from_env(
+        {
+            "SCHEMII_CONFIG_FILE": str(
+                Path(__file__).resolve().parents[1] / "dev/schemii.toml"
+            )
+        }
+    )
+    gateway = PsycopgPostgresGateway(
+        connect_factory=forbidden,
+        maximum_connections=config.postgres_connections.maximum_total,
+        maximum_connections_per_identity=config.postgres_connections.maximum_per_identity,
+        connection_acquire_timeout=config.postgres_connections.acquire_timeout_seconds,
+    )
+    snapshot = gateway.observation_snapshot()["ordinary"]
+    assert snapshot["maximum"] == 20 and snapshot["maximumPerProfileRevision"] == 4
+    declared = c.LOAD_PROFILE.receipt()["sourceAdmission"]
+    assert (
+        declared
+        == c.PRESSURE_PROFILE.receipt()["sourceAdmission"]
+        == {
+            "ordinaryTotal": 20,
+            "ordinaryPerIdentity": 4,
+            "retainedTotal": 19,
+            "retainedPerIdentity": 3,
+        }
+    )
+    owner = gateway._connection_capacity
+    identities = [f"owned-{index // 3}" for index in range(19)]
+    for identity in identities:
+        assert owner.acquire(identity, 0, retained=True) is None
+    assert owner.acquire("owned-new", 0, retained=True)[1:] == (19, 19)
+    assert owner.acquire("owned-0", 0, retained=True)[1:] == (3, 3)
+    for identity in identities:
+        owner.release(identity, retained=True)
+    assert gateway.observation_snapshot()["ordinary"]["permits"] == 0
+
+
+@pytest.mark.parametrize(
+    "profile_name,maximum,buffers",
+    [("pressure-v1", 100, "128MB"), ("representative-load-v1", 24, "32MB")],
+)
+def test_actual_database_settings_must_match_fixed_profile_before_any_provisioning(
+    profile_name, maximum, buffers, tmp_path, monkeypatch
+):
+    from dev.pressure import controller as c
+
+    probe = p.Probe.__new__(p.Probe)
+    probe.profile = c.selected_profile(profile_name)
+    probe.run, probe.directory = "pressure_" + "a" * 32, tmp_path
+    commands = []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def execute(self, statement):
+            commands.append(statement)
+            return self
+
+        def fetchone(self):
+            return {"maximum_connections": maximum, "shared_buffers": buffers}
+
+    monkeypatch.setattr(probe, "connect", lambda *args: Connection())
+    with pytest.raises(Refused, match="fixed_database_profile_mismatch"):
+        probe.prepare()
+    assert len(commands) == 1 and "current_setting('max_connections')" in commands[0]
+    assert list(tmp_path.iterdir()) == []
