@@ -17,6 +17,14 @@ These requirements are mandatory for every agent and every session in this repos
 
 The launcher may use Docker on the host as an implementation detail. Application containers must never receive the Docker socket.
 
+## Android phone server
+
+- Direct SSH access to the existing phone backend is configured privately on this workstation. Before phone work, read [the Android agent operations guide](docs/android-agent-operations.md) and discover the connection through `$HOME/.local/state/schemii/android-phone/access.json`. Do not repeat installation, request credentials already configured there, or copy connection details into Git.
+- Verify local access-file permissions, the pinned SSH host key and the phone's active-operation marker before acting. An active migration or other operation requires coordination with its owner before any lifecycle, upgrade or database mutation. A missing or unreadable marker is not proof that the phone is idle.
+- On the phone, `schemii start`, `stop`, `restart` and `status` delegate to the active release's `./start.sh --android` and manage both PostgreSQL clusters, the application, Pi sidecar and HTTPS ingress together. Use this launcher boundary for application lifecycle operations; the desktop preview route above is a separate deployment.
+- Keep installed releases immutable and preserve private database state and keys. Direct phone access authorizes work only within the user's current task; it does not authorize unrelated account resets, redeployment or data replacement. Do not interrupt the frozen demo.
+- SSH access is working, but recovery after Termux force-stop, Android reboot, Doze or VPN interruption remains unverified. Report observed availability rather than promising unattended access.
+
 ## Published interview demo
 
 - The published demo snapshot is `demo-v0.1.0`: <https://github.com/LandMineDevelopment/schemii/releases/tag/demo-v0.1.0>.
