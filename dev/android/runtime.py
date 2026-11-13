@@ -819,7 +819,7 @@ class Runtime:
                 ),
                 "SCHEMER_PREVIEW_ROWS": "10000",
                 "SCHEMER_PREVIEW_BYTES": "8388608",
-                "SCHEMER_DASHBOARD_PREVIEW_ROWS": "10000",
+                "SCHEMER_DASHBOARD_PREVIEW_ROWS": "50000",
                 "SCHEMER_DASHBOARD_PREVIEW_BYTES": "16777216",
             }
         )

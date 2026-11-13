@@ -1,4 +1,6 @@
 import asyncio
+import importlib.util
+from pathlib import Path
 import pytest
 from types import SimpleNamespace as NS
 
@@ -44,6 +46,79 @@ def collect(services, model, **kwargs):
         return [event async for event in streaming.events(services, "owner", model,
                 [{"tileId": "tile", "plan": {"sql": "select 1", "outputLabels": ["Full name"]}}], **kwargs)]
     return asyncio.run(run())
+
+
+@pytest.fixture
+def android_streaming(tmp_path, monkeypatch):
+    runtime_path = Path(__file__).resolve().parents[1] / "dev/android/runtime.py"
+    spec = importlib.util.spec_from_file_location("android_dashboard_runtime", runtime_path)
+    runtime_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime_module)
+    runtime = runtime_module.Runtime(tmp_path / "state")
+    environment = runtime._environment(
+        runtime_module.validate_config("100.64.2.3", "phone.example.ts.net")
+    )
+    for name in (
+        "SCHEMER_PREVIEW_ROWS", "SCHEMER_PREVIEW_BYTES",
+        "SCHEMER_DASHBOARD_PREVIEW_ROWS", "SCHEMER_DASHBOARD_PREVIEW_BYTES",
+    ):
+        monkeypatch.setenv(name, environment[name])
+    # Read the actual module's import-time limits from the phone environment,
+    # without replacing the shared streaming module used by the other tests.
+    spec = importlib.util.spec_from_file_location("android_dashboard_streaming", streaming.__file__)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def collect_dashboard(module, row_sets):
+    console, services, model = setup([])
+    pages = {
+        f"tile-{index}": [rows[start:start + 1000] for start in range(0, len(rows), 1000)]
+        for index, rows in enumerate(row_sets)
+    }
+    console.execution.results = [NS(id=tile_id) for tile_id in pages]
+
+    def page(_owner, _connection, _execution, result_id, _cursor):
+        remaining = pages[result_id]
+        return NS(rows=remaining.pop(0), columns=[ConsoleResultColumn(name="value", data_type="text")],
+                  next_cursor="next" if remaining else None, truncated=False)
+
+    console.page = page
+    tiles = [{"tileId": tile_id, "plan": {"sql": "select 1"}} for tile_id in pages]
+
+    async def run():
+        return [event async for event in module.events(services, "owner", model, tiles)]
+
+    events = asyncio.run(run())
+    assert console.closed == list(pages)
+    assert not console.cancelled
+    assert events[-1]["type"] == "end"
+    assert not [event for event in events if event["type"] == "error"]
+    return events
+
+
+def test_android_dashboard_stream_keeps_all_three_detail_tiles(android_streaming):
+    # Five summary tiles precede three detail tables. Every detail source exceeds
+    # its own row cap; a 10,000-row dashboard cap starves the later two tables.
+    row_sets = [[[row] for row in range(count)] for count in (1, 1, 2, 7, 500, 10001, 10001, 10001)]
+    events = collect_dashboard(android_streaming, row_sets)
+    complete = [event for event in events if event["type"] == "complete"]
+    assert [event["rowCount"] for event in complete] == [1, 1, 2, 7, 500, 10000, 10000, 10000]
+    assert [event["reason"] for event in complete] == [None] * 5 + ["row_limit"] * 3
+    assert sum(len(event["rows"]) for event in events if event["type"] == "rows") == 30511
+
+
+def test_android_dashboard_stream_retains_tile_and_dashboard_byte_caps(android_streaming):
+    row = ["x" * (4 * 1024 * 1024 - 5)]
+    assert len(android_streaming.encode(row)) == 4 * 1024 * 1024
+    events = collect_dashboard(android_streaming, [[row] * 3 for _ in range(3)])
+    complete = [event for event in events if event["type"] == "complete"]
+    assert [event["rowCount"] for event in complete] == [2, 2, 0]
+    assert [event["reason"] for event in complete] == ["byte_limit", "byte_limit", "dashboard_byte_limit"]
+    assert all(event["limitReached"] for event in complete)
+    assert events[0]["limits"]["bytes"] == 8 * 1024 * 1024
+    assert events[0]["limits"]["totalBytes"] == 16 * 1024 * 1024
 
 
 def test_stream_eagerly_drains_and_closes_before_completion():

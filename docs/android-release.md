@@ -15,6 +15,12 @@ computer, Docker daemon, public tunnel or off-phone database is required to run
 it. AI provider operations still need their normal account credentials and
 internet access; this release contains no provider credentials or local model.
 
+Dashboard previews share a 50,000-row budget across all tiles, matching the
+standard backend. Each tile remains capped at 10,000 rows and 8 MiB, and the
+complete dashboard remains capped at 16 MiB. This lets several detail tables
+display their previews without the first table exhausting the dashboard's row
+budget; larger results still stop at the applicable row or byte limit.
+
 ## Install the versioned release
 
 1. Install the official **Termux** app from F-Droid, and the official **Tailscale**
@@ -30,7 +36,7 @@ internet access; this release contains no provider credentials or local model.
    pkg install curl
    curl --fail --location --proto '=https' --tlsv1.2 \
      --output "$HOME/install-android.sh" \
-     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.6/install-android.sh
+     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.7/install-android.sh
    ```
 
    Inspect the downloaded file, then run it:
@@ -42,7 +48,7 @@ internet access; this release contains no provider credentials or local model.
 The standalone installer embeds the exact release archive checksum and source
 commit. It verifies the download, complete file inventory and safe archive paths
 before extraction. It installs a new version directory under
-`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.6`, then delegates runtime
+`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.7`, then delegates runtime
 installation to that source's `./start.sh --android install`. After dependency
 installation succeeds, it installs the global `schemii` command and points the
 visible `~/schemii` folder to that version. Existing changed source is preserved
