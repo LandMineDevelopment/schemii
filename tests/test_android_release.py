@@ -65,6 +65,61 @@ def installer_module():
     return namespace
 
 
+@pytest.mark.parametrize("mode,action", [("stop", "stop"), ("install", "install")])
+def test_verified_release_action_stops_without_entering_dependency_install(
+    tmp_path, mode, action
+):
+    template = (ROOT / "dev/android/download.sh.in").read_text()
+    helper = template.split("# BEGIN_RELEASE_ACTION\n", 1)[1].split(
+        "# END_RELEASE_ACTION", 1
+    )[0]
+    source = tmp_path / "verified source"
+    source.mkdir()
+    record = tmp_path / "actions"
+    (source / "start.sh").write_text('printf "%s\\n" "$@" > "$ACTION_RECORD"\n')
+    import shlex
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            helper
+            + "\nrun_release_action "
+            + shlex.quote(mode)
+            + " "
+            + shlex.quote(str(source)),
+        ],
+        env={**os.environ, "ACTION_RECORD": str(record)},
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert record.read_text().splitlines() == ["--android", action]
+
+
+def test_stop_only_failure_preserves_failure_and_never_announces_success(tmp_path):
+    template = (ROOT / "dev/android/download.sh.in").read_text()
+    helper = template.split("# BEGIN_RELEASE_ACTION\n", 1)[1].split(
+        "# END_RELEASE_ACTION", 1
+    )[0]
+    source = tmp_path / "verified"
+    source.mkdir()
+    (source / "start.sh").write_text("exit 7\n")
+    import shlex
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            helper + "\nrun_release_action stop " + shlex.quote(str(source)),
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 7
+    assert "Stopped." not in result.stdout
+
+
 def install(artifact, destination):
     return installer_module()["install_archive"](
         artifact["archive"], destination, TAG, artifact["sha256"], artifact["commit"]

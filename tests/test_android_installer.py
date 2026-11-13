@@ -8,6 +8,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -67,8 +68,61 @@ def test_guest_preserves_each_argument_and_uses_isolated_userland(
     assert result.returncode == 0, result.stderr
     args = json.loads(result.stdout)
     assert args[:4] == ["login", "--isolated", "--user", "schemii"]
+    assert args[args.index("--env") + 1] == "PROOT_DONT_SHARE_LIBANDROID_SHMEM=1"
     assert "/private/release with spaces:/opt/schemii" in args
     assert args[-4:] == ["--", "/bin/test", "a b", "literal;echo nope"]
+
+
+def test_background_supervisor_uses_builtin_ipc_in_the_initial_proot_environment(
+    tmp_path,
+):
+    executable = tmp_path / "proot-distro"
+    record = tmp_path / "invocation.json"
+    executable.write_text(
+        f"#!{sys.executable}\nimport json,os,sys\nopen(os.environ['INVOCATION_RECORD'],'w').write(json.dumps(sys.argv[1:]))\n"
+    )
+    executable.chmod(0o700)
+    control = tmp_path / "control"
+    control.mkdir()
+    result = shell(
+        f"""SCHEMII_ANDROID_ROOT=/private/source
+SCHEMII_ANDROID_CONTROL={shlex.quote(str(control))}
+calls=0
+runtime() {{
+  calls=$((calls+1))
+  if ((calls==1)); then return 1; fi
+  if ((calls==2)); then printf '{{"state":"starting","startup_stage":"metadata init"}}\\n'; return 1; fi
+  printf '{{"ready":true}}\\n'
+}}
+host_running() {{ ((calls>1)); }}
+record_runner() {{ wait "$1"; }}
+termux-wake-lock() {{ :; }}
+sleep() {{ :; }}
+start_runtime
+""",
+        env={
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "INVOCATION_RECORD": str(record),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    args = json.loads(record.read_text())
+    assert args[args.index("--env") + 1] == "PROOT_DONT_SHARE_LIBANDROID_SHMEM=1"
+    assert args[-1] == "run"
+    assert "Startup: metadata init" in result.stdout
+
+
+def test_readonly_guest_status_has_an_outer_timeout_even_if_proot_hangs(tmp_path):
+    executable = tmp_path / "proot-distro"
+    executable.write_text("#!/bin/sh\nexec sleep 60\n")
+    executable.chmod(0o700)
+    started = time.monotonic()
+    result = shell(
+        "SCHEMII_ANDROID_ROOT=/private/source\nSCHEMII_ANDROID_CONTROL=/private/control\nruntime status",
+        env={"PATH": f"{tmp_path}:{os.environ['PATH']}"},
+    )
+    assert result.returncode == 124
+    assert time.monotonic() - started < 17
 
 
 def test_old_proot_cli_is_rejected_without_fallback() -> None:
@@ -83,7 +137,7 @@ def test_supported_proot_help_accepts_stdout_and_actual_stderr_channel(stream):
     result = shell(f"""proot-distro() {{
   case "$1" in
     install) printf 'Usage: proot-distro install --name NAME IMAGE\\n' >&{stream};;
-    login) printf 'Usage: proot-distro login --isolated --bind PATH --user USER --work-dir DIR\\n' >&{stream};;
+    login) printf 'Usage: proot-distro login --isolated --bind PATH --user USER --work-dir DIR --env KEY=VALUE\\n' >&{stream};;
   esac
 }}
 require_proot
@@ -95,7 +149,7 @@ require_proot
 @pytest.mark.parametrize("failed_command", ["install", "login"])
 def test_failed_help_cannot_pass_by_printing_supported_options(failed_command):
     result = shell(f"""proot-distro() {{
-  printf '%s\\n' '--name --isolated --bind --user --work-dir' >&2
+  printf '%s\\n' '--name --isolated --bind --user --work-dir --env' >&2
   [[ "$1" != {shlex.quote(failed_command)} ]]
 }}
 require_proot
@@ -106,13 +160,13 @@ require_proot
 
 
 @pytest.mark.parametrize(
-    "missing", ["--name", "--isolated", "--bind", "--user", "--work-dir"]
+    "missing", ["--name", "--isolated", "--bind", "--user", "--work-dir", "--env"]
 )
 def test_missing_proot_capability_is_still_rejected(missing):
     install_options = "--name" if missing != "--name" else ""
     login_options = " ".join(
         option
-        for option in ["--isolated", "--bind", "--user", "--work-dir"]
+        for option in ["--isolated", "--bind", "--user", "--work-dir", "--env"]
         if option != missing
     )
     result = shell(f"""proot-distro() {{

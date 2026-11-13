@@ -49,14 +49,24 @@ require_proot() {
     fail 'Could not inspect PRoot-Distro login options. Run proot-distro login --help to inspect the failure.'
     return 1
   fi
-  [[ "$install_help" == *--name* && "$login_help" == *--isolated* && "$login_help" == *--bind* && "$login_help" == *--user* && "$login_help" == *--work-dir* ]] || fail 'This preview requires the current OCI-capable PRoot-Distro 5.x CLI. Update the proot-distro Termux package, then rerun install; older distro-alias releases are unsupported.'
+  [[ "$install_help" == *--name* && "$login_help" == *--isolated* && "$login_help" == *--bind* && "$login_help" == *--user* && "$login_help" == *--work-dir* && "$login_help" == *--env* ]] || fail 'This preview requires the current OCI-capable PRoot-Distro 5.x CLI. Update the proot-distro Termux package, then rerun install; older distro-alias releases are unsupported.'
 }
 guest() {
   local guest_user=$1; shift
-  proot-distro login --isolated --user "$guest_user" \
-    --bind "$SCHEMII_ANDROID_ROOT:/opt/schemii" \
-    --bind "$SCHEMII_ANDROID_CONTROL:/mnt/schemii-control" \
-    --work-dir /opt/schemii "$SCHEMII_ANDROID_ALIAS" -- "$@"
+  # PRoot-Distro clears unlisted host variables. Its --env option also reaches
+  # the host tracer, selecting built-in SysV IPC instead of libandroid-shmem's
+  # shared segment registry (which can deadlock PostgreSQL's initdb probes).
+  local -a invocation=(proot-distro login --isolated --user "$guest_user"
+    --env PROOT_DONT_SHARE_LIBANDROID_SHMEM=1
+    --bind "$SCHEMII_ANDROID_ROOT:/opt/schemii"
+    --bind "$SCHEMII_ANDROID_CONTROL:/mnt/schemii-control"
+    --work-dir /opt/schemii "$SCHEMII_ANDROID_ALIAS" --)
+  # Read-only probes must not defeat the outer startup deadline if PRoot stalls.
+  if [[ "$guest_user" == schemii && ${1-} == /opt/schemii-venv/bin/python && ${2-} == /opt/schemii/dev/android/runtime.py && ${3-} == status ]]; then
+    timeout --signal=TERM --kill-after=2s 12s "${invocation[@]}" "$@"
+  else
+    "${invocation[@]}" "$@"
+  fi
 }
 runtime() { guest schemii /opt/schemii-venv/bin/python /opt/schemii/dev/android/runtime.py "$@"; }
 require_owned() {
@@ -160,6 +170,7 @@ start_runtime() {
   command -v termux-wake-lock >/dev/null && termux-wake-lock
   # All guest services remain children of one foreground PRoot session.
   nohup proot-distro login --isolated --user schemii \
+    --env PROOT_DONT_SHARE_LIBANDROID_SHMEM=1 \
     --bind "$SCHEMII_ANDROID_ROOT:/opt/schemii" \
     --bind "$SCHEMII_ANDROID_CONTROL:/mnt/schemii-control" \
     --work-dir /opt/schemii "$SCHEMII_ANDROID_ALIAS" -- \
@@ -167,12 +178,21 @@ start_runtime() {
     </dev/null >>"$logfile" 2>&1 9>&- &
   local runner=$!
   record_runner "$runner"
+  printf 'Starting Android services; waiting for verified HTTPS readiness (up to 180 seconds).\n'
   local deadline=$((SECONDS + 180))
   while ((SECONDS < deadline)); do
     if runtime status > "$SCHEMII_ANDROID_CONTROL/status.json" 2>/dev/null; then
       cat "$SCHEMII_ANDROID_CONTROL/status.json"; return
     fi
     host_running || fail "The supervisor exited before readiness. Inspect private log: $logfile"
+    python - "$SCHEMII_ANDROID_CONTROL/status.json" <<'PROGRESS'
+import json,pathlib,sys
+try:
+    value=json.loads(pathlib.Path(sys.argv[1]).read_text())
+    print('Startup: '+str(value.get('startup_stage') or value.get('state') or 'waiting for supervisor'),flush=True)
+except (OSError,ValueError):
+    print('Startup: waiting for supervisor status',flush=True)
+PROGRESS
     sleep 2
   done
   fail "Readiness timed out after 180 seconds. The supervisor is retained for diagnosis; inspect logs and run stop. Private launcher log: $logfile"

@@ -10,10 +10,14 @@ COMMIT='@COMMIT@'
 
 if [[ "${1-}" == --help ]]; then
   printf 'Install Schemii %s (%s) into Termux private storage.\n' "$TAG" "$COMMIT"
-  printf 'Usage: bash install-android.sh\nRequires official Termux on ARM64 Android and network access.\n'
+  printf 'Usage: bash install-android.sh [--stop-only]\nRequires official Termux on ARM64 Android and network access.\n'
+  printf -- '--stop-only verifies/extracts this release and stops the existing runtime without installing dependencies.\n'
   exit 0
 fi
-if (( $# != 0 )); then
+MODE=install
+if (( $# == 1 )) && [[ "$1" == --stop-only ]]; then
+  MODE=stop
+elif (( $# != 0 )); then
   printf 'Unknown arguments. Use --help.\n' >&2
   exit 2
 fi
@@ -206,12 +210,25 @@ if __name__ == '__main__':
 # END_RELEASE_INSTALLER_PYTHON
 PY
 )"
-cd -- "$SOURCE"
-printf 'Verified %s at commit %s. Preparing its Android runtime...\n' "$TAG" "$COMMIT"
-bash ./start.sh --android install
-printf '\nInstalled source: %s\n' "$SOURCE"
-printf 'Next, use your phone address from the Tailscale app:\n'
-printf '  cd %q\n' "$SOURCE"
-printf '  ./start.sh --android configure --tailnet-ip 100.X.Y.Z --hostname PHONE.TAILNET.ts.net\n'
-printf '  ./start.sh --android start\n'
-printf 'Read docs/android-release.md for certificate trust, first account and device checks.\n'
+# BEGIN_RELEASE_ACTION
+run_release_action() {
+  local mode=$1 source=$2
+  cd -- "$source"
+  if [[ "$mode" == stop ]]; then
+    printf 'Using verified release to stop the existing runtime; dependencies and database files are preserved.\n'
+    bash ./start.sh --android stop || return
+    printf 'Stopped. Rerun the downloaded installer without --stop-only to install this release.\n'
+    return
+  fi
+  [[ "$mode" == install ]] || { printf 'Invalid release action.\n' >&2; return 2; }
+  bash ./start.sh --android install || return
+  printf '\nInstalled source: %s\n' "$source"
+  printf 'Next, use your phone address from the Tailscale app:\n'
+  printf '  cd %q\n' "$source"
+  printf '  ./start.sh --android configure --tailnet-ip 100.X.Y.Z --hostname PHONE.TAILNET.ts.net\n'
+  printf '  ./start.sh --android start\n'
+  printf 'Read docs/android-release.md for certificate trust, first account and device checks.\n'
+}
+# END_RELEASE_ACTION
+printf 'Verified %s at commit %s.\n' "$TAG" "$COMMIT"
+run_release_action "$MODE" "$SOURCE"

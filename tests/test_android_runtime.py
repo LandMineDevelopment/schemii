@@ -10,6 +10,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -175,6 +176,28 @@ def test_major_version_mismatch_never_reinitializes(runtime, monkeypatch):
     assert (directory / "PG_VERSION").read_text() == "18\n"
 
 
+def test_existing_version_without_control_file_is_refused_without_writes(
+    runtime, monkeypatch
+):
+    directory = runtime.state / "postgres/metadata"
+    directory.mkdir()
+    (directory / "PG_VERSION").write_text("17\n")
+    configuration = directory / "postgresql.conf"
+    configuration.write_text("retained partial initialization")
+    before = {path: path.read_bytes() for path in directory.iterdir()}
+    monkeypatch.setattr(
+        runtime, "_checked", lambda *_args: pytest.fail("must not reinitialize")
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_spawn",
+        lambda *_args: pytest.fail("must not start incomplete cluster"),
+    )
+    with pytest.raises(android.RuntimeFailure, match="missing global/pg_control"):
+        runtime._cluster("metadata", 5433)
+    assert before == {path: path.read_bytes() for path in directory.iterdir()}
+
+
 def test_status_does_not_trust_a_reused_pid(runtime, monkeypatch):
     android.write_private(
         runtime.state / "run/status.json",
@@ -324,17 +347,16 @@ def test_pending_owned_postgres_lock_survives_interrupted_recovery_attempt(
     assert pidfile.exists()
 
 
-def test_failed_commands_have_bounded_private_diagnostics(runtime, monkeypatch):
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            [], 1, "x" * (2 * 1024 * 1024)
-        ),
-    )
+def test_failed_commands_have_bounded_private_diagnostics(runtime):
     for _ in range(6):
         with pytest.raises(android.RuntimeFailure, match="private setup log"):
-            runtime._checked(["synthetic-helper"])
+            runtime._checked(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.write('x'*(2*1024*1024)); sys.exit(1)",
+                ]
+            )
     logs = list((runtime.state / "logs").iterdir())
     assert len(logs) == 3
     assert sum(path.stat().st_size for path in logs) <= 3 * 1024 * 1024
@@ -422,3 +444,466 @@ def test_failed_start_cleans_owned_children_and_reports_safe_error(
     saved = (runtime.state / "run/status.json").read_text()
     assert "hypothetical secret" not in saved
     assert json.loads(saved)["state"] == "failed"
+
+
+def _control_process(runtime, body):
+    code = (
+        """
+import runpy,sys,signal,threading
+from pathlib import Path
+module=runpy.run_path(sys.argv[1])
+runtime=module['Runtime'](Path(sys.argv[2]))
+"""
+        + body
+    )
+    return subprocess.Popen(
+        [sys.executable, "-c", code, str(MODULE_PATH), str(runtime.state)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+
+def _finish_control(process):
+    if process.poll() is None:
+        process.stdin.write("exit\n")
+        process.stdin.flush()
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
+
+
+@pytest.mark.parametrize("lock_name", ["recovery_lock", "lock"])
+def test_configure_refuses_real_contended_flock_without_changing_state(
+    runtime, lock_name
+):
+    runtime.configure("100.64.2.3", "phone.example.ts.net")
+    before = (runtime.state / "config.json").read_bytes()
+    process = _control_process(
+        runtime,
+        f"""
+with runtime.{lock_name}():
+    runtime.startup_stage='metadata init'
+    runtime._record('starting')
+    print('held',flush=True)
+    sys.stdin.readline()
+""",
+    )
+    try:
+        assert process.stdout.readline().strip() == "held"
+        started = time.monotonic()
+        with pytest.raises(android.RuntimeFailure, match="busy.*metadata init"):
+            runtime.configure("100.64.2.4", "different.example.ts.net")
+        assert time.monotonic() - started < 1
+        assert (runtime.state / "config.json").read_bytes() == before
+    finally:
+        _finish_control(process)
+
+
+def test_stop_signals_owned_startup_before_its_real_lifecycle_lock(runtime):
+    runtime.configure("100.64.2.3", "phone.example.ts.net")
+    runtime._secrets()
+    key = (runtime.state / "secrets/metadata_encryption_key").read_bytes()
+    process = _control_process(
+        runtime,
+        """
+signal.signal(signal.SIGTERM,lambda *_:runtime.shutdown.set())
+with runtime.recovery_lock(),runtime.lock():
+    runtime.startup_stage='metadata init'
+    runtime._record('starting')
+    print('held',flush=True)
+    runtime.shutdown.wait(60)
+""",
+    )
+    try:
+        assert process.stdout.readline().strip() == "held"
+        started = time.monotonic()
+        assert runtime.stop(timeout=2)["state"] == "stopped"
+        assert time.monotonic() - started < 2
+        assert process.wait(timeout=2) == 0
+        assert (runtime.state / "secrets/metadata_encryption_key").read_bytes() == key
+    finally:
+        _finish_control(process)
+
+
+def test_legacy_unresponsive_startup_stop_is_bounded_and_preserves_receipt(runtime):
+    process = _control_process(
+        runtime,
+        """
+signal.signal(signal.SIGTERM,lambda *_:None)
+with runtime.recovery_lock(),runtime.lock():
+    runtime._record('starting')
+    print('held',flush=True)
+    sys.stdin.readline()
+""",
+    )
+    try:
+        assert process.stdout.readline().strip() == "held"
+        receipt = (runtime.state / "run/status.json").read_bytes()
+        started = time.monotonic()
+        with pytest.raises(android.RuntimeFailure, match="older preview blocked"):
+            runtime.stop(timeout=0.15)
+        assert time.monotonic() - started < 1
+        assert process.poll() is None
+        assert (runtime.state / "run/status.json").read_bytes() == receipt
+    finally:
+        _finish_control(process)
+
+
+def test_cold_snapshot_lock_fences_new_start_with_real_flock(runtime, monkeypatch):
+    runtime.configure("100.64.2.3", "phone.example.ts.net")
+    runtime._secrets()
+    retained = {
+        path: path.read_bytes() for path in (runtime.state / "secrets").iterdir()
+    }
+    process = _control_process(
+        runtime,
+        """
+with runtime.recovery_lock():
+    runtime.stop()
+    print('snapshot window',flush=True)
+    sys.stdin.readline()
+""",
+    )
+    try:
+        assert process.stdout.readline().strip() == "snapshot window"
+        monkeypatch.setattr(android.signal, "signal", lambda *_: None)
+        with pytest.raises(android.RuntimeFailure, match="recovery operation is busy"):
+            runtime.run()
+        assert retained == {path: path.read_bytes() for path in retained}
+    finally:
+        _finish_control(process)
+
+
+def test_restore_lock_fences_start_without_creating_fresh_state(tmp_path, monkeypatch):
+    fresh = android.Runtime(tmp_path / "fresh-state")
+    process = _control_process(
+        fresh,
+        """
+with runtime.recovery_lock():
+    print('restore window',flush=True)
+    sys.stdin.readline()
+""",
+    )
+    try:
+        assert process.stdout.readline().strip() == "restore window"
+        monkeypatch.setattr(android.signal, "signal", lambda *_: None)
+        with pytest.raises(android.RuntimeFailure, match="recovery operation is busy"):
+            fresh.run()
+        assert not fresh.state.exists()
+    finally:
+        _finish_control(process)
+
+
+def test_checked_helper_timeout_is_bounded_and_raw_output_stays_private(runtime):
+    started = time.monotonic()
+    with pytest.raises(android.RuntimeFailure, match="timed out") as caught:
+        runtime._checked(
+            [
+                sys.executable,
+                "-c",
+                "import time; print('private-sentinel',flush=True); time.sleep(60)",
+            ],
+            timeout=0.15,
+        )
+    assert time.monotonic() - started < 4
+    assert "private-sentinel" not in str(caught.value)
+    assert "private-sentinel" in (runtime.state / "logs/setup.log").read_text()
+    assert runtime.helper_identity is None
+
+
+def test_initial_helper_receipt_failure_cleans_live_helper_and_preserves_error(
+    runtime, monkeypatch
+):
+    runtime._supervising = True
+    started = []
+    original_popen = subprocess.Popen
+    original_error = OSError("synthetic initial receipt failure")
+
+    def spawn(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        started.append(process)
+        return process
+
+    def fail_receipt(*_args):
+        raise original_error
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(runtime, "_record", fail_receipt)
+    with pytest.raises(OSError) as caught:
+        runtime._checked([sys.executable, "-c", "import time; time.sleep(60)"])
+    assert caught.value is original_error
+    assert len(started) == 1 and started[0].poll() is not None
+    assert runtime.helper_identity is None
+
+
+def test_missing_helper_birth_identity_stops_only_owned_unreaped_direct_child(
+    runtime, monkeypatch
+):
+    started = []
+    original_popen = subprocess.Popen
+
+    def spawn(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(android, "process_identity", lambda _pid: None)
+    monkeypatch.setattr(
+        os,
+        "killpg",
+        lambda *_args: pytest.fail("No guessed group signal is authorized"),
+    )
+    with pytest.raises(
+        android.RuntimeFailure, match="Cannot establish startup helper ownership"
+    ):
+        runtime._checked([sys.executable, "-c", "import time; time.sleep(60)"])
+    assert len(started) == 1 and started[0].poll() is not None
+    assert runtime.helper_identity is None
+
+
+def test_polling_helper_receipt_failure_cleans_parent_and_captured_child(
+    runtime, monkeypatch
+):
+    runtime._supervising = True
+    original_record = runtime._record
+    original_error = OSError("synthetic polling receipt failure")
+    captured = []
+
+    def fail_after_child_capture(*args):
+        helper = runtime.helper_identity
+        if helper and helper.get("members"):
+            captured.extend([dict(helper), *helper["members"]])
+            raise original_error
+        original_record(*args)
+
+    monkeypatch.setattr(runtime, "_record", fail_after_child_capture)
+    code = "import subprocess,sys; child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); child.wait()"
+    with pytest.raises(OSError) as caught:
+        runtime._checked([sys.executable, "-c", code])
+    assert caught.value is original_error and len(captured) >= 2
+    assert not any(android.is_current(identity) for identity in captured)
+    assert runtime.helper_identity is None
+
+
+def test_helper_cleanup_failure_retains_identity_and_original_receipt_error(
+    runtime, monkeypatch
+):
+    runtime._supervising = True
+    original_stop = runtime._stop_helper
+    original_error = OSError("synthetic original receipt failure")
+
+    def fail_receipt(*_args):
+        raise original_error
+
+    def fail_cleanup(_identity):
+        raise android.RuntimeFailure("synthetic cleanup failure")
+
+    monkeypatch.setattr(runtime, "_record", fail_receipt)
+    monkeypatch.setattr(runtime, "_stop_helper", fail_cleanup)
+    try:
+        with pytest.raises(OSError) as caught:
+            runtime._checked([sys.executable, "-c", "import time; time.sleep(60)"])
+        assert caught.value is original_error
+        assert android.is_current(runtime.helper_identity)
+    finally:
+        original_stop(runtime.helper_identity)
+
+
+def test_stop_cancels_owned_startup_helper_under_real_locks(runtime):
+    process = _control_process(
+        runtime,
+        """
+signal.signal(signal.SIGTERM,lambda *_:runtime.shutdown.set())
+with runtime.recovery_lock(),runtime.lock():
+    runtime._supervising=True
+    runtime._stage('metadata init')
+    try:
+        runtime._checked([sys.executable,'-c','import time; time.sleep(60)'])
+    except module['RuntimeFailure']:
+        pass
+""",
+    )
+    try:
+        assert process.stdout.readline().strip() == "Android startup: metadata init"
+        deadline = time.monotonic() + 3
+        helper = None
+        while time.monotonic() < deadline:
+            helper = android.read_json(runtime.state / "run/status.json").get("helper")
+            if helper:
+                break
+            time.sleep(0.02)
+        assert helper and android.is_current(helper)
+        assert runtime.stop(timeout=3)["state"] == "stopped"
+        assert not android.is_current(helper)
+        assert process.wait(timeout=2) == 0
+    finally:
+        _finish_control(process)
+
+
+def test_stop_cleans_recorded_owned_helper_after_supervisor_dies(runtime):
+    process = _control_process(
+        runtime,
+        """
+with runtime.recovery_lock(),runtime.lock():
+    runtime._supervising=True
+    runtime._stage('metadata init')
+    runtime._checked([sys.executable,'-c','import time; time.sleep(60)'])
+""",
+    )
+    helper = None
+    try:
+        assert process.stdout.readline().strip() == "Android startup: metadata init"
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            helper = android.read_json(runtime.state / "run/status.json").get("helper")
+            if helper:
+                break
+            time.sleep(0.02)
+        assert helper and android.is_current(helper)
+        process.kill()
+        process.wait(timeout=3)
+        assert runtime.stop(timeout=2)["state"] == "stopped"
+        assert not android.is_current(helper)
+    finally:
+        _finish_control(process)
+        if helper and android.owns_group(helper):
+            os.killpg(helper["pid"], android.signal.SIGKILL)
+
+
+def test_database_bootstrap_limits_connection_and_statement_waits(runtime, monkeypatch):
+    import psycopg
+
+    runtime._secrets()
+    settings = {}
+
+    def connect(**kwargs):
+        settings.update(kwargs)
+        raise RuntimeError("no database contacted")
+
+    monkeypatch.setattr(psycopg, "connect", connect)
+    with pytest.raises(RuntimeError, match="no database contacted"):
+        runtime._bootstrap_database(
+            "metadata", 5433, "schemii_metadata_app", "metadata_app_password"
+        )
+    assert settings["connect_timeout"] == 5
+    assert "statement_timeout=30000" in settings["options"]
+    assert "lock_timeout=5000" in settings["options"]
+
+
+def _legacy_initdb_fixture(runtime, tmp_path, *, directory=None, check=True):
+    """Real supervisor -> fake PG17 initdb -> /bin/sh -> fake PG17 --check."""
+    binaries = tmp_path / "pg17"
+    binaries.mkdir()
+    for name in ("initdb", "postgres"):
+        (binaries / name).symlink_to(sys.executable)
+    directory = directory or runtime.state / "postgres/metadata"
+    directory.mkdir(parents=True)
+    # initdb can write PG_VERSION before completing cluster initialization.
+    (directory / "PG_VERSION").write_text("17\n")
+    probe_ready = tmp_path / "probe-ready"
+    cleanup = tmp_path / "initdb-cleanup"
+    probe_code = f"import os,time; from pathlib import Path; Path({str(probe_ready)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    import shlex
+
+    probe_command = (
+        shlex.join(
+            [
+                str(binaries / "postgres"),
+                "-c",
+                probe_code,
+                "--check" if check else "--server",
+            ]
+        )
+        + " & wait"
+    )
+    initdb_code = (
+        "import signal,subprocess; from pathlib import Path; "
+        "signal.signal(signal.SIGTERM,lambda *_:None); "
+        f"subprocess.run(['/bin/sh','-c',{probe_command!r}]); "
+        f"Path({str(cleanup)!r}).write_text('initdb-owned cleanup')"
+    )
+    body = f"""
+import subprocess
+signal.signal(signal.SIGTERM,lambda *_:runtime.shutdown.set())
+with runtime.recovery_lock(),runtime.lock():
+    runtime._record('starting')
+    child=subprocess.Popen([{str(binaries / "initdb")!r},'-c',{initdb_code!r},'-D',{str(directory)!r},'--username','schemii_bootstrap','--pwfile',str(runtime.state/'secrets/metadata_bootstrap_password')])
+    print('held',flush=True)
+    child.wait()
+"""
+    process = _control_process(runtime, body)
+    assert process.stdout.readline().strip() == "held"
+    deadline = time.monotonic() + 3
+    while not probe_ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert probe_ready.exists()
+    return process, binaries, probe_ready, cleanup
+
+
+def _finish_process_fixture(process):
+    if process.poll() is None:
+        # This process group contains only this test's synthetic Python fixtures.
+        os.killpg(process.pid, android.signal.SIGKILL)
+    process.wait(timeout=3)
+
+
+def test_stop_rescues_only_verified_unfinished_legacy_initdb_probe(
+    runtime, tmp_path, monkeypatch
+):
+    process, binaries, probe_ready, cleanup = _legacy_initdb_fixture(runtime, tmp_path)
+    monkeypatch.setattr(android, "PG_BIN", binaries)
+    probe = android.process_identity(int(probe_ready.read_text()))
+    try:
+        assert runtime.stop(timeout=3)["state"] == "stopped"
+        assert process.wait(timeout=2) == 0
+        assert not android.is_current(probe)
+        assert cleanup.read_text() == "initdb-owned cleanup"
+        assert (runtime.state / "postgres/metadata/PG_VERSION").read_text() == "17\n"
+    finally:
+        _finish_process_fixture(process)
+
+
+@pytest.mark.parametrize(
+    "mismatch", ["data-path", "control-file", "not-check", "birth", "parent"]
+)
+def test_legacy_initdb_rescue_refuses_unproven_or_initialized_processes(
+    runtime, tmp_path, monkeypatch, mismatch
+):
+    directory = tmp_path / "other-database" if mismatch == "data-path" else None
+    process, binaries, probe_ready, cleanup = _legacy_initdb_fixture(
+        runtime, tmp_path, directory=directory, check=mismatch != "not-check"
+    )
+    monkeypatch.setattr(android, "PG_BIN", binaries)
+    probe = android.process_identity(int(probe_ready.read_text()))
+    original_identity = android.process_identity
+    if mismatch == "control-file":
+        control = runtime.state / "postgres/metadata/global/pg_control"
+        control.parent.mkdir()
+        control.write_bytes(b"retained initialized control file")
+    if mismatch in ("birth", "parent"):
+        original = android.process_identity
+        probe_reads = 0
+
+        def identity(pid):
+            nonlocal probe_reads
+            value = original(pid)
+            if value and pid == probe["pid"]:
+                probe_reads += 1
+                if mismatch == "parent" or probe_reads > 1:
+                    value["start_ticks" if mismatch == "birth" else "ppid"] += 1
+            return value
+
+        monkeypatch.setattr(android, "process_identity", identity)
+    try:
+        receipt = android.read_json(runtime.state / "run/status.json")
+        assert not runtime._cancel_legacy_initdb_check(receipt, receipt["supervisor"])
+        assert process.poll() is None and not cleanup.exists()
+        assert original_identity(probe["pid"])
+    finally:
+        _finish_process_fixture(process)

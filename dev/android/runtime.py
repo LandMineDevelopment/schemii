@@ -24,6 +24,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -116,6 +117,7 @@ def process_identity(pid: int) -> dict | None:
             "start_ticks": int(fields[19]),
             "pgid": int(fields[2]),
             "boot_id": boot_id,
+            "ppid": int(fields[1]),
         }
     except (OSError, ValueError, IndexError):
         return None
@@ -168,6 +170,65 @@ def owns_group(identity: object) -> bool:
     return is_current(identity) or any(
         is_current(member) and member.get("pgid") == identity["pid"]
         for member in identity.get("members", [])
+    )
+
+
+def direct_children(identity: dict) -> list[dict]:
+    if not is_current(identity):
+        return []
+    pid = identity["pid"]
+    try:
+        values = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
+    except OSError:
+        return []
+    children = []
+    for value in values:
+        child = process_identity(int(value))
+        if child and child.get("ppid") == pid:
+            children.append(child)
+    return children
+
+
+def process_arguments(identity: dict) -> list[str]:
+    if not is_current(identity):
+        return []
+    try:
+        return [
+            value.decode()
+            for value in Path(f"/proc/{identity['pid']}/cmdline")
+            .read_bytes()
+            .split(b"\0")
+            if value
+        ]
+    except (OSError, UnicodeError):
+        return []
+
+
+def matching_executable(identity: dict, executable: Path) -> bool:
+    try:
+        return is_current(identity) and os.path.samefile(
+            f"/proc/{identity['pid']}/exe", executable
+        )
+    except OSError:
+        return False
+
+
+def verified_parent_chain(chain: tuple[dict, ...]) -> bool:
+    actuals: list[dict] = []
+    for item in chain:
+        actual = process_identity(item["pid"])
+        if actual is None:
+            return False
+        actuals.append(actual)
+    if any(
+        actual["start_ticks"] != captured.get("start_ticks")
+        or actual.get("boot_id") != captured.get("boot_id")
+        for captured, actual in zip(chain, actuals)
+    ):
+        return False
+    return all(
+        actual.get("ppid") == parent["pid"]
+        for parent, actual in zip(chain, actuals[1:])
     )
 
 
@@ -240,21 +301,33 @@ class Runtime:
         self.pumps: list[LogPump] = []
         self.shutdown = threading.Event()
         self.started_at = time.time()
+        self.startup_stage = "preflight"
+        self.helper_identity: dict | None = None
+        self._supervising = False
 
     @contextmanager
-    def _file_lock(self, name: str, blocking: bool = True):
+    def _file_lock(self, name: str, blocking: bool = False):
         if self.state.parent.is_symlink():
             raise RuntimeFailure("The Android state parent cannot be a symlink")
         self.state.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = self.state.parent / f".{self.state.name}.{name}.lock"
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            try:
+                fcntl.flock(
+                    descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+                )
+            except BlockingIOError as error:
+                stage = read_json(self.state / "run/status.json").get("startup_stage")
+                detail = (
+                    f" at {stage}"
+                    if isinstance(stage, str) and stage.isprintable()
+                    else ""
+                )
+                raise RuntimeFailure(
+                    f"Android {name} operation is busy{detail}; use --android status or --android stop"
+                ) from error
             yield
-        except BlockingIOError as error:
-            raise RuntimeFailure(
-                "Another Android runtime operation is active"
-            ) from error
         finally:
             os.close(descriptor)
 
@@ -332,24 +405,120 @@ class Runtime:
         *,
         input_text: str | None = None,
         env: dict | None = None,
+        timeout: float = 120,
     ) -> None:
-        result = subprocess.run(
-            command,
-            input=input_text,
-            text=True,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-        if result.returncode:
-            # Raw process output can contain credentials; keep it private.
-            append_log(
-                self.state / "logs/setup.log", result.stdout.encode()[-1024 * 1024 :]
-            )
+        if self._helper(command, input_text=input_text, env=env, timeout=timeout):
             raise RuntimeFailure(
                 f"{Path(command[0]).name} failed; inspect the private setup log"
             )
+
+    def _helper(
+        self,
+        command: list[str],
+        *,
+        input_text: str | None = None,
+        env: dict | None = None,
+        timeout: float = 120,
+    ) -> int:
+        """Run one owned startup helper with responsive cancellation and a deadline."""
+        if self.shutdown.is_set():
+            raise RuntimeFailure("Startup interrupted; retained data was not reset")
+        with tempfile.TemporaryFile() as input_stream:
+            if input_text is not None:
+                input_stream.write(input_text.encode())
+                input_stream.seek(0)
+            process = subprocess.Popen(
+                command,
+                stdin=input_stream,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            identity = None
+            pump = None
+            original_error: BaseException | None = None
+            try:
+                identity = process_identity(process.pid)
+                if identity is None or identity.get("pgid") != process.pid:
+                    if process.poll() is not None:
+                        pump = LogPump(process.stdout, self.state / "logs/setup.log")
+                        return process.returncode
+                    raise RuntimeFailure("Cannot establish startup helper ownership")
+                self.helper_identity = identity
+                # Receipt/log setup can fail, including disk errors. They must
+                # be inside the same cleanup boundary as helper execution.
+                pump = LogPump(process.stdout, self.state / "logs/setup.log")
+                if self._supervising:
+                    self._record("starting")
+                deadline = time.monotonic() + timeout
+                while process.poll() is None:
+                    members = captured_group_members(identity)
+                    if members != identity.get("members"):
+                        identity["members"] = members
+                        if self._supervising:
+                            self._record("starting")
+                    if self.shutdown.is_set():
+                        raise RuntimeFailure(
+                            "Startup interrupted; retained data was not reset"
+                        )
+                    if time.monotonic() >= deadline:
+                        raise RuntimeFailure(
+                            f"{Path(command[0]).name} timed out after {timeout:g}s at {self.startup_stage}; inspect the private setup log"
+                        )
+                    self.shutdown.wait(min(0.1, max(0, deadline - time.monotonic())))
+                return process.wait(timeout=1)
+            except BaseException as error:
+                original_error = error
+                try:
+                    self._cleanup_helper_process(process, identity)
+                except BaseException:
+                    # Preserve the original failure. A still-live helper keeps
+                    # its captured identity for a later safe stop attempt.
+                    pass
+                raise
+            finally:
+                if pump is not None:
+                    pump.thread.join(timeout=2)
+                if not owns_group(identity):
+                    self.helper_identity = None
+                if self._supervising:
+                    try:
+                        self._record("starting")
+                    except BaseException:
+                        # A cleanup receipt cannot replace the actual startup
+                        # error. If this is the first failure, clean up any
+                        # captured descendants before propagating it.
+                        if original_error is None:
+                            try:
+                                self._cleanup_helper_process(process, identity)
+                            except BaseException:
+                                pass
+                            if not owns_group(identity):
+                                self.helper_identity = None
+                            raise
+
+    def _cleanup_helper_process(
+        self, process: subprocess.Popen, identity: object
+    ) -> None:
+        if owns_group(identity):
+            self._stop_helper(identity)
+        elif process.poll() is None:
+            # Popen still owns this unreaped direct child, so its PID cannot
+            # have been reused. This fallback never guesses a group or signals
+            # descendants when /proc birth identity could not be established.
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        process.wait(timeout=3)
+
+    def _stage(self, name: str) -> None:
+        self.startup_stage = name
+        if self._supervising:
+            self._record("starting")
+            print(f"Android startup: {name}", flush=True)
 
     def _tls(self, config: dict) -> None:
         tls = self.state / "tls"
@@ -384,12 +553,11 @@ class Runtime:
                 ]
             )
         if leaf.exists() and leaf_key.exists():
-            current = subprocess.run(
+            current = self._helper(
                 ["openssl", "x509", "-in", str(leaf), "-noout", "-checkend", "604800"],
-                capture_output=True,
-                check=False,
+                timeout=10,
             )
-            if current.returncode == 0:
+            if current == 0:
                 return
         extensions = tls / "server.ext"
         write_private(
@@ -453,7 +621,12 @@ class Runtime:
                 raise RuntimeFailure(
                     "Retained databases require PostgreSQL 17; no automatic major upgrade is allowed"
                 )
+            if not (directory / "global/pg_control").is_file():
+                raise RuntimeFailure(
+                    f"Incomplete PostgreSQL initialization is missing global/pg_control; retained files were not changed: {directory}"
+                )
         else:
+            self._stage(f"{name} init")
             if directory.exists() and any(directory.iterdir()):
                 raise RuntimeFailure(
                     f"Incomplete PostgreSQL initialization retained for inspection: {directory}"
@@ -473,6 +646,7 @@ class Runtime:
                     "--locale=C.UTF-8",
                 ]
             )
+        self._stage(f"{name} start")
         socket_dir = self.state / "run" / f"{name}-socket"
         private_directory(socket_dir)
         configuration = (
@@ -489,17 +663,32 @@ class Runtime:
         self._spawn(name, [str(PG_BIN / "postgres"), "-D", str(directory)])
         self._wait(lambda: self._postgres_ready(port), name)
 
-    @staticmethod
-    def _postgres_ready(port: int) -> bool:
-        result = subprocess.run(
-            [str(PG_BIN / "pg_isready"), "-h", "127.0.0.1", "-p", str(port)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
+    def _postgres_ready(self, port: int) -> bool:
+        result = self._helper(
+            [str(PG_BIN / "pg_isready"), "-h", "127.0.0.1", "-p", str(port), "-t", "2"],
+            timeout=5,
         )
-        return result.returncode == 0
+        return result == 0
 
     def _bootstrap(self, name: str, port: int, role: str, password_name: str) -> None:
+        self._stage(f"{name} bootstrap")
+        self._checked(
+            [
+                str(PYTHON),
+                str(self.source / "dev/android/runtime.py"),
+                "internal-bootstrap",
+                name,
+            ],
+            env={**os.environ, "SCHEMII_ANDROID_STATE": str(self.state)},
+            timeout=180,
+        )
+        if name == "target":
+            self._stage("target fixtures")
+            self._seed_targets(role, port)
+
+    def _bootstrap_database(
+        self, name: str, port: int, role: str, password_name: str
+    ) -> None:
         import psycopg
         from psycopg import sql
 
@@ -510,6 +699,8 @@ class Runtime:
             password=self._secret(f"{name}_bootstrap_password"),
             dbname="postgres",
             autocommit=True,
+            connect_timeout=5,
+            options="-c statement_timeout=30000 -c lock_timeout=5000",
         ) as connection:
             if not connection.execute(
                 "SELECT 1 FROM pg_roles WHERE rolname=%s", (role,)
@@ -537,8 +728,6 @@ class Runtime:
                             sql.Identifier(database), sql.Identifier(role)
                         )
                     )
-        if name == "target":
-            self._seed_targets(role, port)
 
     def _seed_targets(self, role: str, port: int) -> None:
         marker = self.state / "postgres/target/.schemii-fixtures-v1"
@@ -555,6 +744,8 @@ class Runtime:
             "PGPORT": str(port),
             "PGUSER": role,
             "PGPASSFILE": str(password_file),
+            "PGCONNECT_TIMEOUT": "5",
+            "PGOPTIONS": "-c statement_timeout=30000 -c lock_timeout=5000",
         }
         try:
             for database, fixture in (
@@ -669,6 +860,8 @@ class Runtime:
                     "started_at": self.started_at,
                     "updated_at": time.time(),
                     "error": error,
+                    "startup_stage": self.startup_stage,
+                    "helper": self.helper_identity,
                     "device_acceptance": "pending",
                 },
                 indent=2,
@@ -747,13 +940,13 @@ class Runtime:
 
     def run(self) -> None:
         with self._file_lock("supervisor", blocking=False):
-            self._prepare()
             for sig in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(sig, lambda _signum, _frame: self.shutdown.set())
             # Preflight failure must leave the previous ownership receipt intact.
             # In particular, do not replace orphan references with this process.
             with self.recovery_lock(), self.lock():
                 self._assert_startable()
+                self._prepare()
                 previous = read_json(self.state / "run/status.json")
                 for name in ("metadata", "target"):
                     if (self.state / "postgres" / name / "postmaster.pid").exists():
@@ -792,9 +985,12 @@ class Runtime:
                                 raise RuntimeFailure(
                                     f"Cannot bind {address}:{port}; connect Tailscale and check existing listeners"
                                 ) from error
-                    self._record("starting")
+                    self._supervising = True
+                    self._stage("secrets")
                     self._secrets()
+                    self._stage("TLS certificates")
                     self._tls(config)
+                    self._stage("runtime configuration")
                     self._write_runtime_config(config)
                     self._cluster("metadata", 5433)
                     self._bootstrap(
@@ -806,6 +1002,7 @@ class Runtime:
                     self._cluster("target", 5434)
                     self._bootstrap("target", 5434, "schemii_target", "target_password")
                     environment = self._environment(config)
+                    self._stage("Pi sidecar start")
                     self._spawn(
                         "pi",
                         [str(NODE), str(self.source / "ai/prototype/server.js")],
@@ -817,6 +1014,7 @@ class Runtime:
                         ),
                         "pi",
                     )
+                    self._stage("application start and metadata migrations")
                     self._spawn(
                         "app",
                         [
@@ -836,6 +1034,7 @@ class Runtime:
                         lambda: self._request("http://127.0.0.1:8000/api/v1/readiness"),
                         "app",
                     )
+                    self._stage("HTTPS configuration")
                     self._checked(
                         [
                             "/usr/sbin/nginx",
@@ -844,6 +1043,7 @@ class Runtime:
                             str(self.state / "run/nginx.conf"),
                         ]
                     )
+                    self._stage("HTTPS ingress start")
                     self._spawn(
                         "ingress",
                         [
@@ -856,6 +1056,7 @@ class Runtime:
                         environment,
                     )
                     self._wait(lambda: self._ready(config), "HTTPS ingress")
+                    self.startup_stage = "ready"
                     self._record("ready")
                 while not self.shutdown.wait(0.5):
                     for name, process in self.children.items():
@@ -893,6 +1094,103 @@ class Runtime:
                     self._record("stopped")
 
     @staticmethod
+    def _stop_helper(identity: object) -> None:
+        if not isinstance(identity, dict) or not owns_group(identity):
+            return
+        try:
+            os.killpg(identity["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + 3
+        while owns_group(identity) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if owns_group(identity):
+            # This is a captured transient helper group, never a database
+            # service group. An operational PostgreSQL gets graceful SIGINT.
+            try:
+                os.killpg(identity["pid"], signal.SIGKILL)
+            except ProcessLookupError:
+                return
+
+    def _cancel_legacy_initdb_check(self, status: dict, supervisor: dict) -> bool:
+        """Cancel only the proven unfinished initdb probe in an older preview.
+
+        The original preview didn't record transient helpers. Reconstruct the
+        exact live parent chain, executable inodes and data path before sending
+        SIGTERM to the --check leaf. initdb retains ownership of its cleanup.
+        A cluster with pg_control or any managed service is never eligible.
+        """
+        if (
+            status.get("state") != "starting"
+            or status.get("ready") is True
+            or status.get("services")
+            or status.get("helper")
+        ):
+            return False
+        initdb_binary, postgres_binary = PG_BIN / "initdb", PG_BIN / "postgres"
+        for initdb in direct_children(supervisor):
+            arguments = process_arguments(initdb)
+            if (
+                not matching_executable(initdb, initdb_binary)
+                or not arguments
+                or arguments[0] != str(initdb_binary)
+            ):
+                continue
+            try:
+                directory = Path(arguments[arguments.index("-D") + 1])
+                username = arguments[arguments.index("--username") + 1]
+                password_file = Path(arguments[arguments.index("--pwfile") + 1])
+            except (ValueError, IndexError):
+                continue
+            names = {
+                self.state / "postgres" / name: name for name in ("metadata", "target")
+            }
+            name = names.get(directory)
+            if (
+                not name
+                or username != "schemii_bootstrap"
+                or password_file
+                != self.state / "secrets" / f"{name}_bootstrap_password"
+            ):
+                continue
+            if directory.is_symlink() or (directory / "global/pg_control").exists():
+                continue
+            for shell in direct_children(initdb):
+                if not matching_executable(shell, Path("/bin/sh")):
+                    continue
+                for probe in direct_children(shell):
+                    probe_arguments = process_arguments(probe)
+                    if (
+                        not matching_executable(probe, postgres_binary)
+                        or not probe_arguments
+                        or probe_arguments[0] != str(postgres_binary)
+                        or "--check" not in probe_arguments
+                    ):
+                        continue
+                    chain = (supervisor, initdb, shell, probe)
+                    if not verified_parent_chain(chain):
+                        continue
+                    if (directory / "global/pg_control").exists():
+                        continue
+                    try:
+                        # initdb catches SIGTERM and owns cleanup once its probe
+                        # returns. Mark it interrupted first, so it won't start
+                        # another memory probe after the check leaf exits.
+                        os.kill(initdb["pid"], signal.SIGTERM)
+                        if not verified_parent_chain(chain):
+                            continue
+                        os.kill(probe["pid"], signal.SIGTERM)
+                    except ProcessLookupError:
+                        continue
+                    print(
+                        "Requested graceful cancellation of verified unfinished initdb and its --check probe; initdb owns cleanup",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    return True
+        return False
+
+    @staticmethod
     def _stop_children(identities: dict) -> None:
         for name in reversed(SERVICES):
             identity = identities.get(name)
@@ -908,35 +1206,62 @@ class Runtime:
             while owns_group(identity) and time.monotonic() < deadline:
                 time.sleep(0.1)
             if owns_group(identity):
-                try:
-                    os.killpg(identity["pid"], signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                raise RuntimeFailure(
+                    f"{name} did not stop gracefully; its owned processes and retained data were preserved"
+                )
 
-    def stop(self) -> dict:
+    def stop(self, timeout: float = 90) -> dict:
+        # A starting supervisor owns lifecycle/recovery while initializing.
+        # Signal that validated owner before asking for either lock. An older
+        # preview may remain inside an unbounded helper; never hide this behind
+        # a blocked flock or kill an unidentified descendant to force progress.
+        status = read_json(self.state / "run/status.json")
+        supervisor = status.get("supervisor")
+        if isinstance(supervisor, dict) and is_current(supervisor):
+            if supervisor["pid"] == os.getpid():
+                raise RuntimeFailure(
+                    "A supervisor cannot stop itself through the external stop command"
+                )
+            print(
+                f"Requesting graceful Android shutdown (up to {timeout:g}s); retained data will be preserved",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                os.kill(supervisor["pid"], signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            self._cancel_legacy_initdb_check(status, supervisor)
+            deadline = time.monotonic() + timeout
+            while is_current(supervisor) and time.monotonic() < deadline:
+                time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+            if is_current(supervisor):
+                raise RuntimeFailure(
+                    "Supervisor did not stop within the graceful deadline; it may be an older preview blocked in a startup helper. Retained state and ownership were preserved; inspect status and the private launcher/setup logs"
+                )
         with self.lock():
             status = read_json(self.state / "run/status.json")
-            supervisor = status.get("supervisor")
-            if isinstance(supervisor, dict) and is_current(supervisor):
-                if supervisor["pid"] == os.getpid():
-                    raise RuntimeFailure(
-                        "A supervisor cannot stop itself through the external stop command"
-                    )
-                os.kill(supervisor["pid"], signal.SIGTERM)
-                deadline = time.monotonic() + 70
-                while is_current(supervisor) and time.monotonic() < deadline:
-                    time.sleep(0.1)
-                if is_current(supervisor):
-                    raise RuntimeFailure(
-                        "Supervisor did not stop; inspect private logs before recovery"
-                    )
+            if is_current(status.get("supervisor")):
+                raise RuntimeFailure(
+                    "Another supervisor started during stop; its state was preserved"
+                )
+            self._stop_helper(status.get("helper"))
             self._stop_children(status.get("services", {}))
             self.assert_stopped()
+            if status:
+                status.update(state="stopped", ready=False, stopped_at=time.time())
+                write_private(
+                    self.state / "run/status.json", json.dumps(status, indent=2) + "\n"
+                )
             return {"state": "stopped", "ready": False}
 
     def assert_stopped(self) -> None:
         status = read_json(self.state / "run/status.json")
-        identities = [status.get("supervisor"), *status.get("services", {}).values()]
+        identities = [
+            status.get("supervisor"),
+            status.get("helper"),
+            *status.get("services", {}).values(),
+        ]
         if any(is_current(identity) or owns_group(identity) for identity in identities):
             raise RuntimeFailure(
                 "The Android stack is active; stop it before changing deployment state"
@@ -950,7 +1275,11 @@ class Runtime:
     def _assert_startable(self) -> None:
         """Admit PostgreSQL's own stale-lock/WAL recovery only with ownership proof."""
         status = read_json(self.state / "run/status.json")
-        identities = [status.get("supervisor"), *status.get("services", {}).values()]
+        identities = [
+            status.get("supervisor"),
+            status.get("helper"),
+            *status.get("services", {}).values(),
+        ]
         if any(is_current(identity) or owns_group(identity) for identity in identities):
             raise RuntimeFailure(
                 "The Android stack or captured orphan services are active; stop it first"
@@ -1101,6 +1430,10 @@ def main(argv: list[str] | None = None) -> int:
     logs.add_argument("service", nargs="?", default="app", choices=(*SERVICES, "setup"))
     for command in ("backup", "restore", "verify-backup", "export-ca", "credentials"):
         subcommands.add_parser(command).add_argument("path", type=Path)
+    internal_bootstrap = subcommands.add_parser(
+        "internal-bootstrap", help=argparse.SUPPRESS
+    )
+    internal_bootstrap.add_argument("cluster", choices=("metadata", "target"))
     args = parser.parse_args(argv)
     runtime = Runtime()
     try:
@@ -1112,8 +1445,19 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "stop":
             result = runtime.stop()
         elif args.command == "assert-stopped":
-            runtime.assert_stopped()
+            with runtime.recovery_lock(), runtime.lock():
+                runtime.assert_stopped()
             result = {"state": "stopped", "ready": False}
+        elif args.command == "internal-bootstrap":
+            if args.cluster == "metadata":
+                runtime._bootstrap_database(
+                    "metadata", 5433, "schemii_metadata_app", "metadata_app_password"
+                )
+            else:
+                runtime._bootstrap_database(
+                    "target", 5434, "schemii_target", "target_password"
+                )
+            result = {"bootstrap": args.cluster, "completed": True}
         elif args.command == "status":
             result = runtime.status()
             print(json.dumps(result, indent=2))
