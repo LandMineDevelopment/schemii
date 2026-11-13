@@ -36,7 +36,7 @@ budget; larger results still stop at the applicable row or byte limit.
    pkg install curl
    curl --fail --location --proto '=https' --tlsv1.2 \
      --output "$HOME/install-android.sh" \
-     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.7/install-android.sh
+     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.8/install-android.sh
    ```
 
    Inspect the downloaded file, then run it:
@@ -48,7 +48,7 @@ budget; larger results still stop at the applicable row or byte limit.
 The standalone installer embeds the exact release archive checksum and source
 commit. It verifies the download, complete file inventory and safe archive paths
 before extraction. It installs a new version directory under
-`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.7`, then delegates runtime
+`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.8`, then delegates runtime
 installation to that source's `./start.sh --android install`. After dependency
 installation succeeds, it installs the global `schemii` command and points the
 visible `~/schemii` folder to that version. Existing changed source is preserved
@@ -101,6 +101,7 @@ stack down. Restart stops it fully before starting again, and does not start a
 replacement if shutdown fails. Status reports the same complete stack without
 changing it. The global command delegates lifecycle work to the active release's
 `start.sh --android`; it does not create a second server or require shell aliases.
+When trusted tailnet HTTPS is enabled, these commands also own its proxy process.
 
 Other launcher actions are available the same way, for example `schemii logs pi`,
 `schemii doctor`, `schemii credentials DEST`, and `schemii backup DIRECTORY`.
@@ -138,14 +139,76 @@ AI sidecar, metadata database on `127.0.0.1:5433`, and target database on
 access rules. The service deliberately does not listen on the phone's Wi-Fi
 address. Startup before the VPN exists fails visibly instead of widening the bind.
 
-## Trust HTTPS and create the first account
+## Automatic trusted tailnet HTTPS
+
+Preview 8 adds an optional on-phone `tsnet` proxy, using the official pinned
+Tailscale library. It enrolls a **separate node** named `schemii-phone`; it does
+not extract or reuse the Android Tailscale app's credentials. Keep that app
+connected for the existing phone endpoint and SSH. The desktop is not a proxy.
+
+After installation and the usual phone address configuration above, run:
+
+```bash
+schemii stop
+schemii tailnet-enable
+schemii start
+schemii tailnet-login
+```
+
+The first start returns an actionable `login_pending` state (exit code 2) when
+owner login or node approval is needed. The supervised proxy keeps waiting;
+**the databases and remaining services start after approval**. Open the private
+URL printed by `tailnet-login` in your browser and sign in normally. Do not paste
+it into chat or a public issue. Tailnet device approval or Tailnet Lock signing
+may also be required. No auth key is needed in a command, environment variable
+or repository file. Run `tailnet-login` again if enrollment is still pending.
+
+Enable MagicDNS and HTTPS certificate provisioning in your tailnet settings.
+Certificate issuance publishes the service's DNS name in Certificate Transparency;
+network access stays private to the tailnet. Initial enrollment, issuance and
+renewal need internet access. The proxy registers only HTTPS port 443, never
+Funnel or a general localhost forwarder. It does not expose PostgreSQL, Pi or
+the application's internal listener on its additional node identity.
+
+After approval, `schemii status` reports the actual `tailnet.origin`, such as
+`https://schemii-phone.YOUR-TAILNET.ts.net`, with no `:8001`. Use that origin for
+the app and `/api-map`; supported browsers trust its public certificate without
+installing the private CA. Readiness verifies the real HTTPS response and public
+certificate chain at that origin, in addition to the legacy endpoint. Generic
+status never prints the enrollment URL. `schemii logs tailnet` supplies private
+diagnostics for connection, tailnet HTTPS settings or certificate failures.
+The guest's readiness probe connects directly to an authenticated live proxy's
+own tailnet IP while keeping the actual DNS name for HTTP Host, TLS SNI and
+system-root hostname verification. It does not depend on Debian resolving private
+MagicDNS names, change guest DNS settings or fall back to insecure TLS. Browsers
+still use the normal trusted DNS URL through their Tailscale connection.
+
+The proxy verifies nginx's loopback HTTPS certificate against the retained
+private CA; it never skips upstream verification. The existing port-8001 origin,
+account, databases and CA remain available. To return to that endpoint:
+
+```bash
+schemii stop
+schemii tailnet-disable
+schemii start
+```
+
+Disabling preserves node identity and certificate state. Re-enabling with the
+same hostname reuses it. Do not edit installed source or launch the proxy outside
+the supported lifecycle. Android background, battery and VPN recovery limits
+still require device validation.
+
+## Legacy certificate trust and the first account
 
 Schemii uses Secure cookies and HTTPS origin checks, including when traffic travels
 through encrypted Tailscale. The Android app does not provide the desktop
-`tailscale serve`/`tailscale cert` setup. This release creates its own private CA
+`tailscale serve`/`tailscale cert` setup. The legacy endpoint uses its own private CA
 and a server certificate for localhost, the configured phone name and its tailnet
 address. Install **only the public CA certificate** in every intended browser's
 trust store.
+This client CA installation is unnecessary when using the optional trusted
+tailnet origin above. The local nginx CA remains necessary for the proxy's
+verified upstream connection.
 
 From `~/schemii`, export the public CA into the mounted source directory:
 
@@ -255,7 +318,11 @@ schemii start
 
 Choose a new destination each time. The snapshot includes metadata, all local
 target database files, required roles, original encryption keys and TLS material
-from one stopped-state consistency window. It is a sensitive, unencrypted physical
+from one stopped-state consistency window. When present, it also preserves the
+optional proxy's configuration, Tailscale node identity and ACME/certificate keys;
+logs and transient status are excluded. Never run the original and a restored
+copy of the same tailnet identity concurrently. Treat this backup as access to
+the node as well as the databases. It is a sensitive, unencrypted physical
 PostgreSQL 17 backup for the matching Debian 13 ARM64 runtime, not a portable SQL
 export. Move it to encrypted off-phone storage with its private permissions intact.
 Never restore a snapshot from an untrusted source. Integrity verification checks

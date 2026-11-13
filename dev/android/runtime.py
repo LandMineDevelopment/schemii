@@ -13,6 +13,7 @@ import base64
 from contextlib import contextmanager
 import fcntl
 import getpass
+import http.client
 import importlib
 import ipaddress
 import json
@@ -38,7 +39,8 @@ SOURCE = Path(__file__).resolve().parents[2]
 PYTHON = Path("/opt/schemii-venv/bin/python")
 NODE = Path("/opt/node/bin/node")
 PG_BIN = Path("/usr/lib/postgresql/17/bin")
-SERVICES = ("metadata", "target", "pi", "app", "ingress")
+BASE_SERVICES = ("metadata", "target", "pi", "app", "ingress")
+SERVICES = (*BASE_SERVICES, "tailnet")
 SECRET_NAMES = (
     "metadata_bootstrap_password",
     "target_bootstrap_password",
@@ -306,6 +308,7 @@ class Runtime:
         self.startup_stage = "preflight"
         self.helper_identity: dict | None = None
         self._supervising = False
+        self.tailnet_origin: str | None = None
 
     @contextmanager
     def _file_lock(self, name: str, blocking: bool = False):
@@ -823,7 +826,180 @@ class Runtime:
                 "SCHEMER_DASHBOARD_PREVIEW_BYTES": "16777216",
             }
         )
+        if self.tailnet_origin:
+            env["SCHEMII_TRUSTED_ORIGINS"] += "," + self.tailnet_origin
         return env
+
+    def tailnet_config(self) -> dict:
+        path = self.state / "tailnet/config.json"
+        if (self.state / "tailnet").is_symlink() or path.is_symlink():
+            raise RuntimeFailure(
+                "Tailnet configuration must stay in private owned storage"
+            )
+        value = read_json(path)
+        if not value:
+            if path.exists():
+                raise RuntimeFailure("Invalid retained tailnet configuration")
+            return {}
+        hostname = value.get("hostname", "")
+        if not isinstance(hostname, str) or not re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", hostname
+        ):
+            raise RuntimeFailure(
+                "Invalid retained tailnet hostname; inspect private configuration"
+            )
+        return {"hostname": hostname}
+
+    def configure_tailnet(self, hostname: str | None) -> dict:
+        with self.recovery_lock(), self.lock():
+            self.assert_stopped()
+            path = self.state / "tailnet/config.json"
+            # Validate the owned path before either unlinking or replacing it.
+            old = self.tailnet_config()
+            if hostname is None:
+                path.unlink(missing_ok=True)
+                return {"tailnet_enabled": False, "identity_preserved": True}
+            hostname = hostname.lower()
+            if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", hostname):
+                raise RuntimeFailure("Use a DNS label for the tailnet hostname")
+            binary = self.source / "dev/android/bin/schemii-tailnet-proxy"
+            if not binary.is_file() or binary.is_symlink():
+                raise RuntimeFailure(
+                    "Install a release containing the verified tailnet helper first"
+                )
+            private_directory(path.parent)
+            if old and old["hostname"] != hostname:
+                raise RuntimeFailure(
+                    "Retained tailnet hostname differs; preserve its existing node identity"
+                )
+            write_private(path, json.dumps({"hostname": hostname}) + "\n")
+            return {
+                "tailnet_enabled": True,
+                "hostname": hostname,
+                "next": "schemii start, then schemii tailnet-login if requested",
+            }
+
+    def _tailnet_status(self, *, include_login: bool = False) -> dict:
+        value = read_json(self.state / "run/tailnet.json")
+        hostname = value.get("hostname")
+        origin = value.get("origin")
+        if hostname or origin:
+            if (
+                not isinstance(hostname, str)
+                or len(hostname) > 253
+                or not re.fullmatch(
+                    r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.ts\.net", hostname
+                )
+                or ".." in hostname
+                or origin != "https://" + hostname
+            ):
+                raise RuntimeFailure("Tailnet helper returned an invalid HTTPS origin")
+        result = {
+            key: value.get(key)
+            for key in (
+                "backend_state",
+                "online",
+                "ready",
+                "hostname",
+                "origin",
+                "pid",
+                "tailnet_ips",
+            )
+        }
+        result["login_required"] = (
+            bool(value.get("login_url")) and value.get("online") is not True
+        )
+        result["error"] = (
+            "Tailnet helper needs attention; inspect schemii logs tailnet and tailnet HTTPS/MagicDNS settings"
+            if value.get("error")
+            else None
+        )
+        if include_login and result["login_required"]:
+            url = value["login_url"]
+            if (
+                not isinstance(url, str)
+                or not url.startswith("https://login.tailscale.com/")
+                or any(c.isspace() for c in url)
+            ):
+                raise RuntimeFailure("Tailnet helper returned an invalid login URL")
+            result["login_url"] = url
+        return result
+
+    def tailnet_login(self) -> dict:
+        if not self.tailnet_config():
+            raise RuntimeFailure("Run schemii tailnet-enable, then schemii start first")
+        status = self.status()
+        if not status.get("supervisor_alive") or not status.get("services", {}).get(
+            "tailnet", {}
+        ).get("running"):
+            raise RuntimeFailure("Run schemii start first to begin tailnet enrollment")
+        return self._tailnet_status(include_login=True)
+
+    def _start_tailnet(self) -> None:
+        config = self.tailnet_config()
+        if not config:
+            return
+        self._stage("tailnet enrollment")
+        private_directory(self.state / "tailnet")
+        (self.state / "run/tailnet.json").unlink(missing_ok=True)
+        self._spawn(
+            "tailnet",
+            [
+                str(self.source / "dev/android/bin/schemii-tailnet-proxy"),
+                "--state-dir",
+                str(self.state / "tailnet/node"),
+                "--status-file",
+                str(self.state / "run/tailnet.json"),
+                "--hostname",
+                config["hostname"],
+                "--upstream",
+                "https://127.0.0.1:8001",
+                "--upstream-ca",
+                str(self.state / "tls/ca.crt"),
+            ],
+            {
+                key: value
+                for key, value in os.environ.items()
+                if key
+                not in {
+                    "TS_AUTHKEY",
+                    "TS_AUTH_KEY",
+                    "TS_CLIENT_SECRET",
+                    "TS_CLIENT_ID",
+                    "TS_ID_TOKEN",
+                    "TS_AUDIENCE",
+                    "TSNET_FORCE_LOGIN",
+                    "TS_CONTROL_URL",
+                    "TS_LOGIN_SERVER",
+                    "TSNET_LOGIN_SERVER",
+                }
+            },
+        )
+        while not self.shutdown.is_set():
+            if self.children["tailnet"].poll() is not None:
+                raise RuntimeFailure(
+                    "Tailnet helper exited; inspect schemii logs tailnet"
+                )
+            status = self._tailnet_status()
+            if status.get("error"):
+                raise RuntimeFailure(status["error"])
+            if (
+                status.get("online") is True
+                and status.get("origin")
+                and status.get("ready") is True
+            ):
+                self.tailnet_origin = status["origin"]
+                return
+            self._record(
+                "login_pending"
+                if status.get("login_required")
+                or status.get("backend_state") == "NeedsMachineAuth"
+                else "starting"
+            )
+            self.shutdown.wait(0.3)
+        raise RuntimeFailure(
+            "Tailnet enrollment interrupted; identity and data preserved"
+        )
 
     def _write_runtime_config(self, config: dict) -> None:
         app_config = (self.source / "dev/schemii.toml").read_text()
@@ -932,13 +1108,81 @@ class Runtime:
             return response.status == 200
 
     def _ready(self, config: dict) -> bool:
-        return (
+        legacy_ready = (
             self._request("https://localhost:8001/api/v1/readiness", tls=True)
             and self._request(
                 f"https://{config['tailnet_ip']}:8001/api/v1/readiness", tls=True
             )
             and self._request("http://127.0.0.1:4097/health", token=True)
         )
+        if not legacy_ready or not self.tailnet_config():
+            return legacy_ready
+        tailnet = self._tailnet_status()
+        return bool(
+            tailnet.get("online") is True
+            and tailnet.get("ready") is True
+            and tailnet.get("origin")
+        ) and self._tailnet_request(tailnet)
+
+    def _tailnet_request(self, status: dict) -> bool:
+        """Dial this live node directly; retain DNS Host/SNI and system-root TLS."""
+        identity = self.identities.get("tailnet") or read_json(
+            self.state / "run/status.json"
+        ).get("services", {}).get("tailnet")
+        if (
+            status.get("online") is not True
+            or status.get("ready") is not True
+            or not identity
+            or not is_current(identity)
+            or status.get("pid") != identity.get("pid")
+        ):
+            raise RuntimeFailure(
+                "Cannot verify the authenticated live tailnet helper for HTTPS readiness"
+            )
+        values = status.get("tailnet_ips")
+        if not isinstance(values, list) or not values:
+            raise RuntimeFailure(
+                "Authenticated tailnet helper has not reported its own addresses"
+            )
+        addresses = []
+        try:
+            for value in values:
+                if not isinstance(value, str) or "%" in value:
+                    raise ValueError("address")
+                address = ipaddress.ip_address(value)
+                network = ipaddress.ip_network(
+                    "100.64.0.0/10" if address.version == 4 else "fd7a:115c:a1e0::/48"
+                )
+                if address not in network:
+                    raise ValueError("non-tailnet address")
+                addresses.append(address)
+        except ValueError:
+            raise RuntimeFailure(
+                "Tailnet helper reported an invalid private node address"
+            ) from None
+        dial_address = str(sorted(addresses, key=lambda item: item.version)[0])
+        hostname = status["hostname"]
+        context = ssl.create_default_context()
+
+        class NodeHTTPSConnection(http.client.HTTPSConnection):
+            def connect(connection):
+                raw = socket.create_connection((dial_address, 443), timeout=2)
+                try:
+                    connection.sock = context.wrap_socket(raw, server_hostname=hostname)
+                except BaseException:
+                    raw.close()
+                    raise
+
+        connection = NodeHTTPSConnection(hostname, timeout=2, context=context)
+        try:
+            connection.request("GET", "/api/v1/readiness")
+            return connection.getresponse().status == 200
+        except http.client.HTTPException:
+            raise RuntimeFailure(
+                "Tailnet HTTPS readiness returned an invalid response"
+            ) from None
+        finally:
+            connection.close()
 
     def run(self) -> None:
         with self._file_lock("supervisor", blocking=False):
@@ -992,6 +1236,10 @@ class Runtime:
                     self._secrets()
                     self._stage("TLS certificates")
                     self._tls(config)
+                # Enrollment can await owner approval indefinitely. Do not hold
+                # the database recovery/lifecycle locks while waiting for it.
+                self._start_tailnet()
+                with self.recovery_lock(), self.lock():
                     self._stage("runtime configuration")
                     self._write_runtime_config(config)
                     self._cluster("metadata", 5433)
@@ -1328,10 +1576,20 @@ class Runtime:
             name: {**identity, "running": is_current(identity)}
             for name, identity in value.get("services", {}).items()
         }
+        expected = set(SERVICES if self.tailnet_config() else BASE_SERVICES)
+        tailnet = {"enabled": False}
+        if self.tailnet_config():
+            tailnet = {
+                **self._tailnet_status(),
+                "enabled": True,
+                "running": bool(services.get("tailnet", {}).get("running")),
+            }
+            if not tailnet["running"]:
+                tailnet.update(online=False, ready=False, login_required=False)
         ready = (
             live
             and value.get("ready") is True
-            and len(services) == len(SERVICES)
+            and set(services) == expected
             and all(item["running"] for item in services.values())
         )
         if ready:
@@ -1344,6 +1602,7 @@ class Runtime:
             "ready": ready,
             "services": services,
             "supervisor_alive": live,
+            "tailnet": tailnet,
             "state": value.get("state", "stopped")
             if live
             else (
@@ -1542,6 +1801,11 @@ def main(argv: list[str] | None = None) -> int:
     configure = subcommands.add_parser("configure")
     configure.add_argument("--tailnet-ip", required=True)
     configure.add_argument("--hostname", required=True)
+    subcommands.add_parser("tailnet-enable").add_argument(
+        "--hostname", default="schemii-phone"
+    )
+    subcommands.add_parser("tailnet-disable")
+    subcommands.add_parser("tailnet-login")
     subcommands.add_parser("reset-password").add_argument("username")
     for command in ("run", "start", "stop", "status", "doctor", "assert-stopped"):
         subcommands.add_parser(command)
@@ -1558,6 +1822,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "configure":
             result = runtime.configure(args.tailnet_ip, args.hostname)
+        elif args.command == "tailnet-enable":
+            result = runtime.configure_tailnet(args.hostname)
+        elif args.command == "tailnet-disable":
+            result = runtime.configure_tailnet(None)
+        elif args.command == "tailnet-login":
+            result = runtime.tailnet_login()
         elif args.command in ("run", "start"):
             runtime.run()
             return 0

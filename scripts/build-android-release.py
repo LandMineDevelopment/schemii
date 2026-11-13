@@ -12,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -135,14 +136,14 @@ def source_files(root: Path, ref: str) -> tuple[str, dict[str, tuple[bytes, int]
         path = raw_path.decode("utf-8")
         if not selected(path):
             continue
-        mode, kind, blob = header.decode().split()
-        if kind != "blob" or mode not in ("100644", "100755"):
+        git_mode, kind, blob = header.decode().split()
+        if kind != "blob" or git_mode not in ("100644", "100755"):
             raise BuildError(f"Release source must be a regular file: {path}")
         data = git(root, "cat-file", "blob", blob)
         total += len(data)
         if len(data) > MAX_FILE_BYTES or total > MAX_ARCHIVE_BYTES:
             raise BuildError("Release source exceeds the archive size budget")
-        files[path] = (data, 0o755 if mode == "100755" else 0o644)
+        files[path] = (data, 0o755 if git_mode == "100755" else 0o644)
     missing = REQUIRED - files.keys()
     if missing:
         raise BuildError(
@@ -162,7 +163,7 @@ def source_files(root: Path, ref: str) -> tuple[str, dict[str, tuple[bytes, int]
                 raise BuildError(f"Commit Android source before building: {path}")
             if bool(local.stat().st_mode & stat.S_IXUSR) != bool(mode & stat.S_IXUSR):
                 raise BuildError(f"Working source executable mode differs: {path}")
-        changed = set()
+        changed: set[str] = set()
         for args in (
             ("diff", "--name-only", "-z"),
             ("diff", "--cached", "--name-only", "-z"),
@@ -204,15 +205,139 @@ def metadata(tag: str, commit: str, files: dict[str, tuple[bytes, int]]) -> dict
     }
 
 
-def build(root: Path, tag: str, output: Path, ref: str = "HEAD") -> dict[str, str]:
+def compile_proxy(files: dict[str, tuple[bytes, int]], go: Path | None) -> None:
+    """Compile only the committed module; never accept an unbound external binary."""
+    prefix = "dev/android/tailnet-proxy/"
+    source = {
+        path: data for path, (data, _mode) in files.items() if path.startswith(prefix)
+    }
+    if any(path.startswith("dev/android/bin/") for path in files):
+        raise BuildError("Generated Android binaries must not be tracked in Git")
+    if not source:
+        return  # Older committed previews retain their legacy runtime.
+    if go is None:
+        raise BuildError(
+            "Tailnet helper requires --go PATH to the verified Go 1.27.4 SDK"
+        )
+    go = go.resolve(strict=True)
+    version = subprocess.check_output([str(go), "version"], text=True).strip()
+    if not version.startswith("go version go1.27.4 "):
+        raise BuildError("Tailnet helper must use the pinned Go 1.27.4 SDK")
+    source_hashes = {
+        path: hashlib.sha256(data).hexdigest() for path, data in sorted(source.items())
+    }
+    with tempfile.TemporaryDirectory(prefix="schemii-tailnet-build-") as temporary:
+        stage = Path(temporary)
+        module = stage / "source"
+        module.mkdir()
+        for path, data in source.items():
+            target = module / path.removeprefix(prefix)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        binary = stage / "schemii-tailnet-proxy"
+        env = {
+            **os.environ,
+            "GOOS": "linux",
+            "GOARCH": "arm64",
+            "CGO_ENABLED": "0",
+            "GOTOOLCHAIN": "local",
+            "GOROOT": str(go.parent.parent),
+            "GOFLAGS": "",
+            "GOWORK": "off",
+            "GOENV": "off",
+            "GOEXPERIMENT": "",
+            "GOSUMDB": "sum.golang.org",
+            "GOPROXY": "https://proxy.golang.org,direct",
+            "GOPRIVATE": "",
+            "GONOSUMDB": "",
+            "GOINSECURE": "",
+        }
+        subprocess.run(
+            [
+                str(go),
+                "build",
+                "-mod=readonly",
+                "-trimpath",
+                "-ldflags=-s -w -buildid=",
+                "-o",
+                str(binary),
+                ".",
+            ],
+            cwd=module,
+            env=env,
+            check=True,
+        )
+        data = binary.read_bytes()
+        if (
+            len(data) < 64
+            or data[:6] != b"\x7fELF\x02\x01"
+            or struct.unpack_from("<H", data, 16)[0] not in (2, 3)
+            or struct.unpack_from("<H", data, 18)[0] != 183
+        ):
+            raise BuildError("Tailnet helper is not a Linux ARM64 ELF executable")
+        phoff, phsize, phcount = (
+            struct.unpack_from("<Q", data, 32)[0],
+            struct.unpack_from("<H", data, 54)[0],
+            struct.unpack_from("<H", data, 56)[0],
+        )
+        if phcount and (phsize < 56 or phoff + phsize * phcount > len(data)):
+            raise BuildError("Tailnet helper has invalid ELF program headers")
+        if any(
+            struct.unpack_from("<I", data, phoff + i * phsize)[0] == 3
+            for i in range(phcount)
+        ):
+            raise BuildError("Tailnet helper must be static (no ELF interpreter)")
+        info = subprocess.check_output(
+            [str(go), "version", "-m", str(binary)], text=True
+        )
+        if (
+            not re.search(r"\bdep\s+tailscale\.com\s+v1\.104\.7\s", info)
+            or any(
+                marker not in info
+                for marker in ("GOOS=linux", "GOARCH=arm64", "CGO_ENABLED=0")
+            )
+            or "=>" in info
+        ):
+            raise BuildError(
+                "Tailnet helper build info differs from the pinned module/runtime"
+            )
+    if (
+        len(data) > MAX_FILE_BYTES
+        or sum(len(item[0]) for item in files.values()) + len(data) > MAX_ARCHIVE_BYTES
+    ):
+        raise BuildError("Tailnet helper exceeds the release size budget")
+    record = {
+        "schema": 1,
+        "go": version,
+        "tailscale": "v1.104.7",
+        "source_files": source_hashes,
+        "binary_sha256": hashlib.sha256(data).hexdigest(),
+        "build_info": info.splitlines()[1:],
+    }
+    files["dev/android/bin/schemii-tailnet-proxy"] = (data, 0o755)
+    files["dev/android/bin/BUILD.json"] = (
+        (json.dumps(record, sort_keys=True, indent=2) + "\n").encode(),
+        0o644,
+    )
+
+
+def build(
+    root: Path, tag: str, output: Path, ref: str = "HEAD", *, go: Path | None = None
+) -> dict[str, str]:
     if not TAG_PATTERN.fullmatch(tag):
         raise BuildError("Tag must have the form android-v0.1.0-preview.1")
     output = output.absolute()
     if output.exists() or output.is_symlink():
         raise BuildError("Output directory already exists; choose a new directory")
     commit, files = source_files(root, ref)
+    compile_proxy(files, go)
     manifest = metadata(tag, commit, files)
     manifest_bytes = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()
+    if (
+        sum(len(data) for data, _mode in files.values()) + len(manifest_bytes)
+        > MAX_ARCHIVE_BYTES
+    ):
+        raise BuildError("Complete release exceeds the archive size budget")
     archive_root = manifest["archive_root"]
     archive_name = f"{archive_root}.tar.gz"
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -275,10 +400,21 @@ def main() -> int:
     parser.add_argument(
         "--ref", default="HEAD", help="Exact committed source, default HEAD"
     )
+    parser.add_argument(
+        "--go",
+        type=Path,
+        help="Verified pinned Go SDK executable for the tailnet helper",
+    )
     options = parser.parse_args()
     try:
-        result = build(ROOT, options.tag, options.output, options.ref)
-    except (BuildError, OSError, UnicodeError, tarfile.TarError) as error:
+        result = build(ROOT, options.tag, options.output, options.ref, go=options.go)
+    except (
+        BuildError,
+        OSError,
+        UnicodeError,
+        tarfile.TarError,
+        subprocess.CalledProcessError,
+    ) as error:
         parser.exit(1, f"Android release error: {error}\n")
     print(json.dumps(result, indent=2))
     return 0

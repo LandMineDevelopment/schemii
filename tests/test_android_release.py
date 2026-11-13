@@ -55,6 +55,85 @@ def release(repository, tmp_path, name="release"):
     return BUILDER.build(repository, TAG, tmp_path / name)
 
 
+def test_tailnet_source_requires_a_verified_build_sdk(repository, tmp_path):
+    source = repository / "dev/android/tailnet-proxy/go.mod"
+    source.parent.mkdir()
+    source.write_text("module fixture\nrequire tailscale.com v1.104.7\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "Helper fixture")
+    with pytest.raises(BUILDER.BuildError, match="--go"):
+        release(repository, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "machine,interpreter", [(183, False), (62, False), (183, True)]
+)
+def test_tailnet_binary_is_built_from_committed_source_and_verified(
+    repository, tmp_path, machine, interpreter
+):
+    source = repository / "dev/android/tailnet-proxy/go.mod"
+    source.parent.mkdir()
+    source.write_text("module fixture\nrequire tailscale.com v1.104.7\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "Helper fixture")
+    compiler = tmp_path / "go"
+    compiler.write_text(f"""#!{os.sys.executable}
+import os,pathlib,struct,sys
+if sys.argv[1:] == ['version']:
+ print('go version go1.27.4 linux/amd64')
+elif sys.argv[1:3] == ['version','-m']:
+ print('fixture: go1.27.4\\n dep tailscale.com v1.104.7 h1:fixture\\n build GOOS=linux\\n build GOARCH=arm64\\n build CGO_ENABLED=0')
+else:
+ assert pathlib.Path('go.mod').read_text() == 'module fixture\\nrequire tailscale.com v1.104.7\\n'
+ assert os.environ['GOOS']=='linux' and os.environ['GOARCH']=='arm64' and os.environ['CGO_ENABLED']=='0'
+ assert '-mod=readonly' in sys.argv and '-trimpath' in sys.argv
+ data=bytearray(120);data[:6]=b'\\x7fELF\\x02\\x01';struct.pack_into('<H',data,16,2);struct.pack_into('<H',data,18,{machine})
+ if {interpreter!r}:
+  struct.pack_into('<Q',data,32,64);struct.pack_into('<H',data,54,56);struct.pack_into('<H',data,56,1);struct.pack_into('<I',data,64,3)
+ pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_bytes(data)
+""")
+    compiler.chmod(0o700)
+    if machine != 183 or interpreter:
+        with pytest.raises(BUILDER.BuildError, match="ARM64|static"):
+            BUILDER.build(repository, TAG, tmp_path / "release", go=compiler)
+        return
+    artifact = BUILDER.build(repository, TAG, tmp_path / "release", go=compiler)
+    destination = install(artifact, tmp_path / "install")
+    record = json.loads((destination / "dev/android/bin/BUILD.json").read_text())
+    binary = destination / "dev/android/bin/schemii-tailnet-proxy"
+    assert record["binary_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
+    assert (
+        record["source_files"]["dev/android/tailnet-proxy/go.mod"]
+        == hashlib.sha256(source.read_bytes()).hexdigest()
+    )
+    assert binary.stat().st_mode & 0o111
+    binary.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="changed"):
+        install(artifact, tmp_path / "install")
+
+
+@pytest.mark.parametrize("with_source", [False, True])
+def test_tailnet_builder_refuses_unbound_tracked_binary(with_source):
+    files = {
+        "dev/android/bin/schemii-tailnet-proxy": (b"unbound", 0o755),
+    }
+    if with_source:
+        files["dev/android/tailnet-proxy/go.mod"] = (b"module fixture", 0o644)
+    with pytest.raises(BUILDER.BuildError, match="must not be tracked"):
+        BUILDER.compile_proxy(files, None)
+
+
+def test_release_refuses_source_less_tracked_native_binary(repository, tmp_path):
+    binary = repository / "dev/android/bin/schemii-tailnet-proxy"
+    binary.parent.mkdir()
+    binary.write_bytes(b"unbound-test-executable")
+    binary.chmod(0o755)
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "Source-less binary fixture")
+    with pytest.raises(BUILDER.BuildError, match="must not be tracked"):
+        release(repository, tmp_path)
+
+
 def installer_module():
     template = (ROOT / "dev/android/download.sh.in").read_text()
     python = template.split("# BEGIN_RELEASE_INSTALLER_PYTHON\n", 1)[1].split(

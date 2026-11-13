@@ -40,6 +40,14 @@ SECRETS = (
 TLS_FILES = ("ca.key", "ca.crt", "server.key", "server.crt")
 ROOTS = ("config.json", "secrets", "tls", "postgres/metadata", "postgres/target")
 TRANSIENT = frozenset({"postmaster.pid", "postmaster.opts", "pg_internal.init"})
+TAILNET_LOGS = frozenset(
+    {
+        "tailscaled.log.conf",
+        "tailscaled.log1.txt",
+        "tailscaled.log2.txt",
+        "schemii.lock",
+    }
+)
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -188,6 +196,8 @@ def _check_control(cluster: Path) -> None:
 
 
 def _content_limit(name: str) -> int | None:
+    if name.startswith("tailnet/"):
+        return 16 * 1024 * 1024 if name.endswith("tailscaled.state") else 1024 * 1024
     if name == "config.json" or name in {f"tls/{item}" for item in TLS_FILES}:
         return 1024 * 1024
     if name in {f"secrets/{item}" for item in SECRETS}:
@@ -216,6 +226,18 @@ def _validate_content(name: str, data: bytes) -> None:
             valid = False
         if not valid:
             raise RecoveryError("The original metadata encryption key is invalid")
+    elif name == "tailnet/config.json":
+        try:
+            value = json.loads(data)
+            valid = isinstance(value, dict) and bool(
+                re.fullmatch(
+                    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", value.get("hostname", "")
+                )
+            )
+        except (ValueError, TypeError, UnicodeDecodeError):
+            valid = False
+        if not valid:
+            raise RecoveryError("Retained tailnet configuration is invalid")
 
 
 def _validate_state(state: Path, *, controls: bool) -> None:
@@ -223,6 +245,18 @@ def _validate_state(state: Path, *, controls: bool) -> None:
     for name in ("secrets", "tls", "postgres", "postgres/metadata", "postgres/target"):
         _private_path(state / name, directory=True)
     _validate_content("config.json", _read_private(state / "config.json", 1024 * 1024))
+    if (state / "tailnet").exists() or (state / "tailnet").is_symlink():
+        _private_path(state / "tailnet", directory=True)
+        for path in (state / "tailnet").rglob("*"):
+            name = path.relative_to(state).as_posix()
+            if path.parent == state / "tailnet/node" and path.name in TAILNET_LOGS:
+                continue
+            _safe_name(name)
+            _private_path(path, directory=path.is_dir())
+            if path.is_file():
+                _validate_content(
+                    name, _read_private(path, _content_limit(name) or 1024 * 1024)
+                )
     for name in SECRETS:
         _validate_content(
             "secrets/" + name, _read_private(state / "secrets" / name, 4096)
@@ -255,6 +289,22 @@ def _validate_state(state: Path, *, controls: bool) -> None:
 
 
 def _allowed(name: str) -> bool:
+    if name in {
+        "tailnet",
+        "tailnet/config.json",
+        "tailnet/node",
+        "tailnet/node/tailscaled.state",
+        "tailnet/node/certs",
+        "tailnet/node/certs/acme-account.key.pem",
+    }:
+        return True
+    if name.startswith("tailnet/node/certs/"):
+        leaf = name.removeprefix("tailnet/node/certs/")
+        return (
+            len(leaf) <= 257
+            and ".." not in leaf
+            and bool(re.fullmatch(r"[a-z0-9][a-z0-9.-]*\.ts\.net\.(?:crt|key)", leaf))
+        )
     return name in ROOTS or any(name.startswith(root + "/") for root in ROOTS[1:])
 
 
@@ -293,7 +343,8 @@ def _snapshot_entries(state: Path) -> dict[str, dict[str, Any]]:
         if len(entries) > MAX_ENTRIES:
             raise RecoveryError("Backup has too many entries for this preview format")
 
-    for root in ROOTS:
+    roots = (*ROOTS, "tailnet") if (state / "tailnet").exists() else ROOTS
+    for root in roots:
         path = state / root
         record(path)
         if path.is_dir():
@@ -305,6 +356,8 @@ def _snapshot_entries(state: Path) -> dict[str, dict[str, Any]]:
                 for item in directories:
                     record(Path(current) / item)
                 for item in files:
+                    if Path(current) == state / "tailnet/node" and item in TAILNET_LOGS:
+                        continue
                     if item not in TRANSIENT:
                         record(Path(current) / item)
     return entries
@@ -317,6 +370,13 @@ def _required_entries(entries: dict[str, Any]) -> None:
         *(f"tls/{name}" for name in TLS_FILES),
     ]
     required_dirs = ["secrets", "tls"]
+    if any(name.startswith("tailnet/") for name in entries):
+        required_dirs.append("tailnet")
+    if any(name.startswith("tailnet/node/") for name in entries):
+        required_dirs.append("tailnet/node")
+    if any(name.startswith("tailnet/node/certs/") for name in entries):
+        required_dirs.append("tailnet/node/certs")
+        required_files.append("tailnet/node/tailscaled.state")
     for name in ("metadata", "target"):
         root = f"postgres/{name}"
         required_files.extend((root + "/PG_VERSION", root + "/global/pg_control"))

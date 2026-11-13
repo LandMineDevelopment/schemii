@@ -40,6 +40,20 @@ def test_help_has_no_install_or_control_directory_side_effect(tmp_path: Path) ->
     assert list(tmp_path.iterdir()) == []
 
 
+def test_start_returns_actionable_auth_pending_without_waiting_or_login_url(tmp_path):
+    result = shell(
+        'SCHEMII_ANDROID_ROOT="$HOME"\nSCHEMII_ANDROID_CONTROL="$HOME"\n'
+        'runtime() { printf \'{"state":"login_pending","supervisor_alive":true,"ready":false}\'; return 1; }\n'
+        "host_running() { return 1; }; record_runner() { :; }; nohup() { :; }\n"
+        "start_runtime",
+        env={"HOME": str(tmp_path)},
+    )
+    assert result.returncode == 2, result.stderr
+    assert "schemii tailnet-login" in result.stdout
+    assert "databases and remaining services after approval" in result.stdout
+    assert "https://login." not in result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("arguments", [["kasey"], ["--", "-abc"]])
 def test_password_recovery_refuses_non_tty_before_touching_home(tmp_path, arguments):
     result = subprocess.run(

@@ -228,6 +228,7 @@ run_release_action() {
   printf 'Next, use your phone address from the Tailscale app:\n'
   printf '  schemii configure --tailnet-ip 100.X.Y.Z --hostname PHONE.TAILNET.ts.net\n'
   printf '  schemii start\n'
+  printf 'Optional trusted HTTPS after setup: schemii stop; schemii tailnet-enable; schemii start; schemii tailnet-login\n'
   printf 'Read ~/schemii/docs/android-release.md for certificate trust, first account and device checks.\n'
 }
 # END_RELEASE_ACTION

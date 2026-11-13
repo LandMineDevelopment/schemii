@@ -26,6 +26,18 @@ android = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(android)
 
 
+@pytest.fixture(autouse=True)
+def preserve_caller_umask():
+    # CLI main intentionally tightens its process umask. Direct calls in this
+    # module must not alter permission fixtures in later test modules.
+    previous = os.umask(0o077)
+    os.umask(previous)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
 @pytest.fixture
 def runtime(tmp_path):
     instance = android.Runtime(tmp_path / "state")
@@ -411,6 +423,478 @@ def test_runtime_environment_keeps_metadata_fence_and_secret_files(
     assert "omarchy" not in env["SCHEMII_TRUSTED_ORIGINS"]
 
 
+def test_tailnet_origin_is_explicit_and_legacy_origins_survive(runtime):
+    config = android.validate_config("100.64.2.3", "phone.example.ts.net")
+    runtime.tailnet_origin = "https://schemii-phone.example.ts.net"
+    origins = runtime._environment(config)["SCHEMII_TRUSTED_ORIGINS"].split(",")
+    assert origins[-1] == runtime.tailnet_origin
+    assert "https://phone.example.ts.net:8001" in origins
+    assert "https://localhost:8001" in origins
+
+
+def _enable_tailnet_fixture(runtime, tmp_path):
+    runtime.source = tmp_path / "release"
+    binary = runtime.source / "dev/android/bin/schemii-tailnet-proxy"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test-owned-helper")
+    runtime.configure("100.64.2.3", "phone.example.ts.net")
+    runtime.configure_tailnet("schemii-phone")
+
+
+def test_tailnet_opt_in_preserves_identity_when_disabled(runtime, tmp_path):
+    _enable_tailnet_fixture(runtime, tmp_path)
+    node = runtime.state / "tailnet/node"
+    node.mkdir(mode=0o700)
+    (node / "tailscaled.state").write_text("private-test-identity")
+    assert runtime.tailnet_config() == {"hostname": "schemii-phone"}
+    with pytest.raises(android.RuntimeFailure, match="differs"):
+        runtime.configure_tailnet("another-name")
+    runtime.configure_tailnet(None)
+    assert runtime.tailnet_config() == {}
+    assert (node / "tailscaled.state").read_text() == "private-test-identity"
+
+
+@pytest.mark.parametrize("symlink", ["directory", "configuration"])
+def test_tailnet_disable_refuses_symlinks_and_preserves_foreign_config(
+    runtime, tmp_path, symlink
+):
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    config = foreign / "config.json"
+    config.write_text('{"hostname":"unrelated-owner"}')
+    directory = runtime.state / "tailnet"
+    if symlink == "directory":
+        directory.symlink_to(foreign, target_is_directory=True)
+        link = directory
+    else:
+        directory.mkdir(mode=0o700)
+        link = directory / "config.json"
+        link.symlink_to(config)
+    before = config.read_bytes()
+    with pytest.raises(android.RuntimeFailure, match="private owned storage"):
+        runtime.configure_tailnet(None)
+    assert config.read_bytes() == before
+    assert link.is_symlink()
+
+
+def test_tailnet_config_corruption_cannot_silently_disable_proxy(runtime):
+    directory = runtime.state / "tailnet"
+    directory.mkdir(mode=0o700)
+    (directory / "config.json").write_text("broken json")
+    with pytest.raises(android.RuntimeFailure, match="Invalid retained"):
+        runtime.tailnet_config()
+
+
+def test_all_six_services_stop_with_proxy_first_and_database_fast_shutdown(
+    runtime, monkeypatch
+):
+    identities = {
+        name: {"pid": index + 100} for index, name in enumerate(android.SERVICES)
+    }
+    seen = set()
+
+    def owned(identity):
+        pid = identity["pid"]
+        if pid in seen:
+            return False
+        seen.add(pid)
+        return True
+
+    signals = []
+    monkeypatch.setattr(android, "owns_group", owned)
+    monkeypatch.setattr(
+        android.os, "killpg", lambda pid, sig: signals.append((pid, sig))
+    )
+    runtime._stop_children(identities)
+    assert signals == [
+        (
+            identities[name]["pid"],
+            android.signal.SIGINT
+            if name in ("metadata", "target")
+            else android.signal.SIGTERM,
+        )
+        for name in reversed(android.SERVICES)
+    ]
+
+
+def test_tailnet_login_url_is_only_in_explicit_login_output(
+    runtime, tmp_path, monkeypatch
+):
+    _enable_tailnet_fixture(runtime, tmp_path)
+    url = "https://login.tailscale.com/a/test-private-login"
+    android.write_private(
+        runtime.state / "run/tailnet.json",
+        json.dumps(
+            {
+                "backend_state": "NeedsLogin",
+                "online": False,
+                "login_url": url,
+            }
+        ),
+    )
+    android.write_private(
+        runtime.state / "run/status.json",
+        json.dumps(
+            {
+                "state": "login_pending",
+                "ready": False,
+                "supervisor": {"pid": 123},
+                "services": {"tailnet": {"pid": 124}},
+            }
+        ),
+    )
+    monkeypatch.setattr(android, "is_current", lambda identity: bool(identity))
+    status = runtime.status()
+    assert status["state"] == "login_pending" and not status["ready"]
+    assert status["tailnet"]["login_required"]
+    assert url not in json.dumps(status)
+    assert runtime.tailnet_login()["login_url"] == url
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://name.example.ts.net",
+        "https://evil.example",
+        "https://name.example.ts.net:443",
+        "https://name.example.ts.net/path",
+    ],
+)
+def test_tailnet_rejects_untrusted_origin_metadata(runtime, origin):
+    android.write_private(
+        runtime.state / "run/tailnet.json",
+        json.dumps(
+            {
+                "hostname": "name.example.ts.net",
+                "origin": origin,
+            }
+        ),
+    )
+    with pytest.raises(android.RuntimeFailure, match="invalid HTTPS origin"):
+        runtime._tailnet_status()
+
+
+def test_tailnet_enrollment_waits_before_starting_other_services(
+    runtime, tmp_path, monkeypatch
+):
+    _enable_tailnet_fixture(runtime, tmp_path)
+    calls, states = [], []
+    path = runtime.state / "run/tailnet.json"
+
+    def spawn(name, command, env=None):
+        assert "TS_AUTHKEY" not in env and "TS_CONTROL_URL" not in env
+        calls.append((name, command))
+        runtime.children[name] = type("Child", (), {"poll": lambda self: None})()
+        android.write_private(
+            path,
+            json.dumps(
+                {
+                    "backend_state": "NeedsLogin",
+                    "online": False,
+                    "login_url": "https://login.tailscale.com/a/private-test",
+                }
+            ),
+        )
+
+    def approved(_seconds):
+        android.write_private(
+            path,
+            json.dumps(
+                {
+                    "backend_state": "Running",
+                    "online": True,
+                    "ready": True,
+                    "hostname": "schemii-phone.example.ts.net",
+                    "origin": "https://schemii-phone.example.ts.net",
+                }
+            ),
+        )
+
+    monkeypatch.setattr(runtime, "_spawn", spawn)
+    monkeypatch.setenv("TS_AUTHKEY", "ambient-test-key")
+    monkeypatch.setenv("TS_CONTROL_URL", "https://untrusted.example")
+    monkeypatch.setattr(runtime, "_record", lambda state: states.append(state))
+    monkeypatch.setattr(runtime.shutdown, "wait", approved)
+    runtime._start_tailnet()
+    assert states == ["login_pending"]
+    assert [name for name, _command in calls] == ["tailnet"]
+    command = calls[0][1]
+    assert command[command.index("--upstream") + 1] == "https://127.0.0.1:8001"
+    assert command[command.index("--upstream-ca") + 1] == str(
+        runtime.state / "tls/ca.crt"
+    )
+    assert runtime.tailnet_origin == "https://schemii-phone.example.ts.net"
+
+
+def test_tailnet_status_requires_six_live_services_and_public_https(
+    runtime, tmp_path, monkeypatch
+):
+    _enable_tailnet_fixture(runtime, tmp_path)
+    android.write_private(
+        runtime.state / "run/tailnet.json",
+        json.dumps(
+            {
+                "online": True,
+                "ready": True,
+                "hostname": "schemii-phone.example.ts.net",
+                "origin": "https://schemii-phone.example.ts.net",
+            }
+        ),
+    )
+    receipt = {
+        "state": "ready",
+        "ready": True,
+        "supervisor": {"pid": 1},
+        "services": {
+            name: {"pid": index + 2} for index, name in enumerate(android.SERVICES)
+        },
+    }
+    android.write_private(runtime.state / "run/status.json", json.dumps(receipt))
+    monkeypatch.setattr(android, "is_current", lambda identity: bool(identity))
+    calls = []
+    monkeypatch.setattr(
+        runtime, "_request", lambda url, **kwargs: calls.append((url, kwargs)) or True
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_tailnet_request",
+        lambda status: (
+            calls.append((status["origin"] + "/api/v1/readiness", {})) or True
+        ),
+    )
+    assert runtime.status()["ready"]
+    assert calls[-1] == ("https://schemii-phone.example.ts.net/api/v1/readiness", {})
+    receipt["services"].pop("tailnet")
+    android.write_private(runtime.state / "run/status.json", json.dumps(receipt))
+    assert not runtime.status()["ready"]
+
+
+def _tailnet_probe_certificate(tmp_path, hostname):
+    from datetime import datetime, timedelta, timezone
+    import ssl
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    now = datetime.now(timezone.utc)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test-only probe CA")])
+    ca = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    key = ec.generate_private_key(ec.SECP256R1())
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)]))
+        .issuer_name(ca_name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False
+        )
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_file, cert_file, key_file = [
+        tmp_path / name for name in ("ca.crt", "server.crt", "server.key")
+    ]
+    ca_file.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    cert_file.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_file.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    key_file.chmod(0o600)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_file, key_file)
+    return context, ca_file
+
+
+@pytest.mark.parametrize("address", ["100.64.2.3", "fd7a:115c:a1e0::1234"])
+@pytest.mark.parametrize("trust", ["valid", "wrong-ca", "wrong-hostname"])
+def test_tailnet_probe_dials_own_ip_but_verifies_dns_host_and_sni(
+    runtime, tmp_path, monkeypatch, address, trust
+):
+    import socket
+    import ssl
+    import threading
+
+    hostname = "schemii-phone.example.ts.net"
+    context, ca_file = _tailnet_probe_certificate(
+        tmp_path, "other.example.ts.net" if trust == "wrong-hostname" else hostname
+    )
+    if trust == "wrong-ca":
+        other = tmp_path / "unrelated"
+        other.mkdir()
+        _context, ca_file = _tailnet_probe_certificate(other, hostname)
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(3)
+    sni, requests, errors, dials = [], [], [], []
+    context.set_servername_callback(lambda _socket, name, _context: sni.append(name))
+
+    def serve():
+        try:
+            raw, _remote = listener.accept()
+            raw.settimeout(3)
+            with context.wrap_socket(raw, server_side=True) as connection:
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    request += connection.recv(4096)
+                requests.append(request)
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                )
+        except (OSError, ssl.SSLError) as error:
+            errors.append(type(error).__name__)
+
+    server = threading.Thread(target=serve)
+    server.start()
+    create_connection = socket.create_connection
+
+    def dial(destination, *, timeout):
+        dials.append(destination)
+        return create_connection(listener.getsockname(), timeout=timeout)
+
+    monkeypatch.setattr(android.socket, "create_connection", dial)
+    runtime.identities["tailnet"] = {"pid": 42}
+    monkeypatch.setattr(android, "is_current", lambda identity: identity == {"pid": 42})
+    status = {
+        "pid": 42,
+        "online": True,
+        "ready": True,
+        "hostname": hostname,
+        "origin": "https://" + hostname,
+        "tailnet_ips": [address],
+    }
+    try:
+        if trust == "valid":
+            assert runtime._tailnet_request(status)
+        else:
+            with pytest.raises(ssl.SSLCertVerificationError) as failure:
+                runtime._tailnet_request(status)
+            if trust == "wrong-hostname":
+                assert "hostname mismatch" in failure.value.verify_message.lower()
+            else:
+                assert "issuer" in failure.value.verify_message.lower()
+    finally:
+        server.join(timeout=4)
+        listener.close()
+    assert not server.is_alive()
+    assert dials == [(address, 443)]
+    assert sni == [hostname]
+    if trust == "valid":
+        assert not errors and len(requests) == 1
+        assert b"GET /api/v1/readiness HTTP/1.1\r\n" in requests[0]
+        assert ("Host: " + hostname + "\r\n").encode() in requests[0]
+    else:
+        assert errors and not requests
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "127.0.0.1",
+        "192.168.1.1",
+        "100.63.255.255",
+        "100.128.0.1",
+        "::1",
+        "fd7a:115c:a1e1::1",
+        "fd7a:115c:a1e0::1%wlan0",
+    ],
+)
+def test_tailnet_probe_rejects_non_node_ranges_before_dial(
+    runtime, monkeypatch, address
+):
+    runtime.identities["tailnet"] = {"pid": 42}
+    monkeypatch.setattr(android, "is_current", lambda _identity: True)
+    monkeypatch.setattr(
+        android.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: pytest.fail("invalid address must not be dialed"),
+    )
+    with pytest.raises(android.RuntimeFailure, match="invalid private node address"):
+        runtime._tailnet_request(
+            {"pid": 42, "online": True, "ready": True, "tailnet_ips": [address]}
+        )
+
+
+def test_tailnet_probe_rejects_stale_helper_metadata_before_dial(runtime, monkeypatch):
+    runtime.identities["tailnet"] = {"pid": 42}
+    monkeypatch.setattr(android, "is_current", lambda _identity: True)
+    monkeypatch.setattr(
+        android.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: pytest.fail("stale node must not be dialed"),
+    )
+    with pytest.raises(android.RuntimeFailure, match="live tailnet helper"):
+        runtime._tailnet_request(
+            {"pid": 43, "online": True, "ready": True, "tailnet_ips": ["100.64.2.3"]}
+        )
+
+
+@pytest.mark.parametrize("field", ["online", "ready"])
+def test_tailnet_probe_refuses_unauthenticated_or_unready_node(
+    runtime, monkeypatch, field
+):
+    runtime.identities["tailnet"] = {"pid": 42}
+    monkeypatch.setattr(android, "is_current", lambda _identity: True)
+    monkeypatch.setattr(
+        android.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: pytest.fail("pending node must not be dialed"),
+    )
+    status = {"pid": 42, "online": True, "ready": True, "tailnet_ips": ["100.64.2.3"]}
+    status[field] = False
+    with pytest.raises(android.RuntimeFailure, match="authenticated live"):
+        runtime._tailnet_request(status)
+
+
 def test_ingress_preserves_streaming_and_only_explicit_https_interfaces(runtime):
     runtime._write_runtime_config(
         android.validate_config("100.64.2.3", "phone.example.ts.net")
@@ -432,6 +916,7 @@ def test_ingress_preserves_streaming_and_only_explicit_https_interfaces(runtime)
         "https://localhost:8001",
         "https://100.64.2.3:8001",
         "https://phone.example.ts.net:8001",
+        "https://schemii-phone.example.ts.net",
     ],
 )
 def test_configured_ingress_host_passes_readiness_and_secure_phone_auth(
@@ -454,6 +939,8 @@ def test_configured_ingress_host_passes_readiness_and_secure_phone_auth(
     proxy_host = directive[1]
     if proxy_host == "$http_host":
         proxy_host = client_host
+    if origin == "https://schemii-phone.example.ts.net":
+        runtime.tailnet_origin = origin
     monkeypatch.setenv(
         "SCHEMII_TRUSTED_ORIGINS",
         runtime._environment(config)["SCHEMII_TRUSTED_ORIGINS"],

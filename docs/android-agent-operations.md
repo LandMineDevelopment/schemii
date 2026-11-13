@@ -88,7 +88,8 @@ schemii restart
 ```
 
 Start, stop and restart operate the complete backend: metadata PostgreSQL,
-target PostgreSQL, Python application and APIs, Pi sidecar, and nginx HTTPS.
+target PostgreSQL, Python application and APIs, Pi sidecar, nginx HTTPS, and the
+optional trusted tailnet HTTPS proxy when enabled.
 `schemii` delegates to the active release's `./start.sh --android`; it is the
 supported phone lifecycle entry point. Check the operation marker and task
 authorization before the mutating commands. Never substitute direct service
@@ -118,12 +119,26 @@ previously stalled with the alternative shared-memory registry. Do not guess a
 guest username, invoke package installation, spawn a separate database or disable
 durability. Database mutations need explicit ownership of their task and state.
 
-Use `application.origin` for the phone's tailnet HTTPS endpoint. Preserve the
-private CA and trust its public certificate on clients as described in the
-release guide; never export its private key or bypass TLS verification. Tailscale
-login is managed by the Android app; no Tailscale credential belongs in this
-repository or an agent prompt. Keep database passwords, setup tokens, cookies,
-backups, SSH keys and private operation evidence outside tracked files.
+Use `application.origin` for the phone's current tailnet HTTPS endpoint. With
+automatic trusted HTTPS, the service has a separate on-phone Tailscale identity
+and hostname. The descriptor's SSH destination remains the original Android VPN
+node; do not substitute the service hostname for SSH. Both identities remain
+independent of the desktop's Serve route.
+
+The supported launcher owns enrollment and startup. If status reports
+`login_pending`, use the explicit `schemii tailnet-login` owner flow; databases
+and the other services start after approval. Never copy another node's state or
+introduce an auth key to bypass enrollment. Keep login URLs private. Stop and
+restart use the same global commands after enrollment.
+
+Preserve the private CA, which still verifies the local nginx connection behind
+the trusted proxy. Clients using the automatic HTTPS origin need no private CA.
+The direct `:8001` origin requires the public CA as described in the release
+guide; never export its private key or bypass TLS verification. No Tailscale
+credential belongs in this repository or an agent prompt. Keep database passwords,
+setup tokens, cookies, backups, SSH keys and private operation evidence outside
+tracked files. A cold backup containing the proxy's identity is sensitive; do not
+run duplicate restored identities concurrently.
 
 Direct SSH has been verified while the phone is available. Termux force-stop,
 reboot, Doze, battery management and VPN reconnect recovery are not validated.

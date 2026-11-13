@@ -105,6 +105,49 @@ def make_bundle(tmp_path):
     return runtime, destination
 
 
+def test_cold_backup_preserves_optional_tailnet_identity_and_excludes_logs(tmp_path):
+    runtime = make_state(tmp_path / "source")
+    expected = {
+        "tailnet/config.json": b'{"hostname":"schemii-phone"}',
+        "tailnet/node/tailscaled.state": b"private-fixture-identity",
+        "tailnet/node/certs/acme-account.key.pem": b"private-fixture-acme",
+        "tailnet/node/certs/schemii-phone.example.ts.net.key": b"private-fixture-cert-key",
+        "tailnet/node/certs/schemii-phone.example.ts.net.crt": b"fixture-public-cert",
+    }
+    for name, value in expected.items():
+        write_private(runtime.state / name, value)
+    write_private(runtime.state / "tailnet/node/tailscaled.log1.txt", b"not-backed-up")
+    write_private(runtime.state / "tailnet/node/schemii.lock", b"")
+    bundle = tmp_path / "backup"
+    recovery.backup(runtime, bundle)
+    target = FakeRuntime(tmp_path / "fresh")
+    recovery.restore(target, bundle)
+    for name, value in expected.items():
+        assert (target.state / name).read_bytes() == value
+    assert not (target.state / "tailnet/node/tailscaled.log1.txt").exists()
+    assert not (target.state / "tailnet/node/schemii.lock").exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "tailnet/status.json",
+        "tailnet/node/local.sock",
+        "tailnet/node/secret-other",
+        "tailnet/node/certs/unrelated.example.key",
+    ],
+)
+def test_tailnet_backup_rejects_unrecognized_state(tmp_path, name):
+    runtime = make_state(tmp_path / "source")
+    write_private(runtime.state / name, b"unknown")
+    for directory in (runtime.state / "tailnet").rglob("*"):
+        if directory.is_dir():
+            directory.chmod(0o700)
+    (runtime.state / "tailnet").chmod(0o700)
+    with pytest.raises(recovery.RecoveryError, match="unexpected member"):
+        recovery.backup(runtime, tmp_path / "backup")
+
+
 def edit_manifest(bundle, edit):
     path = bundle / "manifest.json"
     manifest = json.loads(path.read_text())

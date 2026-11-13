@@ -18,6 +18,9 @@ Usage: schemii COMMAND [ARGUMENTS]
   logs [SERVICE]                 Read bounded private logs
   export-ca DEST | credentials DEST  Export CA or private setup references
   reset-password USERNAME         Recover an enabled account at hidden prompts
+  tailnet-enable [--hostname NAME] Enable trusted HTTPS on a separate tailnet node
+  tailnet-login                   Show its private one-time enrollment URL
+  tailnet-disable                 Return to legacy HTTPS; preserve node identity
   verify-backup DIRECTORY         Verify a private backup without restoring
   backup DIRECTORY               Make a private cold backup (stops the backend)
   restore DIRECTORY              Restore only into a fresh empty runtime state
@@ -88,6 +91,8 @@ try:
  expected=record["source_files"]
  names=["constraints.docker.txt","pyproject.toml","ai/prototype/package-lock.json","ai/prototype/package.json","ai/prototype/server.js"]
  names.extend(str(p.relative_to(root)) for p in sorted((root/"src").rglob("*")) if p.is_file() and "__pycache__" not in p.parts and p.suffix!=".pyc")
+ for directory in (root/"dev/android/tailnet-proxy",root/"dev/android/bin"):
+  names.extend(str(p.relative_to(root)) for p in sorted(directory.rglob("*")) if p.is_file())
  valid=set(names)==set(expected) and all(hashlib.sha256((root/name).read_bytes()).hexdigest()==expected[name] for name in names)
 except (OSError,ValueError,KeyError,TypeError):
  valid=False
@@ -269,11 +274,27 @@ install_runtime() {
   printf 'Global commands: schemii start | stop | restart | status\n'
   printf 'First setup: schemii configure --tailnet-ip PHONE_IP --hostname PHONE_NAME\n'
 }
+report_tailnet_pending() {
+  if python - "$SCHEMII_ANDROID_CONTROL/status.json" <<'PENDING'
+import json,pathlib,sys
+try:
+ value=json.loads(pathlib.Path(sys.argv[1]).read_text())
+ sys.exit(0 if value.get('state')=='login_pending' and value.get('supervisor_alive') else 1)
+except (OSError,ValueError):
+ sys.exit(1)
+PENDING
+  then
+    printf 'Tailnet login or node approval is pending. Run schemii tailnet-login and open its private URL. The supervisor will start the databases and remaining services after approval.\n'
+    return 0
+  fi
+  return 1
+}
 start_runtime() {
   (($# == 0)) || fail 'start takes no arguments; use configure first.'
   if runtime status > "$SCHEMII_ANDROID_CONTROL/status.json" 2>/dev/null; then
     cat "$SCHEMII_ANDROID_CONTROL/status.json"; return
   fi
+  if report_tailnet_pending; then return 2; fi
   host_running && fail 'The supervisor is active but not ready. Inspect logs, then stop it before starting again.'
   local logfile="$SCHEMII_ANDROID_CONTROL/launcher.log"
   if [[ -f "$logfile" ]] && (( $(wc -c < "$logfile") > 1048576 )); then
@@ -296,6 +317,7 @@ start_runtime() {
     if runtime status > "$SCHEMII_ANDROID_CONTROL/status.json" 2>/dev/null; then
       cat "$SCHEMII_ANDROID_CONTROL/status.json"; return
     fi
+    if report_tailnet_pending; then return 2; fi
     host_running || fail "The supervisor exited before readiness. Inspect private log: $logfile"
     python - "$SCHEMII_ANDROID_CONTROL/status.json" <<'PROGRESS'
 import json,pathlib,sys
@@ -352,7 +374,7 @@ main() {
   local action=${1:---help}
   case "$action" in --help|-h|help) usage; return;; esac
   shift
-  case "$action" in install|configure|start|stop|restart|status|doctor|logs|backup|restore|verify-backup|export-ca|credentials|reset-password|enable-boot|disable-boot) ;; *) fail "Unknown command: $action"; return 1;; esac
+  case "$action" in install|configure|start|stop|restart|status|doctor|logs|backup|restore|verify-backup|export-ca|credentials|reset-password|tailnet-enable|tailnet-disable|tailnet-login|enable-boot|disable-boot) ;; *) fail "Unknown command: $action"; return 1;; esac
   if [[ "$action" == reset-password ]]; then
     if ! { (($# == 1)) || { (($# == 2)) && [[ "$1" == -- ]]; }; }; then
       fail 'Usage: schemii reset-password [--] USERNAME; enter the password only at the hidden prompts.' || return 2
@@ -368,11 +390,11 @@ main() {
   [[ $(realpath -- "$SCHEMII_ANDROID_CONTROL") == "$(realpath -- "$HOME")/"* ]] || fail 'Control directory must stay in Termux private home.'
   safe_control_paths
   # Serialize host lifecycle mutations; read-only commands never wait on a start.
-  case "$action" in status|doctor|logs) ;; *) exec 9>"$SCHEMII_ANDROID_CONTROL/launcher.lock"; flock -n 9 || fail 'Another Android lifecycle action is running.';; esac
+  case "$action" in status|doctor|logs|tailnet-login) ;; *) exec 9>"$SCHEMII_ANDROID_CONTROL/launcher.lock"; flock -n 9 || fail 'Another Android lifecycle action is running.';; esac
   if [[ "$action" == install ]]; then install_runtime "$@"; return; fi
   require_proot
   require_owned
-  case "$action" in start|restart|configure|enable-boot) require_installed_source;; esac
+  case "$action" in start|restart|configure|enable-boot|tailnet-enable) require_installed_source;; esac
   case "$action" in
     start) start_runtime "$@";;
     stop) stop_runtime "$@";;
