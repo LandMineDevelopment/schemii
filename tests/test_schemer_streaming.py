@@ -1,11 +1,15 @@
 import asyncio
 import importlib.util
+import json
 from pathlib import Path
+import threading
 import pytest
 from types import SimpleNamespace as NS
 
 from schemii.schemer import streaming
+from schemii.common.api.errors import ApiProblem
 from schemii.common.postgres.console.models import ConsoleResultColumn
+from schemii.common.query_executions.errors import ConsoleServiceError
 
 
 class Console:
@@ -272,3 +276,316 @@ def test_revoked_report_stops_before_delivering_pending_rows():
     assert not [event for event in events if event['type'] == 'rows']
     assert next(event for event in events if event['type'] == 'error')['code'] == 'report_access_revoked'
     assert console.cancelled and console.closed == ['result']
+
+
+class StrictMultiResultConsole(Console):
+    """Match the repositories' rejection of a result closed more than once."""
+
+    def __init__(self):
+        super().__init__([])
+        self.execution.results = [NS(id="first"), NS(id="second")]
+        self.close_attempts = []
+        self.release = threading.Event()
+
+    def page(self, _owner, _workspace, _execution, result_id, _cursor):
+        return NS(
+            rows=[[result_id]],
+            columns=[ConsoleResultColumn(name="value", data_type="text")],
+            next_cursor=None,
+            truncated=False,
+        )
+
+    def close_result(self, *args):
+        result_id = args[-1]
+        self.close_attempts.append(result_id)
+        if result_id in self.closed:
+            raise ConsoleServiceError(
+                410,
+                "console_result_gone",
+                "Console result was closed, expired, or already advanced",
+            )
+        super().close_result(*args)
+
+    def cancel(self, *args):
+        super().cancel(*args)
+        self.release.set()
+
+
+def setup_multi_result():
+    console = StrictMultiResultConsole()
+    services = NS(console=console)
+    model = NS(connection_id="c", database="d", namespace="public")
+    tiles = [
+        {"tileId": result.id, "plan": {"sql": "select 1"}}
+        for result in console.execution.results
+    ]
+    return console, services, model, tiles
+
+
+async def wait_for_worker(event):
+    # Keep fixture failures bounded without leaving a worker blocked forever.
+    with streaming.anyio.fail_after(2):
+        while not event.is_set():
+            await asyncio.sleep(0.001)
+
+
+def assert_results_released_once(console):
+    assert console.close_attempts == ["first", "second"]
+    assert console.closed == ["first", "second"]
+
+
+def test_multi_result_stream_completes_with_strict_closes():
+    console, services, model, tiles = setup_multi_result()
+
+    async def run():
+        return [
+            event async for event in streaming.events(services, "owner", model, tiles)
+        ]
+
+    events = asyncio.run(run())
+    assert [event["type"] for event in events] == [
+        "start",
+        "execution",
+        "rows",
+        "complete",
+        "rows",
+        "complete",
+        "end",
+    ]
+    assert_results_released_once(console)
+    assert not console.cancelled
+
+
+def test_multi_result_query_error_keeps_completed_result_closed():
+    console, services, model, tiles = setup_multi_result()
+    page = console.page
+
+    def fail_second(*args):
+        if args[-2] == "second":
+            raise ApiProblem(
+                422, "report_query_failed", "The report query did not complete."
+            )
+        return page(*args)
+
+    console.page = fail_second
+
+    async def run():
+        events = []
+        async for event in streaming.events(services, "owner", model, tiles):
+            if event["type"] == "error":
+                assert_results_released_once(console)
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    assert [event["type"] for event in events] == [
+        "start",
+        "execution",
+        "rows",
+        "complete",
+        "error",
+        "end",
+    ]
+    assert events[-2] == {
+        "type": "error",
+        "tileId": "second",
+        "code": "report_query_failed",
+        "message": "The report query did not complete.",
+    }
+    assert_results_released_once(console)
+    assert console.cancelled
+
+
+def test_multi_result_response_deadline_preserves_timeout_after_completed_tile():
+    console, services, model, tiles = setup_multi_result()
+    page = console.page
+    entered = threading.Event()
+
+    def block_second(*args):
+        if args[-2] == "second":
+            entered.set()
+            assert console.release.wait(2)
+        return page(*args)
+
+    console.page = block_second
+
+    async def run():
+        events = []
+        report = streaming.response(services, "owner", model, tiles)
+        report.lifetime_seconds = 0.05
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                events.extend(json.loads(line) for line in message["body"].splitlines())
+
+        with pytest.raises(TimeoutError):
+            await report.stream_response(send)
+        assert entered.is_set()
+        assert [event["type"] for event in events] == [
+            "start",
+            "execution",
+            "rows",
+            "complete",
+        ]
+
+    asyncio.run(run())
+    assert_results_released_once(console)
+    assert console.cancelled
+
+
+def test_multi_result_disconnect_closes_only_remaining_results():
+    console, services, model, tiles = setup_multi_result()
+
+    async def run():
+        source = streaming.events(services, "owner", model, tiles)
+        async for event in source:
+            if event["type"] == "complete":
+                break
+        await source.aclose()
+
+    asyncio.run(run())
+    assert_results_released_once(console)
+    assert console.cancelled
+
+
+def test_multi_result_send_failure_preserves_transport_error():
+    console, services, model, tiles = setup_multi_result()
+    failure = OSError("browser disconnected")
+
+    async def run():
+        report = streaming.response(services, "owner", model, tiles)
+
+        async def send(message):
+            if (
+                message["type"] == "http.response.body"
+                and b'"type":"complete"' in message["body"]
+            ):
+                raise failure
+
+        with pytest.raises(OSError) as caught:
+            await report.stream_response(send)
+        assert caught.value is failure
+
+    asyncio.run(run())
+    assert_results_released_once(console)
+    assert console.cancelled
+
+
+def test_multi_result_owner_cancellation_preserves_cancel_and_joins_fetch():
+    console, services, model, tiles = setup_multi_result()
+    page = console.page
+    entered = threading.Event()
+
+    def block_second(*args):
+        if args[-2] == "second":
+            entered.set()
+            assert console.release.wait(2)
+        return page(*args)
+
+    console.page = block_second
+
+    async def run():
+        async def consume():
+            return [
+                event
+                async for event in streaming.events(services, "owner", model, tiles)
+            ]
+
+        work = asyncio.create_task(consume())
+        try:
+            await wait_for_worker(entered)
+            work.cancel("owner disconnected")
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await work
+            assert caught.value.args == ("owner disconnected",)
+        finally:
+            console.release.set()
+            if not work.done():
+                work.cancel()
+
+    asyncio.run(run())
+    assert_results_released_once(console)
+    assert console.cancelled
+
+
+@pytest.mark.parametrize("close_committed", [False, True])
+def test_multi_result_cancellation_joins_inflight_close_before_cleanup(close_committed):
+    console, services, model, tiles = setup_multi_result()
+    close = console.close_result
+    entered = threading.Event()
+
+    def block_first_close(*args):
+        if args[-1] == "first":
+            if close_committed:
+                close(*args)
+            entered.set()
+            assert console.release.wait(2)
+            if not close_committed:
+                close(*args)
+        else:
+            close(*args)
+
+    console.close_result = block_first_close
+
+    async def run():
+        async def consume():
+            return [
+                event
+                async for event in streaming.events(services, "owner", model, tiles)
+            ]
+
+        work = asyncio.create_task(consume())
+        try:
+            await wait_for_worker(entered)
+            work.cancel("owner disconnected during close")
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await work
+            assert caught.value.args == ("owner disconnected during close",)
+        finally:
+            console.release.set()
+            if not work.done():
+                work.cancel()
+
+    asyncio.run(run())
+    assert_results_released_once(console)
+    assert console.cancelled
+
+
+@pytest.mark.parametrize("operation", ["cancel", "close"])
+def test_multi_result_cleanup_propagates_unknown_failures(operation):
+    console, services, model, tiles = setup_multi_result()
+    failure = RuntimeError("private cleanup failure")
+    if operation == "cancel":
+        cancel = console.cancel
+
+        def fail_cancel(*args):
+            cancel(*args)
+            raise failure
+
+        console.cancel = fail_cancel
+    else:
+        close = console.close_result
+
+        def fail_close(*args):
+            if args[-1] == "second":
+                console.close_attempts.append("second")
+                raise failure
+            close(*args)
+
+        console.close_result = fail_close
+
+    async def run():
+        source = streaming.events(services, "owner", model, tiles)
+        async for event in source:
+            if event["type"] == "complete":
+                break
+        with pytest.raises(RuntimeError) as caught:
+            await source.aclose()
+        assert caught.value is failure
+
+    asyncio.run(run())
+    assert console.close_attempts == ["first", "second"]
+    assert console.closed == (
+        ["first", "second"] if operation == "cancel" else ["first"]
+    )
+    assert console.cancelled
