@@ -77,6 +77,54 @@ def test_old_proot_cli_is_rejected_without_fallback() -> None:
     assert "OCI-capable" in result.stderr
 
 
+@pytest.mark.parametrize("stream", [1, 2])
+def test_supported_proot_help_accepts_stdout_and_actual_stderr_channel(stream):
+    # Official 5.10.3 uses msg() on stderr for successful command help.
+    result = shell(f"""proot-distro() {{
+  case "$1" in
+    install) printf 'Usage: proot-distro install --name NAME IMAGE\\n' >&{stream};;
+    login) printf 'Usage: proot-distro login --isolated --bind PATH --user USER --work-dir DIR\\n' >&{stream};;
+  esac
+}}
+require_proot
+""")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == result.stderr == ""
+
+
+@pytest.mark.parametrize("failed_command", ["install", "login"])
+def test_failed_help_cannot_pass_by_printing_supported_options(failed_command):
+    result = shell(f"""proot-distro() {{
+  printf '%s\\n' '--name --isolated --bind --user --work-dir' >&2
+  [[ "$1" != {shlex.quote(failed_command)} ]]
+}}
+require_proot
+""")
+    assert result.returncode != 0
+    assert f"Could not inspect PRoot-Distro {failed_command} options" in result.stderr
+    assert "Update the proot-distro" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "missing", ["--name", "--isolated", "--bind", "--user", "--work-dir"]
+)
+def test_missing_proot_capability_is_still_rejected(missing):
+    install_options = "--name" if missing != "--name" else ""
+    login_options = " ".join(
+        option
+        for option in ["--isolated", "--bind", "--user", "--work-dir"]
+        if option != missing
+    )
+    result = shell(f"""proot-distro() {{
+  if [[ "$1" == install ]]; then printf '%s\\n' {shlex.quote(install_options)} >&2
+  else printf '%s\\n' {shlex.quote(login_options)} >&2; fi
+}}
+require_proot
+""")
+    assert result.returncode != 0
+    assert "OCI-capable" in result.stderr
+
+
 @pytest.mark.parametrize(
     "name", ["launcher.lock", "launcher.log", "status.json", "runner.tmp"]
 )

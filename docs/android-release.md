@@ -30,7 +30,7 @@ internet access; this release contains no provider credentials or local model.
    pkg install curl
    curl --fail --location --proto '=https' --tlsv1.2 \
      --output install-android.sh \
-     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.1/install-android.sh
+     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.2/install-android.sh
    ```
 
    Inspect the downloaded file, then run it:
@@ -42,7 +42,7 @@ internet access; this release contains no provider credentials or local model.
 The standalone installer embeds the exact release archive checksum and source
 commit. It verifies the download, complete file inventory and safe archive paths
 before extraction. It installs a new version directory under
-`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.1`, then delegates runtime
+`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.2`, then delegates runtime
 installation to that source's `./start.sh --android install`. Existing changed
 source is preserved and rejected rather than overwritten. A repeated install of
 the same unchanged version can repair an interrupted dependency installation;
@@ -50,8 +50,10 @@ it never resets databases or credentials.
 
 The runtime uses the dedicated PRoot-Distro alias `schemii-android`. An unrelated
 existing alias with that name is preserved and blocks installation. This preview
-requires the current OCI-capable PRoot-Distro 5.x CLI; an older distro-alias CLI
-is not silently substituted. Debian's default Node 20 is too old, so installation
+requires the current OCI-capable PRoot-Distro 5.x CLI (5.10.3 is compatible);
+an older distro-alias CLI is not silently substituted. Preview 2 fixes the preview 1 help-output check that
+wrongly rejected 5.10.3; rerun the new installer without uninstalling PRoot or
+removing its userland. Debian's default Node 20 is too old, so installation
 uses the separately verified Node 22.22.2 ARM64 archive.
 
 ## Configure and start
@@ -61,7 +63,7 @@ name, such as `moto-power.example-tailnet.ts.net`. Use the phone's name, not the
 desktop server's `omarchy` address. Then, from the printed release directory:
 
 ```bash
-cd "$HOME/.local/share/schemii/releases/android-v0.1.0-preview.1"
+cd "$HOME/.local/share/schemii/releases/android-v0.1.0-preview.2"
 ./start.sh --android configure \
   --tailnet-ip 100.X.Y.Z \
   --hostname moto-power.YOUR-TAILNET.ts.net

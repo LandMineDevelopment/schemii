@@ -39,9 +39,17 @@ require_termux() {
 require_proot() {
   command -v proot-distro >/dev/null || fail 'Run ./start.sh --android install first (proot-distro is missing).'
   local install_help login_help
-  install_help=$(proot-distro install --help)
-  login_help=$(proot-distro login --help)
-  [[ "$install_help" == *--name* && "$login_help" == *--isolated* && "$login_help" == *--bind* && "$login_help" == *--user* ]] || fail 'This preview requires the current OCI-capable PRoot-Distro 5.x CLI. Update the proot-distro Termux package, then rerun install; older distro-alias releases are unsupported.'
+  # PRoot-Distro 5.10.3 deliberately renders help on stderr, even on success.
+  # Inspect both streams without displaying pages of help during installation.
+  if ! install_help=$(proot-distro install --help 2>&1); then
+    fail 'Could not inspect PRoot-Distro install options. Run proot-distro install --help to inspect the failure.'
+    return 1
+  fi
+  if ! login_help=$(proot-distro login --help 2>&1); then
+    fail 'Could not inspect PRoot-Distro login options. Run proot-distro login --help to inspect the failure.'
+    return 1
+  fi
+  [[ "$install_help" == *--name* && "$login_help" == *--isolated* && "$login_help" == *--bind* && "$login_help" == *--user* && "$login_help" == *--work-dir* ]] || fail 'This preview requires the current OCI-capable PRoot-Distro 5.x CLI. Update the proot-distro Termux package, then rerun install; older distro-alias releases are unsupported.'
 }
 guest() {
   local guest_user=$1; shift
