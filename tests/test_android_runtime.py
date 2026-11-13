@@ -7,10 +7,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
 import time
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -135,8 +137,94 @@ def test_ingress_preserves_streaming_and_only_explicit_https_interfaces(runtime)
     assert "0.0.0.0" not in nginx and "127.0.0.11" not in nginx
     assert "proxy_buffering off" in nginx and "proxy_request_buffering off" in nginx
     assert "client_max_body_size 20m" in nginx and "client_max_body_size 0" in nginx
-    assert "proxy_set_header Host $http_host" in nginx
+    assert "proxy_set_header Host localhost;" in nginx
+    assert "proxy_set_header X-Forwarded-Host $http_host;" in nginx
     assert "@STATE@" not in nginx
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://localhost:8001",
+        "https://100.64.2.3:8001",
+        "https://phone.example.ts.net:8001",
+    ],
+)
+def test_configured_ingress_host_passes_readiness_and_secure_phone_auth(
+    runtime, monkeypatch, origin
+):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from schemii.common.api.middleware import install_api_middleware
+    from schemii.common.auth.middleware import AuthenticationMiddleware
+    from schemii.common.auth.routes import router as auth_router
+    from schemii.common.auth.service import AuthService
+
+    config = android.validate_config("100.64.2.3", "phone.example.ts.net")
+    runtime._write_runtime_config(config)
+    nginx = (runtime.state / "run/nginx.conf").read_text()
+    directive = re.search(r"^\s*proxy_set_header Host ([^;]+);", nginx, re.MULTILINE)
+    assert directive is not None
+    client_host = urlsplit(origin).netloc
+    proxy_host = directive[1]
+    if proxy_host == "$http_host":
+        proxy_host = client_host
+    monkeypatch.setenv(
+        "SCHEMII_TRUSTED_ORIGINS",
+        runtime._environment(config)["SCHEMII_TRUSTED_ORIGINS"],
+    )
+    application = FastAPI()
+    application.state.auth = AuthService(enabled=True, setup_token="test-setup")
+    application.include_router(auth_router)
+    application.add_middleware(AuthenticationMiddleware)
+    install_api_middleware(application)
+
+    @application.get("/api/v1/readiness")
+    def readiness():
+        return {"ready": True}
+
+    with TestClient(
+        application,
+        base_url=origin,
+        headers={
+            "Host": proxy_host,
+            "X-Forwarded-Host": client_host,
+            "Origin": origin,
+        },
+    ) as client:
+        # Preserve the backend's own rejection of untrusted direct Host values.
+        if urlsplit(origin).hostname != "localhost":
+            assert (
+                client.get(
+                    "/api/v1/readiness", headers={"Host": client_host}
+                ).status_code
+                == 400
+            )
+        response = client.get("/api/v1/readiness")
+        assert response.status_code == 200
+        assert response.json() == {"ready": True}
+        setup = client.post(
+            "/api/v1/auth/setup",
+            json={
+                "setup_token": "test-setup",
+                "username": "admin",
+                "display_name": "Admin",
+                "password": "test-password-long",
+            },
+        )
+        assert setup.status_code == 200
+        cookie = setup.headers["set-cookie"]
+        assert "Secure" in cookie and "HttpOnly" in cookie and "SameSite=lax" in cookie
+        assert "domain=" not in cookie.lower()
+        assert client.get("/api/v1/auth/me").status_code == 200
+        assert (
+            client.post(
+                "/api/v1/auth/logout", headers={"Origin": "https://untrusted.example"}
+            ).status_code
+            == 403
+        )
+        assert client.post("/api/v1/auth/logout").status_code == 200
 
 
 def test_cluster_uses_scram_loopback_and_keeps_durability(runtime, monkeypatch):

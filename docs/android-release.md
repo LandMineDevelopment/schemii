@@ -29,20 +29,20 @@ internet access; this release contains no provider credentials or local model.
    ```bash
    pkg install curl
    curl --fail --location --proto '=https' --tlsv1.2 \
-     --output install-android.sh \
-     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.3/install-android.sh
+     --output "$HOME/install-android.sh" \
+     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.4/install-android.sh
    ```
 
    Inspect the downloaded file, then run it:
 
    ```bash
-   bash install-android.sh
+   bash "$HOME/install-android.sh"
    ```
 
 The standalone installer embeds the exact release archive checksum and source
 commit. It verifies the download, complete file inventory and safe archive paths
 before extraction. It installs a new version directory under
-`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.3`, then delegates runtime
+`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.4`, then delegates runtime
 installation to that source's `./start.sh --android install`. Existing changed
 source is preserved and rejected rather than overwritten. A repeated install of
 the same unchanged version can repair an interrupted dependency installation;
@@ -58,10 +58,16 @@ selecting PRoot's built-in SysV IPC handling. This addresses the upstream
 [PostgreSQL initialization deadlock](https://github.com/termux/libandroid-shmem/issues/23)
 that matches the first phone's stalled `postgres --check` probe. All backend
 services stay in one foreground PRoot session because its IPC table is per
-session. Durability and PostgreSQL WAL/fsync settings remain enabled. Actual
-successful initialization on the phone is still pending. Debian's default
-Node 20 is too old, so installation uses the separately verified Node 22.22.2
-ARM64 archive.
+session. Durability and PostgreSQL WAL/fsync settings remain enabled. The Moto
+has completed both PostgreSQL initializations and application migrations;
+full durability, restore and availability acceptance remain pending. Debian's
+default Node 20 is too old, so installation uses the separately verified
+Node 22.22.2 ARM64 archive.
+
+Preview 4 corrects the HTTPS proxy Host header to match the backend's existing
+localhost allowlist, as the desktop proxy already does. This fixes the
+`400 Invalid host header` response for the phone's Tailscale address. TLS names
+and the explicit trusted browser origins remain the configured phone addresses.
 
 ## Configure and start
 
@@ -70,7 +76,7 @@ name, such as `moto-power.example-tailnet.ts.net`. Use the phone's name, not the
 desktop server's `omarchy` address. Then, from the printed release directory:
 
 ```bash
-cd "$HOME/.local/share/schemii/releases/android-v0.1.0-preview.3"
+cd "$HOME/.local/share/schemii/releases/android-v0.1.0-preview.4"
 ./start.sh --android configure \
   --tailnet-ip 100.X.Y.Z \
   --hostname moto-power.YOUR-TAILNET.ts.net
@@ -162,24 +168,17 @@ not full product acceptance. If startup stops, retain the failure and logs,
 inspect them locally, and report only sanitized
 diagnostics. Do not repeatedly reinstall or regenerate keys to clear an error.
 
-If preview 2 is stuck inside its first `initdb` check, download the preview 3
-installer as above, then run these commands **one at a time**:
+The older preview 2 shared-memory initialization hang cannot be reliably stopped
+through the guest because its native PRoot tracer can also be blocked. Automatic
+`--stop-only` recovery of that old hang is not validated on the Moto. A disposable
+first installation can be restarted from fresh Schemii state after Android Force
+stop ends the old Termux processes. Do not reset an installation containing user
+data; retain it and collect sanitized diagnostics.
 
-```bash
-bash install-android.sh --stop-only
-bash install-android.sh
-```
-
-Continue with installation only after the stop command succeeds. `--stop-only`
-verifies and extracts the new control code without installing dependencies. Its
-legacy recovery validates the saved supervisor identity, exact process ancestry,
-PostgreSQL executable and owned data path before requesting cancellation of an
-unfinished `initdb` and its `postgres --check` probe. A cluster with `pg_control`
-is excluded. `initdb` owns cleanup of its unfinished initialization; the launcher
-does not delete database directories or lock files. If ownership cannot be
-proved or graceful shutdown times out, preserve the state and report sanitized
-diagnostics. Do not remove the userland or kill processes by name. After successful
-installation, use the new version directory for `configure` and `start`.
+When upgrading a normally stopped installation, run the new version's installer
+before starting it. Node packages are installed in each version's source directory;
+extracting a new archive alone does not install them. Existing database state and
+configuration stay in the dedicated userland.
 
 The live state is inside the guest at
 `/home/schemii/.local/share/schemii`. It includes both PostgreSQL clusters, secrets,
