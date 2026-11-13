@@ -25,6 +25,12 @@ The launcher runs an authenticated private deployment with local accounts, per-p
 
 ## Installation
 
+For the experimental full backend on an ARM64 Android phone, use the
+[Android release guide](docs/android-release.md). That launcher runs the API,
+metadata and target PostgreSQL databases, AI sidecar, and HTTPS ingress inside a
+dedicated Termux/PRoot runtime. Physical-device acceptance is separate from
+desktop validation.
+
 Prerequisites are Git, Docker Engine with the Compose plugin, and OpenSSL. Demo, backup and recovery commands additionally require Python 3.10 or later on the host. On Linux, the account that starts the stack needs permission to use Docker. Optional local certificate trust for Chromium browsers needs `certutil` from `libnss3-tools`. Tailscale is optional and only needed for the private tailnet preview route.
 
 ```bash

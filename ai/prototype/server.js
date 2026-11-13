@@ -11,6 +11,14 @@ const statuses = { invalid_request: 400, unauthorized: 401, not_found: 404,
   busy: 429, body_too_large: 413, internal_error: 500 };
 const digest = value => createHash('sha256').update(value).digest();
 
+export function listenerHost(environment = process.env) {
+  const host = environment.SCHEMII_PI_HOST ?? '0.0.0.0';
+  if (!['127.0.0.1', '0.0.0.0'].includes(host)) {
+    throw new Error('SCHEMII_PI_HOST must be 127.0.0.1 or 0.0.0.0');
+  }
+  return host;
+}
+
 export function createHandler({ secret, service = createLoginService(), turns = new TurnService() }) {
   if (typeof secret !== 'string' || !secret.trim()) throw new Error('A sidecar password is required');
   const expected = digest(`Bearer ${secret.trim()}`);
@@ -102,9 +110,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     server.requestTimeout = 15_000;
     server.headersTimeout = 10_000;
     server.on('error', () => { process.stderr.write('Pi sidecar failed to start.\n'); process.exitCode = 1; });
-    server.listen(4097, '0.0.0.0');
+    server.listen(4097, listenerHost());
   } catch {
-    process.stderr.write('Pi sidecar password could not be loaded.\n');
+    process.stderr.write('Pi sidecar configuration could not be loaded.\n');
     process.exitCode = 1;
   }
 }
