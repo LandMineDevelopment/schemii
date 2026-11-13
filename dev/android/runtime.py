@@ -824,6 +824,7 @@ class Runtime:
                 "SCHEMER_PREVIEW_BYTES": "8388608",
                 "SCHEMER_DASHBOARD_PREVIEW_ROWS": "50000",
                 "SCHEMER_DASHBOARD_PREVIEW_BYTES": "16777216",
+                "SCHEMER_STREAM_SECONDS": "600",
             }
         )
         if self.tailnet_origin:
@@ -935,71 +936,70 @@ class Runtime:
             raise RuntimeFailure("Run schemii start first to begin tailnet enrollment")
         return self._tailnet_status(include_login=True)
 
-    def _start_tailnet(self) -> None:
-        config = self.tailnet_config()
-        if not config:
-            return
-        self._stage("tailnet enrollment")
-        private_directory(self.state / "tailnet")
-        (self.state / "run/tailnet.json").unlink(missing_ok=True)
-        self._spawn(
-            "tailnet",
-            [
-                str(self.source / "dev/android/bin/schemii-tailnet-proxy"),
-                "--state-dir",
-                str(self.state / "tailnet/node"),
-                "--status-file",
-                str(self.state / "run/tailnet.json"),
-                "--hostname",
-                config["hostname"],
-                "--upstream",
-                "https://127.0.0.1:8001",
-                "--upstream-ca",
-                str(self.state / "tls/ca.crt"),
-            ],
-            {
-                key: value
-                for key, value in os.environ.items()
-                if key
-                not in {
-                    "TS_AUTHKEY",
-                    "TS_AUTH_KEY",
-                    "TS_CLIENT_SECRET",
-                    "TS_CLIENT_ID",
-                    "TS_ID_TOKEN",
-                    "TS_AUDIENCE",
-                    "TSNET_FORCE_LOGIN",
-                    "TS_CONTROL_URL",
-                    "TS_LOGIN_SERVER",
-                    "TSNET_LOGIN_SERVER",
-                }
-            },
-        )
-        while not self.shutdown.is_set():
-            if self.children["tailnet"].poll() is not None:
-                raise RuntimeFailure(
-                    "Tailnet helper exited; inspect schemii logs tailnet"
-                )
-            status = self._tailnet_status()
-            if status.get("error"):
-                raise RuntimeFailure(status["error"])
-            if (
-                status.get("online") is True
-                and status.get("origin")
-                and status.get("ready") is True
-            ):
-                self.tailnet_origin = status["origin"]
-                return
-            self._record(
-                "login_pending"
-                if status.get("login_required")
-                or status.get("backend_state") == "NeedsMachineAuth"
-                else "starting"
+    def _native_owner_identity(self) -> dict | None:
+        record = read_json(self.state / "run/native-tailnet.json")
+        owner = record.get("owner")
+        arguments = record.get("owner_arguments", [])
+        source = record.get("source")
+        if not isinstance(owner, dict) or not isinstance(arguments, list):
+            return None
+        try:
+            valid = (
+                isinstance(source, str)
+                and is_current(owner)
+                and arguments == process_arguments(owner)
+                and arguments[-2:] == [source + "/dev/android/host.py", "run"]
+                and os.path.samefile(f"/proc/{owner['pid']}/cwd", self.source)
             )
-            self.shutdown.wait(0.3)
-        raise RuntimeFailure(
-            "Tailnet enrollment interrupted; identity and data preserved"
+        except (OSError, TypeError, KeyError):
+            valid = False
+        return owner if valid else None
+
+    def _native_tailnet_identity(self) -> dict | None:
+        record = read_json(self.state / "run/native-tailnet.json")
+        owner, proxy = self._native_owner_identity(), record.get("proxy")
+        if not owner or not isinstance(proxy, dict):
+            return None
+        valid = (
+            is_current(proxy)
+            and verified_parent_chain((owner, proxy))
+            and matching_executable(
+                proxy, self.source / "dev/android/bin/schemii-tailnet-proxy"
+            )
+            and process_arguments(proxy) == record.get("proxy_command")
         )
+        return proxy if valid else None
+
+    def _watch_native_owner(self, *, proxy: bool) -> None:
+        def watch_owner():
+            while not self.shutdown.wait(0.3):
+                identity = (
+                    self._native_tailnet_identity()
+                    if proxy
+                    else self._native_owner_identity()
+                )
+                if identity is None:
+                    self.shutdown.set()
+                    return
+
+        threading.Thread(target=watch_owner, daemon=True).start()
+
+    def _start_tailnet(self) -> None:
+        if not self.tailnet_config():
+            return
+        identity = self._native_tailnet_identity()
+        status = self._tailnet_status()
+        if (
+            not identity
+            or status.get("pid") != identity["pid"]
+            or status.get("online") is not True
+            or status.get("ready") is not True
+        ):
+            raise RuntimeFailure(
+                "Native tailnet proxy is not ready; use schemii start and schemii tailnet-login"
+            )
+        self.tailnet_origin = status["origin"]
+        self._watch_native_owner(proxy=True)
 
     def _write_runtime_config(self, config: dict) -> None:
         app_config = (self.source / "dev/schemii.toml").read_text()
@@ -1126,9 +1126,7 @@ class Runtime:
 
     def _tailnet_request(self, status: dict) -> bool:
         """Dial this live node directly; retain DNS Host/SNI and system-root TLS."""
-        identity = self.identities.get("tailnet") or read_json(
-            self.state / "run/status.json"
-        ).get("services", {}).get("tailnet")
+        identity = self.identities.get("tailnet") or self._native_tailnet_identity()
         if (
             status.get("online") is not True
             or status.get("ready") is not True
@@ -1202,6 +1200,7 @@ class Runtime:
                             name, {}
                         )
             try:
+                self._start_tailnet()
                 with self.recovery_lock(), self.lock():
                     self._assert_startable()
                     config = self.config()
@@ -1236,9 +1235,6 @@ class Runtime:
                     self._secrets()
                     self._stage("TLS certificates")
                     self._tls(config)
-                # Enrollment can await owner approval indefinitely. Do not hold
-                # the database recovery/lifecycle locks while waiting for it.
-                self._start_tailnet()
                 with self.recovery_lock(), self.lock():
                     self._stage("runtime configuration")
                     self._write_runtime_config(config)
@@ -1497,7 +1493,7 @@ class Runtime:
                 )
             self._stop_helper(status.get("helper"))
             self._stop_children(status.get("services", {}))
-            self.assert_stopped()
+            self.assert_stopped(include_native=False)
             if status:
                 status.update(state="stopped", ready=False, stopped_at=time.time())
                 write_private(
@@ -1505,7 +1501,13 @@ class Runtime:
                 )
             return {"state": "stopped", "ready": False}
 
-    def assert_stopped(self) -> None:
+    def assert_stopped(self, *, include_native: bool = True) -> None:
+        if include_native:
+            native = read_json(self.state / "run/native-tailnet.json")
+            if any(is_current(native.get(name)) for name in ("owner", "proxy")):
+                raise RuntimeFailure(
+                    "Native proxy or host owner is active; use schemii stop first"
+                )
         status = read_json(self.state / "run/status.json")
         identities = [
             status.get("supervisor"),
@@ -1576,6 +1578,9 @@ class Runtime:
             name: {**identity, "running": is_current(identity)}
             for name, identity in value.get("services", {}).items()
         }
+        if self.tailnet_config():
+            native = self._native_tailnet_identity()
+            services["tailnet"] = {**(native or {}), "running": native is not None}
         expected = set(SERVICES if self.tailnet_config() else BASE_SERVICES)
         tailnet = {"enabled": False}
         if self.tailnet_config():
@@ -1639,6 +1644,9 @@ class Runtime:
             "status": self.status(),
             "physical_device_acceptance": "pending",
             "security_profile": "trusted-owner",
+            "native_tailnet_verified": bool(self._native_tailnet_identity())
+            if self.tailnet_config()
+            else False,
             "pending": [
                 "authenticated API family acceptance",
                 "provider operation with owned credentials",
@@ -1806,11 +1814,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     subcommands.add_parser("tailnet-disable")
     subcommands.add_parser("tailnet-login")
+    subcommands.add_parser("prepare-tailnet", help=argparse.SUPPRESS)
     subcommands.add_parser("reset-password").add_argument("username")
     for command in ("run", "start", "stop", "status", "doctor", "assert-stopped"):
         subcommands.add_parser(command)
     logs = subcommands.add_parser("logs")
-    logs.add_argument("service", nargs="?", default="app", choices=(*SERVICES, "setup"))
+    logs.add_argument(
+        "service",
+        nargs="?",
+        default="app",
+        choices=(*SERVICES, "setup", "native-control"),
+    )
     for command in ("backup", "restore", "verify-backup", "export-ca", "credentials"):
         subcommands.add_parser(command).add_argument("path", type=Path)
     internal_bootstrap = subcommands.add_parser(
@@ -1828,6 +1842,16 @@ def main(argv: list[str] | None = None) -> int:
             result = runtime.configure_tailnet(None)
         elif args.command == "tailnet-login":
             result = runtime.tailnet_login()
+        elif args.command == "prepare-tailnet":
+            with runtime.recovery_lock(), runtime.lock():
+                runtime._assert_startable()
+                if runtime._native_owner_identity() is None:
+                    raise RuntimeFailure("Cannot verify the native startup owner")
+                runtime._watch_native_owner(proxy=False)
+                runtime._prepare()
+                runtime._secrets()
+                runtime._tls(runtime.config())
+            result = {"prepared": True}
         elif args.command in ("run", "start"):
             runtime.run()
             return 0

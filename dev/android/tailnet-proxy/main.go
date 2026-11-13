@@ -37,11 +37,15 @@ type config struct {
 	Hostname   string
 	Upstream   string
 	UpstreamCA string
+	DNSServer  string
 }
 
 var nodeName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func (c config) validate() (*url.URL, error) {
+	if _, err := vpnResolver(c.DNSServer); err != nil {
+		return nil, err
+	}
 	if !nodeName.MatchString(c.Hostname) {
 		return nil, errors.New("hostname must be a lowercase DNS label of at most 63 characters")
 	}
@@ -186,19 +190,21 @@ func startNode(server nodeStarter, directory string) error {
 }
 
 type status struct {
-	Schema           int      `json:"schema"`
-	PID              int      `json:"pid"`
-	BackendState     string   `json:"backend_state"`
-	Online           bool     `json:"online"`
-	Ready            bool     `json:"ready"`
-	Listening        bool     `json:"listening"`
-	CertificateReady bool     `json:"certificate_ready"`
-	Hostname         string   `json:"hostname"`
-	Origin           string   `json:"origin"`
-	TailnetIPs       []string `json:"tailnet_ips"`
-	LoginURL         string   `json:"login_url,omitempty"`
-	Error            string   `json:"error,omitempty"`
-	UpdatedAt        int64    `json:"updated_at"`
+	Schema             int      `json:"schema"`
+	PID                int      `json:"pid"`
+	BackendState       string   `json:"backend_state"`
+	StartupStage       string   `json:"startup_stage,omitempty"`
+	NetworkObservation string   `json:"network_observation,omitempty"`
+	Online             bool     `json:"online"`
+	Ready              bool     `json:"ready"`
+	Listening          bool     `json:"listening"`
+	CertificateReady   bool     `json:"certificate_ready"`
+	Hostname           string   `json:"hostname"`
+	Origin             string   `json:"origin"`
+	TailnetIPs         []string `json:"tailnet_ips"`
+	LoginURL           string   `json:"login_url,omitempty"`
+	Error              string   `json:"error,omitempty"`
+	UpdatedAt          int64    `json:"updated_at"`
 }
 
 type statusStore struct {
@@ -465,11 +471,14 @@ func run(ctx context.Context, cfg config) (returned error) {
 		return err
 	}
 	managedHost := ""
+	initializationFinished := true
 	defer func() {
 		// tsnet.Close runs before this finalizer, so certificate renewal can no
 		// longer replace a protected .crt with the library's public 0644 mode.
-		if err := protectManagedState(cfg.StateDir, managedHost); returned == nil && err != nil {
-			returned = err
+		if initializationFinished {
+			if err := protectManagedState(cfg.StateDir, managedHost); returned == nil && err != nil {
+				returned = err
+			}
 		}
 		_ = store.update(func(value *status) {
 			value.Listening, value.Online, value.CertificateReady, value.BackendState, value.LoginURL = false, false, false, "Stopped", ""
@@ -478,12 +487,42 @@ func run(ctx context.Context, cfg config) (returned error) {
 			}
 		})
 	}()
+	diagnostics := diagnosticLogger(os.Stderr)
+	if err := store.update(func(value *status) { value.StartupStage = "SDK initialization" }); err != nil {
+		return err
+	}
 	server := &tsnet.Server{Dir: cfg.StateDir, Hostname: cfg.Hostname,
-		UserLogf: func(string, ...any) {}, Logf: func(string, ...any) {}}
-	if err = startNode(server, cfg.StateDir); err != nil {
-		return errors.New("tailnet initialization failed; inspect the private node state")
+		UserLogf: diagnostics, Logf: diagnostics}
+	initializationFinished, err = initializeNode(ctx, func() error {
+		if err := store.update(func(value *status) {
+			value.StartupStage = "Android interface observation"
+			value.NetworkObservation = interfaceObservationMode
+		}); err != nil {
+			return err
+		}
+		if err := configureAndroidNetwork(cfg.DNSServer); err != nil {
+			return err
+		}
+		diagnostics("network observation configured: %s (IPv6-only underlay observation is unsupported)", interfaceObservationMode)
+		if err := store.update(func(value *status) { value.StartupStage = "SDK initialization" }); err != nil {
+			return err
+		}
+		return startNode(server, cfg.StateDir)
+	}, 20*time.Second)
+	if err != nil {
+		diagnostics("initialization failed: %v", err)
+		if ctx.Err() != nil {
+			return nil
+		}
+		return errors.New("tailnet SDK initialization failed; inspect its private startup stage and bounded diagnostics")
 	}
 	defer server.Close()
+	if ctx.Err() != nil {
+		return nil
+	}
+	if err := store.update(func(value *status) { value.StartupStage = "waiting for tailnet login or approval" }); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	client, err := server.LocalClient()
@@ -542,6 +581,10 @@ func run(ctx context.Context, cfg config) (returned error) {
 		return errors.New("enable HTTPS certificates for this node in the tailnet")
 	}
 	issuance, finishIssuance := context.WithTimeout(ctx, 90*time.Second)
+	if err := store.update(func(value *status) { value.StartupStage = "certificate issuance" }); err != nil {
+		finishIssuance()
+		return err
+	}
 	err = verifyPublicCertificate(issuance, client, cfg.StateDir, host, nil)
 	finishIssuance()
 	if err != nil {
@@ -593,6 +636,10 @@ func run(ctx context.Context, cfg config) (returned error) {
 		web.Close()
 		return err
 	}
+	if err := store.update(func(value *status) { value.StartupStage = "ready" }); err != nil {
+		web.Close()
+		return err
+	}
 	select {
 	case err = <-done:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -618,6 +665,7 @@ func main() {
 	flag.StringVar(&cfg.Hostname, "hostname", "schemii-phone", "requested dedicated node hostname")
 	flag.StringVar(&cfg.Upstream, "upstream", "https://127.0.0.1:8001", "existing local HTTPS ingress")
 	flag.StringVar(&cfg.UpstreamCA, "upstream-ca", "", "existing local ingress CA PEM")
+	flag.StringVar(&cfg.DNSServer, "dns-server", androidDNSServer, "connected Android Tailscale VPN DNS resolver")
 	version := flag.Bool("version", false, "report the pinned tailnet library version without starting")
 	flag.Parse()
 	if *version {

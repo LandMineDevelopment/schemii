@@ -125,6 +125,13 @@ and hostname. The descriptor's SSH destination remains the original Android VPN
 node; do not substitute the service hostname for SSH. Both identities remain
 independent of the desktop's Serve route.
 
+The trusted proxy runs natively in Termux; PostgreSQL, the application, Pi and
+nginx run in the existing Debian guest. The launcher owns both process trees.
+Do not move the proxy into PRoot: Android network inspection can hang there.
+Use `schemii doctor` to inspect the native identity verification and
+`schemii logs tailnet` for bounded private diagnostics. The proxy currently
+requires an IPv4 network and the Android Tailscale app's DNS resolver.
+
 The supported launcher owns enrollment and startup. If status reports
 `login_pending`, use the explicit `schemii tailnet-login` owner flow; databases
 and the other services start after approval. Never copy another node's state or

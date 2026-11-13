@@ -421,6 +421,11 @@ def test_runtime_environment_keeps_metadata_fence_and_secret_files(
     assert "https://phone.example.ts.net:8001" in env["SCHEMII_TRUSTED_ORIGINS"]
     assert "https://100.64.2.3:8001" in env["SCHEMII_TRUSTED_ORIGINS"]
     assert "omarchy" not in env["SCHEMII_TRUSTED_ORIGINS"]
+    assert env["SCHEMER_STREAM_SECONDS"] == "600"
+    assert env["SCHEMER_PREVIEW_ROWS"] == "10000"
+    assert env["SCHEMER_PREVIEW_BYTES"] == "8388608"
+    assert env["SCHEMER_DASHBOARD_PREVIEW_ROWS"] == "50000"
+    assert env["SCHEMER_DASHBOARD_PREVIEW_BYTES"] == "16777216"
 
 
 def test_tailnet_origin_is_explicit_and_legacy_origins_survive(runtime):
@@ -544,6 +549,7 @@ def test_tailnet_login_url_is_only_in_explicit_login_output(
         ),
     )
     monkeypatch.setattr(android, "is_current", lambda identity: bool(identity))
+    monkeypatch.setattr(runtime, "_native_tailnet_identity", lambda: {"pid": 124})
     status = runtime.status()
     assert status["state"] == "login_pending" and not status["ready"]
     assert status["tailnet"]["login_required"]
@@ -574,56 +580,45 @@ def test_tailnet_rejects_untrusted_origin_metadata(runtime, origin):
         runtime._tailnet_status()
 
 
-def test_tailnet_enrollment_waits_before_starting_other_services(
+def test_guest_uses_owned_ready_native_proxy_without_spawning_it(
     runtime, tmp_path, monkeypatch
 ):
     _enable_tailnet_fixture(runtime, tmp_path)
-    calls, states = [], []
-    path = runtime.state / "run/tailnet.json"
-
-    def spawn(name, command, env=None):
-        assert "TS_AUTHKEY" not in env and "TS_CONTROL_URL" not in env
-        calls.append((name, command))
-        runtime.children[name] = type("Child", (), {"poll": lambda self: None})()
-        android.write_private(
-            path,
-            json.dumps(
-                {
-                    "backend_state": "NeedsLogin",
-                    "online": False,
-                    "login_url": "https://login.tailscale.com/a/private-test",
-                }
-            ),
-        )
-
-    def approved(_seconds):
-        android.write_private(
-            path,
-            json.dumps(
-                {
-                    "backend_state": "Running",
-                    "online": True,
-                    "ready": True,
-                    "hostname": "schemii-phone.example.ts.net",
-                    "origin": "https://schemii-phone.example.ts.net",
-                }
-            ),
-        )
-
-    monkeypatch.setattr(runtime, "_spawn", spawn)
-    monkeypatch.setenv("TS_AUTHKEY", "ambient-test-key")
-    monkeypatch.setenv("TS_CONTROL_URL", "https://untrusted.example")
-    monkeypatch.setattr(runtime, "_record", lambda state: states.append(state))
-    monkeypatch.setattr(runtime.shutdown, "wait", approved)
-    runtime._start_tailnet()
-    assert states == ["login_pending"]
-    assert [name for name, _command in calls] == ["tailnet"]
-    command = calls[0][1]
-    assert command[command.index("--upstream") + 1] == "https://127.0.0.1:8001"
-    assert command[command.index("--upstream-ca") + 1] == str(
-        runtime.state / "tls/ca.crt"
+    android.write_private(
+        runtime.state / "run/tailnet.json",
+        json.dumps(
+            {
+                "pid": 42,
+                "online": True,
+                "ready": True,
+                "hostname": "schemii-phone.example.ts.net",
+                "origin": "https://schemii-phone.example.ts.net",
+            }
+        ),
     )
-    assert runtime.tailnet_origin == "https://schemii-phone.example.ts.net"
+    monkeypatch.setattr(runtime, "_native_tailnet_identity", lambda: {"pid": 42})
+    monkeypatch.setattr(
+        runtime, "_spawn", lambda *_args: pytest.fail("guest must not spawn native Go")
+    )
+    try:
+        runtime._start_tailnet()
+        assert runtime.tailnet_origin == "https://schemii-phone.example.ts.net"
+        assert not runtime.children
+    finally:
+        runtime.shutdown.set()
+
+
+def test_guest_refuses_unowned_native_proxy_before_starting(
+    runtime, tmp_path, monkeypatch
+):
+    _enable_tailnet_fixture(runtime, tmp_path)
+    monkeypatch.setattr(
+        runtime, "_spawn", lambda *_args: pytest.fail("guest must not spawn native Go")
+    )
+    with pytest.raises(
+        android.RuntimeFailure, match="Native tailnet proxy is not ready"
+    ):
+        runtime._start_tailnet()
 
 
 def test_tailnet_status_requires_six_live_services_and_public_https(
@@ -646,11 +641,13 @@ def test_tailnet_status_requires_six_live_services_and_public_https(
         "ready": True,
         "supervisor": {"pid": 1},
         "services": {
-            name: {"pid": index + 2} for index, name in enumerate(android.SERVICES)
+            name: {"pid": index + 2} for index, name in enumerate(android.BASE_SERVICES)
         },
     }
     android.write_private(runtime.state / "run/status.json", json.dumps(receipt))
     monkeypatch.setattr(android, "is_current", lambda identity: bool(identity))
+    native = [{"pid": 42}]
+    monkeypatch.setattr(runtime, "_native_tailnet_identity", lambda: native[0])
     calls = []
     monkeypatch.setattr(
         runtime, "_request", lambda url, **kwargs: calls.append((url, kwargs)) or True
@@ -664,8 +661,7 @@ def test_tailnet_status_requires_six_live_services_and_public_https(
     )
     assert runtime.status()["ready"]
     assert calls[-1] == ("https://schemii-phone.example.ts.net/api/v1/readiness", {})
-    receipt["services"].pop("tailnet")
-    android.write_private(runtime.state / "run/status.json", json.dumps(receipt))
+    native[0] = None
     assert not runtime.status()["ready"]
 
 

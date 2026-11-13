@@ -75,7 +75,17 @@ guest() {
     "${invocation[@]}" "$@"
   fi
 }
-runtime() { guest schemii /opt/schemii-venv/bin/python /opt/schemii/dev/android/runtime.py "$@"; }
+native_host() { [[ -f "$SCHEMII_ANDROID_ROOT/dev/android/host.py" ]] || return 1; python "$SCHEMII_ANDROID_ROOT/dev/android/host.py" "$@"; }
+native_mode() { native_host enabled; }
+native_active() { native_host active; }
+runtime() {
+  case "${1-}" in status|stop|tailnet-login)
+    if native_active || { native_mode && [[ -f "$SCHEMII_ANDROID_CONTROL/host.json" ]]; }; then
+      native_host "$@"; return
+    fi;;
+  esac
+  guest schemii /opt/schemii-venv/bin/python /opt/schemii/dev/android/runtime.py "$@"
+}
 require_owned() {
   local rootfs="$PREFIX/var/lib/proot-distro/containers/$SCHEMII_ANDROID_ALIAS/rootfs"
   [[ -d "$rootfs" && ! -L "$rootfs" ]] || fail 'The dedicated runtime is missing. Run ./start.sh --android install.'
@@ -93,6 +103,7 @@ try:
  names.extend(str(p.relative_to(root)) for p in sorted((root/"src").rglob("*")) if p.is_file() and "__pycache__" not in p.parts and p.suffix!=".pyc")
  for directory in (root/"dev/android/tailnet-proxy",root/"dev/android/bin"):
   names.extend(str(p.relative_to(root)) for p in sorted(directory.rglob("*")) if p.is_file())
+ if (root/"dev/android/host.py").is_file(): names.append("dev/android/host.py")
  valid=set(names)==set(expected) and all(hashlib.sha256((root/name).read_bytes()).hexdigest()==expected[name] for name in names)
 except (OSError,ValueError,KeyError,TypeError):
  valid=False
@@ -103,7 +114,7 @@ if not valid:
 }
 safe_control_paths() {
   local name
-  for name in launcher.lock launcher.log launcher.log.1 runner.json runner.tmp status.json; do
+  for name in launcher.lock launcher.log launcher.log.1 runner.json runner.tmp status.json host.json; do
     [[ ! -L "$SCHEMII_ANDROID_CONTROL/$name" && ( ! -e "$SCHEMII_ANDROID_CONTROL/$name" || -f "$SCHEMII_ANDROID_CONTROL/$name" ) ]] || fail "Control file is not a regular owned file: $name"
   done
 }
@@ -257,7 +268,7 @@ install_runtime() {
   fi
   # Conflicting user files must be reported before package or runtime changes.
   manage_cli check
-  pkg install -y proot-distro python curl tar coreutils util-linux
+  pkg install -y proot-distro python curl tar coreutils util-linux ca-certificates
   require_proot
   host_running && fail 'The backend supervisor is running. Stop it before installing or updating.'
   if [[ -e "$rootfs" ]]; then
@@ -302,13 +313,18 @@ start_runtime() {
   fi
   command -v termux-wake-lock >/dev/null && termux-wake-lock
   # All guest services remain children of one foreground PRoot session.
-  nohup proot-distro login --isolated --user schemii \
+  if native_mode; then
+    nohup python "$SCHEMII_ANDROID_ROOT/dev/android/host.py" run \
+      </dev/null >>"$logfile" 2>&1 9>&- &
+  else
+    nohup proot-distro login --isolated --user schemii \
     --env PROOT_DONT_SHARE_LIBANDROID_SHMEM=1 \
     --bind "$SCHEMII_ANDROID_ROOT:/opt/schemii" \
     --bind "$SCHEMII_ANDROID_CONTROL:/mnt/schemii-control" \
     --work-dir /opt/schemii "$SCHEMII_ANDROID_ALIAS" -- \
     /opt/schemii-venv/bin/python /opt/schemii/dev/android/runtime.py run \
     </dev/null >>"$logfile" 2>&1 9>&- &
+  fi
   local runner=$!
   record_runner "$runner"
   printf 'Starting Android services; waiting for verified HTTPS readiness (up to 180 seconds).\n'
@@ -395,6 +411,7 @@ main() {
   require_proot
   require_owned
   case "$action" in start|restart|configure|enable-boot|tailnet-enable) require_installed_source;; esac
+  if [[ "$action" == backup ]] && native_active; then stop_runtime || return; fi
   case "$action" in
     start) start_runtime "$@";;
     stop) stop_runtime "$@";;

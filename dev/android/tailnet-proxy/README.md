@@ -8,6 +8,10 @@ It does not expose unmatched ports, provide a SOCKS proxy, or enable Funnel.
 Use the supported `schemii` / `start.sh --android` lifecycle to configure and run
 it. The runtime owns startup order, allowed application hosts/origins and full
 HTTPS readiness. Do not launch a second helper against the same retained state.
+The static helper runs **natively in Termux**, while PostgreSQL and the application
+remain in the dedicated Debian guest. PRoot's network-query emulation can stall
+the SDK; running this no-TUN component natively keeps Android's immediate
+permission errors and the SDK's supported polling path.
 
 The first run creates a separate persistent Tailscale node. The owner completes
 its normal login URL once and may need node approval under their tailnet policy.
@@ -23,8 +27,32 @@ schemii-tailnet-proxy \
   --status-file PRIVATE_STATE/run/tailnet.json \
   --hostname schemii-phone \
   --upstream https://127.0.0.1:8001 \
-  --upstream-ca PRIVATE_STATE/tls/ca.crt
+  --upstream-ca PRIVATE_STATE/tls/ca.crt \
+  --dns-server 100.100.100.100:53
 ```
+
+These are physical Termux-private paths, including paths into the retained
+rootfs. The host launcher supplies `PREFIX` and
+`SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem`, the maintained public Termux CA bundle.
+The helper refuses a guest UID or a different public-root file. The retained
+Schemii CA is used only by its separate loopback upstream transport.
+
+Before SDK initialization, the `android-ipv4-ioctl` adapter reads real configured
+IPv4 names, addresses, interface indices, flags, MTUs and netmasks using permitted
+kernel ioctls. Its non-nil `AltAddrs` bypasses the blocked `net.Interface.Addrs`
+path through the SDK's public registration hook. It refuses incomplete/ambiguous
+metadata and never substitutes invented interfaces, addresses or routes.
+IPv6-only interface observation is unsupported; overlay IPv6 can still travel
+over an IPv4 WireGuard connection. Current device acceptance requires active
+IPv4 connectivity and the Android Tailscale VPN connected.
+
+DNS uses the VPN's actual `100.100.100.100:53` resolver through Go's process-local
+resolver and the SDK's separately initialized forwarding cache, both configured
+before `Start`. It changes no OS resolver file and adds no ambient resolver
+fallback; the pinned SDK retains its own normal bootstrap behavior. Linux
+namespace socket marks/interface binding are disabled through the SDK's public
+API because this embedded node creates no host TUN or policy routes. Android's
+kernel and VPN own the real socket routing.
 
 The upstream is deliberately fixed to loopback HTTPS on port 8001. Its explicit
 CA pool and `localhost` TLS server name verify the retained ingress certificate;
@@ -34,7 +62,8 @@ immediately. Existing nginx request/COPY limits remain authoritative.
 
 The private status file is atomically replaced with mode 0600. It reports schema
 1, `pid`, `backend_state`, `online`, `listening`, `certificate_ready`, `ready`,
-`hostname`, `origin`, `tailnet_ips`, `updated_at`, and optional `login_url`/`error`.
+`hostname`, `origin`, `tailnet_ips`, `updated_at`, and optional `login_url`/`error`,
+`startup_stage` and `network_observation`.
 The requested name can be changed by Tailscale to avoid a collision: consumers
 must use the authenticated `hostname` and `origin`, not infer them from a label.
 
@@ -48,8 +77,9 @@ returns actionable errors; tsnet owns cached certificates and later renewal.
 Status is written on a change or every 30 seconds, avoiding continuous fsync
 churn. The login URL is private operational data. Do not expose it through an
 unauthenticated API, public status page, Git or a release. The helper ignores
-verbose user/backend log callbacks; Tailscale's own standard log upload and
-bounded private log buffers remain library behavior. Authentication environment
+routine SDK messages; useful SDK initialization/network failures are sanitized
+and capped at 16 KiB per process. Tailscale's own standard log upload and bounded
+private log buffers remain library behavior. Authentication environment
 overrides are rejected; the supported enrollment flow is interactive login.
 
 Both node/state directories are private; inherited process umask is 0077. An
@@ -62,6 +92,10 @@ unsupported certificate/key names are rejected. Good private identity bytes are
 kept unchanged.
 On SIGTERM/SIGINT, HTTP requests get up to ten seconds to finish before close;
 tsnet then closes and a final stopped status is written.
+SDK initialization has a 20-second deadline and responds to cancellation. If a
+kernel call blocks inside `Start`, main exits this helper process after recording
+the failed stage; it does not call `Close` concurrently with unfinished SDK
+initialization, retry enrollment or leave SIGTERM waiting indefinitely.
 
 ## Backup boundary
 
@@ -88,8 +122,10 @@ go version -m OUTPUT
 
 Tests cover target/path validation, symlink refusal, node exclusivity, status
 permissions/transitions, actual DNS identity, verified upstream CA and hostname,
-forwarded security context, host rejection, streaming and public certificate
-preflight. They create only disposable unit fixtures and never enroll a node.
+forwarded security context, host rejection, streaming, public certificate
+preflight, actual ioctl observation under denied netlink/proc access, explicit
+resolver wiring, initialization cancellation/deadline and bounded diagnostics.
+They create only disposable unit fixtures and never enroll a node.
 Actual Android operation, owner login, public-chain HTTPS, negative port probes,
 and full-stack restart require separately recorded device acceptance.
 

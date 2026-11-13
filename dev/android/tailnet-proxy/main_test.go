@@ -33,7 +33,7 @@ func validConfig(t *testing.T) config {
 	t.Helper()
 	root := t.TempDir()
 	return config{StateDir: filepath.Join(root, "node"), StatusFile: filepath.Join(root, "run", "tailnet.json"),
-		Hostname: "schemii-phone", Upstream: "https://127.0.0.1:8001", UpstreamCA: filepath.Join(root, "ca.crt")}
+		Hostname: "schemii-phone", DNSServer: androidDNSServer, Upstream: "https://127.0.0.1:8001", UpstreamCA: filepath.Join(root, "ca.crt")}
 }
 
 func TestConfigurationRejectsUnsafeTargetsAndPaths(t *testing.T) {

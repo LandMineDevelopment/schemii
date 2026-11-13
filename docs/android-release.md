@@ -20,6 +20,10 @@ standard backend. Each tile remains capped at 10,000 rows and 8 MiB, and the
 complete dashboard remains capped at 16 MiB. This lets several detail tables
 display their previews without the first table exhausting the dashboard's row
 budget; larger results still stop at the applicable row or byte limit.
+Android preview streaming allows 600 seconds of processing, based on the measured
+phone workload exceeding the desktop's 120-second deadline. Row and byte caps,
+cancellation behavior and the result TTL are unchanged; the deadline remains
+below the 900-second result/ingress window. Desktop streaming stays at 120 seconds.
 
 ## Install the versioned release
 
@@ -36,7 +40,7 @@ budget; larger results still stop at the applicable row or byte limit.
    pkg install curl
    curl --fail --location --proto '=https' --tlsv1.2 \
      --output "$HOME/install-android.sh" \
-     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.8/install-android.sh
+     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.9/install-android.sh
    ```
 
    Inspect the downloaded file, then run it:
@@ -48,7 +52,7 @@ budget; larger results still stop at the applicable row or byte limit.
 The standalone installer embeds the exact release archive checksum and source
 commit. It verifies the download, complete file inventory and safe archive paths
 before extraction. It installs a new version directory under
-`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.8`, then delegates runtime
+`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.9`, then delegates runtime
 installation to that source's `./start.sh --android install`. After dependency
 installation succeeds, it installs the global `schemii` command and points the
 visible `~/schemii` folder to that version. Existing changed source is preserved
@@ -141,10 +145,16 @@ address. Startup before the VPN exists fails visibly instead of widening the bin
 
 ## Automatic trusted tailnet HTTPS
 
-Preview 8 adds an optional on-phone `tsnet` proxy, using the official pinned
+Preview 9 runs the optional on-phone `tsnet` proxy natively in Termux, using the official pinned
 Tailscale library. It enrolls a **separate node** named `schemii-phone`; it does
 not extract or reuse the Android Tailscale app's credentials. Keep that app
 connected for the existing phone endpoint and SSH. The desktop is not a proxy.
+The native host supervisor owns both this proxy and the five-service Debian
+backend. The proxy stays outside PRoot: actual device testing found a PRoot
+netlink emulation hang before enrollment. It reads real interfaces through the
+SDK's supported adapter, uses the existing Android VPN's DNS endpoint within its
+own process, and trusts Termux's maintained public CA bundle. No global resolver
+file, additional APK or desktop route is changed.
 
 After installation and the usual phone address configuration above, run:
 
@@ -197,6 +207,13 @@ Disabling preserves node identity and certificate state. Re-enabling with the
 same hostname reuses it. Do not edit installed source or launch the proxy outside
 the supported lifecycle. Android background, battery and VPN recovery limits
 still require device validation.
+`schemii doctor` reports whether the guest can verify the native proxy's birth
+identity, parent chain and executable through the mounted release. A failure
+stops guest startup; it never adopts a PID from the helper's status alone.
+Stop and restart own both process groups. If the native owner dies, the proxy
+receives a parent-death signal and the guest shuts down its services when it
+loses the verified owner. Existing database keys and node state remain private
+at the same retained paths inside the dedicated rootfs.
 
 ## Legacy certificate trust and the first account
 

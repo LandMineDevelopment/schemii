@@ -54,6 +54,25 @@ def test_start_returns_actionable_auth_pending_without_waiting_or_login_url(tmp_
     assert "https://login." not in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("stop_result", [0, 7])
+def test_native_backup_stops_complete_owner_before_guest_snapshot(
+    tmp_path, stop_result
+):
+    record = tmp_path / "actions"
+    result = shell(
+        "require_termux() { :; }; require_proot() { :; }; require_owned() { :; }\n"
+        "native_active() { return 0; }\n"
+        f'stop_runtime() {{ printf "stop\\n" >> {shlex.quote(str(record))}; return {stop_result}; }}\n'
+        f'runtime() {{ printf "%s\\n" "$1" >> {shlex.quote(str(record))}; }}\n'
+        "main backup /private/backup",
+        env={"HOME": str(tmp_path)},
+    )
+    assert result.returncode == stop_result
+    assert record.read_text().splitlines() == (
+        ["stop", "backup"] if stop_result == 0 else ["stop"]
+    )
+
+
 @pytest.mark.parametrize("arguments", [["kasey"], ["--", "-abc"]])
 def test_password_recovery_refuses_non_tty_before_touching_home(tmp_path, arguments):
     result = subprocess.run(

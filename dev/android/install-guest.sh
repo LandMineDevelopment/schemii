@@ -25,6 +25,7 @@ files=['constraints.docker.txt','pyproject.toml','ai/prototype/package-lock.json
 files.extend(str(path.relative_to(root)) for path in sorted((root/'src').rglob('*')) if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc')
 for directory in (root/'dev/android/tailnet-proxy',root/'dev/android/bin'):
     files.extend(str(path.relative_to(root)) for path in sorted(directory.rglob('*')) if path.is_file())
+if (root/'dev/android/host.py').is_file(): files.append('dev/android/host.py')
 record={'format':'schemii-android-install-v1','debian':'13','architecture':'arm64',
         'postgresql_major':17,'python_minor':'3.13','node':'22.22.2',
         'image':'debian:trixie-slim@sha256:24a01011d10eba3a023bc8585b9650b8b29021240d4217c05b905e09ef4a5232',
