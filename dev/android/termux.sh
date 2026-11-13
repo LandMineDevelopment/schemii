@@ -17,6 +17,7 @@ Usage: schemii COMMAND [ARGUMENTS]
   doctor                         Inspect runtime dependencies and device checks
   logs [SERVICE]                 Read bounded private logs
   export-ca DEST | credentials DEST  Export CA or private setup references
+  reset-password USERNAME         Recover an enabled account at hidden prompts
   verify-backup DIRECTORY         Verify a private backup without restoring
   backup DIRECTORY               Make a private cold backup (stops the backend)
   restore DIRECTORY              Restore only into a fresh empty runtime state
@@ -351,7 +352,13 @@ main() {
   local action=${1:---help}
   case "$action" in --help|-h|help) usage; return;; esac
   shift
-  case "$action" in install|configure|start|stop|restart|status|doctor|logs|backup|restore|verify-backup|export-ca|credentials|enable-boot|disable-boot) ;; *) fail "Unknown command: $action"; return 1;; esac
+  case "$action" in install|configure|start|stop|restart|status|doctor|logs|backup|restore|verify-backup|export-ca|credentials|reset-password|enable-boot|disable-boot) ;; *) fail "Unknown command: $action"; return 1;; esac
+  if [[ "$action" == reset-password ]]; then
+    if ! { (($# == 1)) || { (($# == 2)) && [[ "$1" == -- ]]; }; }; then
+      fail 'Usage: schemii reset-password [--] USERNAME; enter the password only at the hidden prompts.' || return 2
+    fi
+    [[ -t 0 ]] || { fail 'Password recovery requires an interactive Termux terminal; do not pipe or redirect input.'; return 1; }
+  fi
   SCHEMII_ANDROID_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
   require_termux
   SCHEMII_ANDROID_CONTROL="$HOME/.local/share/schemii-android"

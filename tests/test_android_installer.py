@@ -36,7 +36,88 @@ def test_help_has_no_install_or_control_directory_side_effect(tmp_path: Path) ->
     )
     assert result.returncode == 0
     assert "configure --tailnet-ip" in result.stdout
+    assert "reset-password USERNAME" in result.stdout
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("arguments", [["kasey"], ["--", "-abc"]])
+def test_password_recovery_refuses_non_tty_before_touching_home(tmp_path, arguments):
+    result = subprocess.run(
+        ["bash", str(WRAPPER), "reset-password", *arguments],
+        input="private-input-test\n",
+        env={**os.environ, "HOME": str(tmp_path), "PREFIX": ""},
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0
+    assert "interactive Termux terminal" in result.stderr
+    assert "private-input-test" not in result.stdout + result.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_password_recovery_does_not_echo_extra_password_argument(tmp_path):
+    result = subprocess.run(
+        ["bash", str(WRAPPER), "reset-password", "kasey", "private-argument-test"],
+        env={**os.environ, "HOME": str(tmp_path), "PREFIX": ""},
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "hidden prompts" in result.stderr
+    assert "private-argument-test" not in result.stdout + result.stderr
+
+
+def test_password_recovery_forwards_terminal_and_username_to_guest(tmp_path):
+    import pty
+    import select
+
+    executable = tmp_path / "proot-distro"
+    executable.write_text(
+        f"#!{sys.executable}\nimport sys,json; "
+        "print(json.dumps({'tty':sys.stdin.isatty(),'args':sys.argv[1:]}))\n"
+    )
+    executable.chmod(0o700)
+    code = (
+        f"source {shlex.quote(str(WRAPPER))}\n"
+        "require_termux() { :; }; require_proot() { :; }; require_owned() { :; }\n"
+        "main reset-password -- -abc"
+    )
+    master, slave = pty.openpty()
+    process = subprocess.Popen(
+        ["bash", "-c", code],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env={
+            **os.environ,
+            "HOME": str(tmp_path),
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        },
+    )
+    os.close(slave)
+    output = bytearray()
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                try:
+                    chunk = os.read(master, 8192)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output.extend(chunk)
+            elif process.poll() is not None:
+                break
+        assert process.wait(timeout=2) == 0, output.decode(errors="replace")
+        forwarded = json.loads(output)
+        assert forwarded["tty"] is True
+        assert forwarded["args"][-3:] == ["reset-password", "--", "-abc"]
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+        os.close(master)
 
 
 def test_desktop_install_fails_before_touching_home(tmp_path: Path) -> None:

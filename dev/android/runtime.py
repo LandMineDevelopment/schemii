@@ -12,6 +12,7 @@ import argparse
 import base64
 from contextlib import contextmanager
 import fcntl
+import getpass
 import importlib
 import ipaddress
 import json
@@ -29,6 +30,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import warnings
 
 
 DEFAULT_STATE = Path("/home/schemii/.local/share/schemii")
@@ -1416,14 +1418,131 @@ class Runtime:
         write_new_private(destination, json.dumps(value, indent=2) + "\n")
         return {"credentials_file": str(destination), "sensitive": True}
 
+    def _password_reset_store(self):
+        import psycopg
+        from psycopg.rows import dict_row
+        from schemii.common.auth.store import AuthStore
+
+        def connect():
+            return psycopg.connect(
+                host="127.0.0.1",
+                port=5433,
+                dbname="schemii",
+                user="schemii_metadata_app",
+                password=self._secret("metadata_app_password"),
+                connect_timeout=5,
+                options="-c statement_timeout=30000 -c lock_timeout=5000",
+                row_factory=dict_row,
+            )
+
+        return AuthStore(connect)
+
+    def reset_password(self, username: str) -> dict:
+        """Recover an existing enabled account through this device's terminal."""
+        if not sys.stdin.isatty():
+            raise RuntimeFailure(
+                "Password recovery requires an interactive Termux terminal; "
+                "run schemii reset-password USERNAME without pipes or redirects"
+            )
+        if not re.fullmatch(r"[a-zA-Z0-9_.@-]{3,64}", username):
+            raise RuntimeFailure("Enter an existing account username")
+        username = username.casefold()
+        import psycopg
+        from schemii.common.auth.service import password_hash
+
+        store = self._password_reset_store()
+        try:
+            # Close this read transaction before terminal input or expensive
+            # password work; never hold the authentication write lock at a prompt.
+            with store.transaction() as state:
+                account = next(
+                    (
+                        user
+                        for user in state["users"].values()
+                        if user["username"] == username
+                    ),
+                    None,
+                )
+                if account is None or account["disabled"]:
+                    raise RuntimeFailure(
+                        "Password recovery requires an existing enabled account"
+                    )
+                user_id = account["id"]
+            try:
+                with warnings.catch_warnings():
+                    # getpass must not fall back to echoing a password.
+                    warnings.simplefilter("error", getpass.GetPassWarning)
+                    password = getpass.getpass("New password: ")
+                    confirmation = getpass.getpass("Confirm new password: ")
+            except (getpass.GetPassWarning, EOFError, KeyboardInterrupt):
+                raise RuntimeFailure(
+                    "Password recovery cancelled; hidden terminal input is required"
+                ) from None
+            if not 12 <= len(password) <= 256:
+                raise RuntimeFailure("Use a password between 12 and 256 characters")
+            if password != confirmation:
+                raise RuntimeFailure("Passwords did not match; account unchanged")
+            hashed = password_hash(password)
+            password = confirmation = ""
+            with store.transaction(write=True) as state:
+                account = state["users"].get(user_id)
+                if (
+                    account is None
+                    or account["disabled"]
+                    or account["username"] != username
+                ):
+                    raise RuntimeFailure(
+                        "Account changed during recovery; no reset was applied"
+                    )
+                account["password_hash"] = hashed
+                previous_count = len(state["sessions"])
+                state["sessions"] = {
+                    key: session
+                    for key, session in state["sessions"].items()
+                    if session["user_id"] != user_id
+                }
+                revoked = previous_count - len(state["sessions"])
+                state["attempts"].pop(username, None)
+                state["audit"].append((None, "account.password.reset.local", user_id))
+            return {
+                "password_reset": True,
+                "username": username,
+                "sessions_revoked": revoked,
+            }
+        except psycopg.Error:
+            raise RuntimeFailure(
+                "Local metadata is unavailable or the reset could not be confirmed. "
+                "Run schemii start, then retry password recovery"
+            ) from None
+
 
 def main(argv: list[str] | None = None) -> int:
     os.umask(0o077)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if (
+        arguments
+        and arguments[0] == "reset-password"
+        and not (
+            (
+                len(arguments) == 2
+                and (
+                    not arguments[1].startswith("-") or arguments[1] in ("-h", "--help")
+                )
+            )
+            or (len(arguments) == 3 and arguments[1] == "--")
+        )
+    ):
+        print(
+            "Usage: schemii reset-password USERNAME; enter the password only at the hidden prompts",
+            file=sys.stderr,
+        )
+        return 2
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
     configure = subcommands.add_parser("configure")
     configure.add_argument("--tailnet-ip", required=True)
     configure.add_argument("--hostname", required=True)
+    subcommands.add_parser("reset-password").add_argument("username")
     for command in ("run", "start", "stop", "status", "doctor", "assert-stopped"):
         subcommands.add_parser(command)
     logs = subcommands.add_parser("logs")
@@ -1434,7 +1553,7 @@ def main(argv: list[str] | None = None) -> int:
         "internal-bootstrap", help=argparse.SUPPRESS
     )
     internal_bootstrap.add_argument("cluster", choices=("metadata", "target"))
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     runtime = Runtime()
     try:
         if args.command == "configure":
@@ -1477,6 +1596,8 @@ def main(argv: list[str] | None = None) -> int:
             result = runtime.export_ca(args.path)
         elif args.command == "credentials":
             result = runtime.credentials(args.path)
+        elif args.command == "reset-password":
+            result = runtime.reset_password(args.username)
         else:
             import recovery
 

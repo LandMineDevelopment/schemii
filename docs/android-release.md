@@ -30,7 +30,7 @@ internet access; this release contains no provider credentials or local model.
    pkg install curl
    curl --fail --location --proto '=https' --tlsv1.2 \
      --output "$HOME/install-android.sh" \
-     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.5/install-android.sh
+     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.6/install-android.sh
    ```
 
    Inspect the downloaded file, then run it:
@@ -42,7 +42,7 @@ internet access; this release contains no provider credentials or local model.
 The standalone installer embeds the exact release archive checksum and source
 commit. It verifies the download, complete file inventory and safe archive paths
 before extraction. It installs a new version directory under
-`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.5`, then delegates runtime
+`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.6`, then delegates runtime
 installation to that source's `./start.sh --android install`. After dependency
 installation succeeds, it installs the global `schemii` command and points the
 visible `~/schemii` folder to that version. Existing changed source is preserved
@@ -178,6 +178,29 @@ is `127.0.0.1`, port `5434`, database `schemii`, with the restricted
 your browser is on another device. Do not attach this file or `.schemii/` to an
 issue, screenshot, chat or release. The metadata password is not a target
 connection, and the metadata endpoint is intentionally blocked by target policy.
+
+## Recover a forgotten account password
+
+On the hosting phone, open Termux and use the local operator command:
+
+```bash
+schemii start
+schemii reset-password kasey
+```
+
+Replace `kasey` with the existing account's username. Enter the new password at
+the two hidden prompts; use 12–256 characters. Do not put a password after the
+command, pipe it in, or send it in chat. The command requires a real terminal
+and a running local metadata database. It does not start a temporary database
+or expose a password-reset endpoint over HTTP.
+For a username beginning with a hyphen, use `schemii reset-password -- -username`.
+
+Recovery changes only that enabled account's password, clears its login lockout
+attempts and revokes its existing sessions. It preserves the username, account
+privileges, database data, models and reports, and records a local-reset audit
+event. Unknown or disabled accounts are refused. After success, refresh the
+phone's tailnet login page and sign in with the new password; other sessions for
+that account must sign in again. No server restart or database reset is needed.
 
 ## Operate and recover
 

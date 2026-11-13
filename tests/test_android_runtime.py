@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
+from copy import deepcopy
 import importlib.util
 import json
 import os
@@ -29,6 +31,288 @@ def runtime(tmp_path):
     instance = android.Runtime(tmp_path / "state")
     instance._prepare()
     return instance
+
+
+@pytest.fixture
+def reset_account(runtime, monkeypatch):
+    from schemii.common.auth.service import password_hash
+    from schemii.common.auth.store import AuthStore
+
+    store = AuthStore()
+    store.state["users"] = {
+        "owner": {
+            "id": "owner",
+            "username": "kasey",
+            "display_name": "Owner",
+            "is_admin": True,
+            "disabled": False,
+            "password_hash": password_hash("old-password-test"),
+        },
+        "other": {
+            "id": "other",
+            "username": "other",
+            "display_name": "Other",
+            "is_admin": False,
+            "disabled": False,
+            "password_hash": "unrelated hash",
+        },
+    }
+    store.state["sessions"] = {
+        "owner-one": {"user_id": "owner", "expires_at": 9999999999},
+        "owner-two": {"user_id": "owner", "expires_at": 9999999999},
+        "other": {"user_id": "other", "expires_at": 9999999999},
+    }
+    store.state["attempts"] = {
+        "kasey": {"attempts": 10, "expires_at": 9999999999},
+        "other": {"attempts": 2, "expires_at": 9999999999},
+    }
+    store.state["roles"] = {"role": {"user_ids": ["owner", "other"]}}
+    calls = []
+    original = store.transaction
+
+    @contextmanager
+    def transaction(write=False):
+        calls.append(write)
+        with original(write=write) as state:
+            yield state
+
+    monkeypatch.setattr(store, "transaction", transaction)
+    monkeypatch.setattr(runtime, "_password_reset_store", lambda: store)
+    monkeypatch.setattr(android.sys.stdin, "isatty", lambda: True)
+    return store, calls
+
+
+@pytest.mark.parametrize("is_admin", [False, True])
+def test_local_password_reset_reuses_hash_and_revokes_only_target_auth(
+    runtime, reset_account, monkeypatch, capsys, is_admin
+):
+    from schemii.common.auth.service import password_matches
+
+    store, calls = reset_account
+    store.state["users"]["owner"]["is_admin"] = is_admin
+    before = deepcopy(store.state)
+    prompts = []
+
+    def prompt(label):
+        assert calls == [False]
+        prompts.append(label)
+        return "new-hidden-test-password"
+
+    monkeypatch.setattr(android.getpass, "getpass", prompt)
+    result = runtime.reset_password("Kasey")
+    assert result == {
+        "password_reset": True,
+        "username": "kasey",
+        "sessions_revoked": 2,
+    }
+    assert calls == [False, True] and len(prompts) == 2
+    changed = store.state["users"]["owner"]
+    assert password_matches("new-hidden-test-password", changed["password_hash"])
+    assert not password_matches("old-password-test", changed["password_hash"])
+    assert {k: v for k, v in changed.items() if k != "password_hash"} == {
+        k: v for k, v in before["users"]["owner"].items() if k != "password_hash"
+    }
+    assert store.state["users"]["other"] == before["users"]["other"]
+    assert store.state["roles"] == before["roles"]
+    assert store.state["sessions"] == {"other": before["sessions"]["other"]}
+    assert store.state["attempts"] == {"other": before["attempts"]["other"]}
+    assert store.state["audit"][-1] == (None, "account.password.reset.local", "owner")
+    assert "new-hidden-test-password" not in str(result)
+    assert "new-hidden-test-password" not in "".join(capsys.readouterr())
+
+
+@pytest.mark.parametrize(
+    "values,message",
+    [
+        (["short", "short"], "between 12 and 256"),
+        (["x" * 257, "x" * 257], "between 12 and 256"),
+        (["first-test-password", "different-test-password"], "did not match"),
+    ],
+)
+def test_invalid_hidden_password_does_not_open_write_transaction(
+    runtime, reset_account, monkeypatch, values, message
+):
+    store, calls = reset_account
+    before = deepcopy(store.state)
+    answers = iter(values)
+    monkeypatch.setattr(android.getpass, "getpass", lambda _label: next(answers))
+    with pytest.raises(android.RuntimeFailure, match=message):
+        runtime.reset_password("kasey")
+    assert store.state == before and calls == [False]
+
+
+@pytest.mark.parametrize("reason", ["unknown", "disabled", "non-tty", "invalid-name"])
+def test_password_recovery_preflight_refuses_without_prompt_or_write(
+    runtime, reset_account, monkeypatch, reason
+):
+    store, calls = reset_account
+    if reason == "disabled":
+        store.state["users"]["owner"]["disabled"] = True
+    if reason == "non-tty":
+        monkeypatch.setattr(android.sys.stdin, "isatty", lambda: False)
+    before = deepcopy(store.state)
+    monkeypatch.setattr(
+        android.getpass,
+        "getpass",
+        lambda _label: pytest.fail("preflight must not ask for a password"),
+    )
+    username = {"unknown": "missing", "invalid-name": "not a username"}.get(
+        reason, "kasey"
+    )
+    with pytest.raises(android.RuntimeFailure):
+        runtime.reset_password(username)
+    assert store.state == before
+    assert calls == ([False] if reason in ("unknown", "disabled") else [])
+
+
+@pytest.mark.parametrize(
+    "failure", [EOFError, KeyboardInterrupt, android.getpass.GetPassWarning]
+)
+def test_password_prompt_cancellation_or_echo_fallback_never_writes(
+    runtime, reset_account, monkeypatch, failure
+):
+    store, calls = reset_account
+    before = deepcopy(store.state)
+
+    def prompt(_label):
+        if failure is android.getpass.GetPassWarning:
+            import warnings
+
+            warnings.warn("cannot hide input", android.getpass.GetPassWarning)
+        raise failure
+
+    monkeypatch.setattr(android.getpass, "getpass", prompt)
+    with pytest.raises(android.RuntimeFailure, match="hidden terminal input"):
+        runtime.reset_password("kasey")
+    assert store.state == before and calls == [False]
+
+
+def test_password_recovery_revalidates_enabled_identity_after_prompt(
+    runtime, reset_account, monkeypatch
+):
+    store, calls = reset_account
+    original_hash = store.state["users"]["owner"]["password_hash"]
+
+    def prompt(_label):
+        store.state["users"]["owner"]["disabled"] = True
+        return "new-hidden-test-password"
+
+    monkeypatch.setattr(android.getpass, "getpass", prompt)
+    with pytest.raises(android.RuntimeFailure, match="Account changed"):
+        runtime.reset_password("kasey")
+    assert calls == [False, True]
+    assert store.state["users"]["owner"]["password_hash"] == original_hash
+    assert len(store.state["sessions"]) == 3
+
+
+def test_password_reset_database_connection_is_local_and_bounded(runtime, monkeypatch):
+    import psycopg
+
+    captured = {}
+
+    def connect(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    (runtime.state / "secrets/metadata_app_password").write_text("local-test-secret")
+    monkeypatch.setattr(psycopg, "connect", connect)
+    runtime._password_reset_store().factory()
+    assert captured["host"] == "127.0.0.1" and captured["port"] == 5433
+    assert (
+        captured["dbname"] == "schemii" and captured["user"] == "schemii_metadata_app"
+    )
+    assert (
+        captured["password"] == "local-test-secret" and captured["connect_timeout"] == 5
+    )
+    assert captured["options"] == "-c statement_timeout=30000 -c lock_timeout=5000"
+
+
+def test_password_reset_database_failure_is_actionable_and_sanitized(
+    runtime, reset_account, monkeypatch
+):
+    import psycopg
+
+    store, _calls = reset_account
+
+    @contextmanager
+    def broken_transaction(write=False):
+        raise psycopg.OperationalError("sensitive-database-error-test")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(store, "transaction", broken_transaction)
+    with pytest.raises(android.RuntimeFailure, match="Run schemii start") as error:
+        runtime.reset_password("kasey")
+    assert "sensitive-database-error-test" not in str(error.value)
+
+
+def test_reset_rejects_password_argument_without_echoing_it(capsys):
+    assert android.main(["reset-password", "kasey", "private-argument-test"]) == 2
+    output = "".join(capsys.readouterr())
+    assert "hidden prompts" in output and "private-argument-test" not in output
+
+
+def test_password_reset_accepts_explicit_separator_for_leading_hyphen_username(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        android.Runtime, "reset_password", lambda self, username: {"username": username}
+    )
+    assert android.main(["reset-password", "--", "-abc"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"username": "-abc"}
+
+
+def test_reset_password_uses_real_hidden_terminal_input(tmp_path):
+    import pty
+    import select
+
+    script = tmp_path / "reset-fixture.py"
+    script.write_text(f"""
+import importlib.util,sys
+sys.path.insert(0,{str(MODULE_PATH.parents[2] / "src")!r})
+spec=importlib.util.spec_from_file_location('android_fixture',{str(MODULE_PATH)!r})
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+from schemii.common.auth.store import AuthStore
+store=AuthStore()
+store.state['users']['owner']={{'id':'owner','username':'kasey','disabled':False,'is_admin':True,'password_hash':'old'}}
+module.Runtime._password_reset_store=lambda self:store
+raise SystemExit(module.main(['reset-password','kasey']))
+""")
+    master, slave = pty.openpty()
+    process = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        start_new_session=True,
+    )
+    os.close(slave)
+    transcript = bytearray()
+
+    def read_until(marker):
+        deadline = time.monotonic() + 5
+        while marker not in transcript and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                try:
+                    transcript.extend(os.read(master, 8192))
+                except OSError:
+                    break
+        assert marker in transcript, transcript.decode(errors="replace")
+
+    password = b"hidden-terminal-test-password"
+    try:
+        read_until(b"New password:")
+        os.write(master, password + b"\n")
+        read_until(b"Confirm new password:")
+        os.write(master, password + b"\n")
+        read_until(b'"password_reset": true')
+        assert process.wait(timeout=5) == 0
+        assert password not in transcript
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+        os.close(master)
 
 
 @pytest.mark.parametrize(
