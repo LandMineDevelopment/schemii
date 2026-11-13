@@ -30,7 +30,7 @@ internet access; this release contains no provider credentials or local model.
    pkg install curl
    curl --fail --location --proto '=https' --tlsv1.2 \
      --output "$HOME/install-android.sh" \
-     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.4/install-android.sh
+     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.5/install-android.sh
    ```
 
    Inspect the downloaded file, then run it:
@@ -42,9 +42,11 @@ internet access; this release contains no provider credentials or local model.
 The standalone installer embeds the exact release archive checksum and source
 commit. It verifies the download, complete file inventory and safe archive paths
 before extraction. It installs a new version directory under
-`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.4`, then delegates runtime
-installation to that source's `./start.sh --android install`. Existing changed
-source is preserved and rejected rather than overwritten. A repeated install of
+`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.5`, then delegates runtime
+installation to that source's `./start.sh --android install`. After dependency
+installation succeeds, it installs the global `schemii` command and points the
+visible `~/schemii` folder to that version. Existing changed source is preserved
+and rejected rather than overwritten. A repeated install of
 the same unchanged version can repair an interrupted dependency installation;
 it never resets databases or credentials.
 
@@ -69,19 +71,48 @@ localhost allowlist, as the desktop proxy already does. This fixes the
 `400 Invalid host header` response for the phone's Tailscale address. TLS names
 and the explicit trusted browser origins remain the configured phone addresses.
 
+## Your folder and global commands
+
+After installation, your active application folder is **`~/schemii`**. Run
+`cd ~/schemii` whenever you want to inspect its guide or exported setup files.
+It is a managed link to the installed version under `.local/share/schemii/releases`,
+so upgrades can select a new version without moving or resetting database state.
+The installer preserves an unrelated existing `~/schemii` folder or `schemii`
+command and reports the conflict before changing packages.
+
+These commands work from **any directory in Termux**:
+
+```bash
+schemii start
+schemii stop
+schemii restart
+schemii status
+```
+
+Start brings up both PostgreSQL clusters, Pi, the Schemii application with all
+product APIs, and HTTPS together, then waits for readiness. Stop shuts that whole
+stack down. Restart stops it fully before starting again, and does not start a
+replacement if shutdown fails. Status reports the same complete stack without
+changing it. The global command delegates lifecycle work to the active release's
+`start.sh --android`; it does not create a second server or require shell aliases.
+
+Other launcher actions are available the same way, for example `schemii logs pi`,
+`schemii doctor`, `schemii credentials DEST`, and `schemii backup DIRECTORY`.
+Use `schemii --help` for all actions. Logs and databases remain in the dedicated
+private runtime; `~/schemii` is the application folder, not shared Android storage.
+
 ## Configure and start
 
 In the Tailscale app, find the phone's `100.x.y.z` address and its complete MagicDNS
 name, such as `moto-power.example-tailnet.ts.net`. Use the phone's name, not the
-desktop server's `omarchy` address. Then, from the printed release directory:
+desktop server's `omarchy` address. Then, from any Termux directory:
 
 ```bash
-cd "$HOME/.local/share/schemii/releases/android-v0.1.0-preview.4"
-./start.sh --android configure \
+schemii configure \
   --tailnet-ip 100.X.Y.Z \
   --hostname moto-power.YOUR-TAILNET.ts.net
-./start.sh --android start
-./start.sh --android status
+schemii start
+schemii status
 ```
 
 Replace both example values. The address must be the phone's Tailscale address,
@@ -110,10 +141,10 @@ and a server certificate for localhost, the configured phone name and its tailne
 address. Install **only the public CA certificate** in every intended browser's
 trust store.
 
-Export the public CA into the mounted source directory:
+From `~/schemii`, export the public CA into the mounted source directory:
 
 ```bash
-./start.sh --android export-ca /opt/schemii/.schemii/android-ca.crt
+schemii export-ca /opt/schemii/.schemii/android-ca.crt
 ```
 
 On Android, use `termux-setup-storage` if needed, then copy that public file to
@@ -135,7 +166,7 @@ Export the first-account setup reference and restricted target connection into
 a new private file:
 
 ```bash
-./start.sh --android credentials /opt/schemii/.schemii/android-credentials.json
+schemii credentials /opt/schemii/.schemii/android-credentials.json
 ```
 
 The command reports the file path rather than printing credential values. Open
@@ -150,13 +181,13 @@ connection, and the metadata endpoint is intentionally blocked by target policy.
 
 ## Operate and recover
 
-All lifecycle actions go through the same source's launcher:
+All lifecycle actions use the same global command and active launcher:
 
 ```bash
-./start.sh --android doctor
-./start.sh --android logs
-./start.sh --android stop
-./start.sh --android start
+schemii doctor
+schemii logs
+schemii restart
+schemii status
 ```
 
 Startup reports its current stage. Setup helpers have deadlines and cancellation;
@@ -188,9 +219,9 @@ removing the PRoot userland can delete this state. Keep verified backups elsewhe
 Make a **cold backup**, which cleanly stops the backend and leaves it stopped:
 
 ```bash
-./start.sh --android backup /opt/schemii/.schemii/backups/phone-first
-./start.sh --android verify-backup /opt/schemii/.schemii/backups/phone-first
-./start.sh --android start
+schemii backup /opt/schemii/.schemii/backups/phone-first
+schemii verify-backup /opt/schemii/.schemii/backups/phone-first
+schemii start
 ```
 
 Choose a new destination each time. The snapshot includes metadata, all local
@@ -206,8 +237,8 @@ On a fresh matching runtime, place the trusted bundle under the new source's
 private `.schemii/` directory and run:
 
 ```bash
-./start.sh --android restore /opt/schemii/.schemii/backups/phone-first
-./start.sh --android start
+schemii restore /opt/schemii/.schemii/backups/phone-first
+schemii start
 ```
 
 Restore refuses existing database or secret state and never overwrites an active
@@ -217,8 +248,10 @@ automatically migrate the desktop Docker volumes, and the desktop metadata-only
 backup format is a different format.
 
 For a newer Android preview, stop the old runtime and make a verified backup
-first. Download that version's installer and retain the previous source directory.
-The dedicated userland and database state survive source installation, but
+first. Download and run that version's installer, then use `schemii start`.
+Successful installation atomically updates `~/schemii`; global commands follow
+the new active version. The previous version directory is retained. The dedicated
+userland and database state survive source installation, but
 database migrations are not automatically reversible. Keeping old source alone
 does not guarantee a rollback; recovery needs the matching backup and runtime.
 
@@ -228,10 +261,10 @@ For optional startup after reboot, install Termux:Boot from the same source as
 Termux, open it once, and use:
 
 ```bash
-./start.sh --android enable-boot
+schemii enable-boot
 ```
 
-Use `disable-boot` to remove only Schemii's own boot script. Enable Tailscale's
+Use `schemii disable-boot` to remove only Schemii's own boot script. Enable Tailscale's
 always-on VPN and exempt **both Termux and Tailscale** from battery optimization
 using the phone's Settings. Boot startup needs the phone's first unlock and a
 ready VPN. If the VPN is not ready, inspect the recorded failure and run `start`

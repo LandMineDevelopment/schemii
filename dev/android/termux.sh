@@ -9,10 +9,12 @@ SCHEMII_ANDROID_IMAGE='debian:trixie-slim@sha256:24a01011d10eba3a023bc8585b9650b
 fail() { printf 'Android launcher: %s\n' "$*" >&2; return 1; }
 usage() {
   cat <<'HELP'
-Usage: ./start.sh --android COMMAND [ARGUMENTS]
+Usage: schemii COMMAND [ARGUMENTS]
+       ./start.sh --android COMMAND [ARGUMENTS]
   install                         Install the dedicated Debian 13 ARM64 runtime
   configure --tailnet-ip IP --hostname NAME
-  start | stop | status | doctor  Manage or inspect the phone backend
+  start | stop | restart | status  Manage the complete phone backend
+  doctor                         Inspect runtime dependencies and device checks
   logs [SERVICE]                 Read bounded private logs
   export-ca DEST | credentials DEST  Export CA or private setup references
   verify-backup DIRECTORY         Verify a private backup without restoring
@@ -22,6 +24,7 @@ Usage: ./start.sh --android COMMAND [ARGUMENTS]
 Install Termux and Termux:Boot from the same official source. Keep this release
 inside Termux's private home, and connect the official Tailscale Android app.
 The preview requires on-device acceptance; it is for trusted-owner SQL use.
+The installer creates ~/schemii and installs the global schemii command.
 HELP
 }
 require_termux() {
@@ -124,6 +127,109 @@ tmp.write_text(json.dumps({'pid':pid,'start_tick':stat[19],'boot_id':boot})+'\n'
 os.replace(tmp,path)
 PY
 }
+manage_cli() {
+  python - "$1" "$HOME" "$PREFIX" "$SCHEMII_ANDROID_ROOT" <<'PY'
+import json, os, pathlib, re, shlex, sys, tempfile
+
+mode, home_name, prefix_name, source_name = sys.argv[1:]
+home, prefix, source = (
+    pathlib.Path(name).resolve(strict=True)
+    for name in (home_name, prefix_name, source_name)
+)
+releases = home / '.local/share/schemii/releases'
+active = home / 'schemii'
+command = prefix / 'bin/schemii'
+
+def refuse(message):
+    raise SystemExit('Android launcher: ' + message)
+
+def release_directory(path):
+    if path.parent != releases or path.is_symlink() or not path.is_dir():
+        refuse('The active folder must point to an installed versioned Android release; existing paths were preserved.')
+    if not re.fullmatch(r'android-v[0-9]+\.[0-9]+\.[0-9]+-preview\.[1-9][0-9]*', path.name):
+        refuse('The active folder must point to a versioned Android preview; existing paths were preserved.')
+    try:
+        manifest = path / 'ANDROID_RELEASE.json'
+        if manifest.is_symlink() or not manifest.is_file():
+            raise ValueError('manifest')
+        record = json.loads(manifest.read_text())
+        if not isinstance(record, dict) or record.get('schema') != 1 or record.get('tag') != path.name or record.get('experimental') is not True:
+            raise ValueError('identity')
+        if (path / 'start.sh').is_symlink() or not (path / 'start.sh').is_file():
+            raise ValueError('launcher')
+    except (OSError, ValueError, TypeError):
+        refuse('Android release identity is missing or invalid; existing paths were preserved.')
+
+for path in (releases, *releases.parents):
+    if path == home:
+        break
+    if path.is_symlink():
+        refuse('The managed release directory cannot contain symlinks.')
+if not (prefix / 'bin').is_dir() or (prefix / 'bin').is_symlink():
+    refuse('Termux bin must be an ordinary directory.')
+release_directory(source)
+wrapper = (
+    '#!' + str(prefix / 'bin/bash') + '\n'
+    '# Schemii Android command v1\n'
+    'set -euo pipefail\n'
+    'active=' + shlex.quote(str(active)) + '\n'
+    'if [[ ! -L "$active" || ! -f "$active/start.sh" ]]; then\n'
+    '  printf "The active Schemii release is missing. Rerun its versioned Android installer.\\n" >&2\n'
+    '  exit 1\n'
+    'fi\n'
+    'exec ' + shlex.quote(str(prefix / 'bin/bash')) + ' "$active/start.sh" --android "$@"\n'
+).encode()
+
+def validate_targets():
+    if active.is_symlink():
+        destination = pathlib.Path(os.readlink(active))
+        if not destination.is_absolute():
+            refuse('Existing ~/schemii is not a managed absolute release link; it was preserved.')
+        release_directory(destination)
+    elif active.exists():
+        refuse('Existing ~/schemii is not a managed release link; rename it before installation. It was preserved.')
+    if command.is_symlink() or (command.exists() and not command.is_file()):
+        refuse('Existing schemii command is not owned by this installer; it was preserved.')
+    if command.exists() and (command.stat().st_size != len(wrapper) or command.read_bytes() != wrapper):
+        refuse('Existing schemii command is not owned by this installer; it was preserved.')
+
+validate_targets()
+if mode == 'check':
+    raise SystemExit(0)
+if mode != 'activate':
+    refuse('Unknown command activation mode.')
+temporary_command = temporary_link = None
+try:
+    descriptor, name = tempfile.mkstemp(prefix='.schemii-command-', dir=command.parent)
+    temporary_command = pathlib.Path(name)
+    with os.fdopen(descriptor, 'wb') as stream:
+        stream.write(wrapper)
+        os.fchmod(stream.fileno(), 0o700)
+        stream.flush()
+        os.fsync(stream.fileno())
+    # Keep the old active release until the final atomic link replacement.
+    descriptor, name = tempfile.mkstemp(prefix='.schemii-active-', dir=home)
+    os.close(descriptor)
+    temporary_link = pathlib.Path(name)
+    temporary_link.unlink()
+    temporary_link.symlink_to(source)
+    validate_targets()
+    os.replace(temporary_command, command)
+    os.replace(temporary_link, active)
+    for directory in (command.parent, home):
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+except OSError as error:
+    refuse('Command activation failed: ' + str(error) + '. Inspect the active folder before retrying.')
+finally:
+    for path in (temporary_command, temporary_link):
+        if path is not None:
+            path.unlink(missing_ok=True)
+PY
+}
 install_runtime() {
   (($# == 0)) || fail 'install takes no arguments. Configure the tailnet address afterward.'
   command -v pkg >/dev/null || fail 'Termux pkg is unavailable.'
@@ -143,6 +249,8 @@ install_runtime() {
       runtime assert-stopped
     fi
   fi
+  # Conflicting user files must be reported before package or runtime changes.
+  manage_cli check
   pkg install -y proot-distro python curl tar coreutils util-linux
   require_proot
   host_running && fail 'The backend supervisor is running. Stop it before installing or updating.'
@@ -155,7 +263,10 @@ install_runtime() {
     chmod 600 "$rootfs/opt/schemii-install-owned"
   fi
   guest root /bin/bash /opt/schemii/dev/android/install-guest.sh
-  printf 'Installed Android preview runtime. Next: ./start.sh --android configure --tailnet-ip PHONE_IP --hostname PHONE_NAME\n'
+  manage_cli activate
+  printf 'Installed Android preview runtime. Active folder: ~/schemii\n'
+  printf 'Global commands: schemii start | stop | restart | status\n'
+  printf 'First setup: schemii configure --tailnet-ip PHONE_IP --hostname PHONE_NAME\n'
 }
 start_runtime() {
   (($# == 0)) || fail 'start takes no arguments; use configure first.'
@@ -197,6 +308,23 @@ PROGRESS
   done
   fail "Readiness timed out after 180 seconds. The supervisor is retained for diagnosis; inspect logs and run stop. Private launcher log: $logfile"
 }
+stop_runtime() {
+  if (($# != 0)); then fail 'stop takes no arguments.'; return 1; fi
+  runtime stop || return
+  local deadline=$((SECONDS + 10))
+  while host_running; do
+    if ((SECONDS >= deadline)); then
+      fail 'The guest stopped but its PRoot session is still closing. Inspect status and logs before starting again.'
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+restart_runtime() {
+  if (($# != 0)); then fail 'restart takes no arguments.'; return 1; fi
+  stop_runtime || return
+  start_runtime
+}
 manage_boot() {
   local action=$1 target="$HOME/.termux/boot/schemii"
   if [[ "$action" == disable-boot ]]; then
@@ -213,7 +341,7 @@ manage_boot() {
   [[ ! -e "$target.tmp" && ! -L "$target.tmp" ]] || fail 'Existing boot temporary file is preserved; inspect it before retrying.'
   {
     printf '#!%s/bin/bash\n# Schemii Android preview boot v1\n' "$PREFIX"
-    printf 'exec %q %q --android start\n' "$PREFIX/bin/bash" "$SCHEMII_ANDROID_ROOT/start.sh"
+    printf 'exec %q start\n' "$PREFIX/bin/schemii"
   } > "$target.tmp"
   chmod 700 "$target.tmp"
   mv -f -- "$target.tmp" "$target"
@@ -223,7 +351,7 @@ main() {
   local action=${1:---help}
   case "$action" in --help|-h|help) usage; return;; esac
   shift
-  case "$action" in install|configure|start|stop|status|doctor|logs|backup|restore|verify-backup|export-ca|credentials|enable-boot|disable-boot) ;; *) fail "Unknown command: $action"; return 1;; esac
+  case "$action" in install|configure|start|stop|restart|status|doctor|logs|backup|restore|verify-backup|export-ca|credentials|enable-boot|disable-boot) ;; *) fail "Unknown command: $action"; return 1;; esac
   SCHEMII_ANDROID_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
   require_termux
   SCHEMII_ANDROID_CONTROL="$HOME/.local/share/schemii-android"
@@ -237,9 +365,11 @@ main() {
   if [[ "$action" == install ]]; then install_runtime "$@"; return; fi
   require_proot
   require_owned
-  case "$action" in start|configure|enable-boot) require_installed_source;; esac
+  case "$action" in start|restart|configure|enable-boot) require_installed_source;; esac
   case "$action" in
     start) start_runtime "$@";;
+    stop) stop_runtime "$@";;
+    restart) restart_runtime "$@";;
     enable-boot|disable-boot) (($# == 0)) || fail "$action takes no arguments."; manage_boot "$action";;
     *) runtime "$action" "$@";;
   esac

@@ -223,11 +223,12 @@ run_release_action() {
   [[ "$mode" == install ]] || { printf 'Invalid release action.\n' >&2; return 2; }
   bash ./start.sh --android install || return
   printf '\nInstalled source: %s\n' "$source"
+  printf 'Easy-to-find active folder: ~/schemii\n'
+  printf 'Run from any Termux directory: schemii start | stop | restart | status\n'
   printf 'Next, use your phone address from the Tailscale app:\n'
-  printf '  cd %q\n' "$source"
-  printf '  ./start.sh --android configure --tailnet-ip 100.X.Y.Z --hostname PHONE.TAILNET.ts.net\n'
-  printf '  ./start.sh --android start\n'
-  printf 'Read docs/android-release.md for certificate trust, first account and device checks.\n'
+  printf '  schemii configure --tailnet-ip 100.X.Y.Z --hostname PHONE.TAILNET.ts.net\n'
+  printf '  schemii start\n'
+  printf 'Read ~/schemii/docs/android-release.md for certificate trust, first account and device checks.\n'
 }
 # END_RELEASE_ACTION
 printf 'Verified %s at commit %s.\n' "$TAG" "$COMMIT"

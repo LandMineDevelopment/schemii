@@ -95,6 +95,12 @@ def test_verified_release_action_stops_without_entering_dependency_install(
     )
     assert result.returncode == 0, result.stderr
     assert record.read_text().splitlines() == ["--android", action]
+    if mode == "install":
+        assert "active folder: ~/schemii" in result.stdout
+        assert "schemii start | stop | restart | status" in result.stdout
+        assert "  schemii configure --tailnet-ip" in result.stdout
+    else:
+        assert "active folder:" not in result.stdout
 
 
 def test_stop_only_failure_preserves_failure_and_never_announces_success(tmp_path):

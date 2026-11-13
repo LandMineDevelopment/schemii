@@ -51,6 +51,286 @@ def test_desktop_install_fails_before_touching_home(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+def cli_fixture(tmp_path, tag="android-v0.1.0-preview.5"):
+    home = tmp_path / "private home"
+    prefix = tmp_path / "prefix"
+    source = home / ".local/share/schemii/releases" / tag
+    source.mkdir(parents=True, exist_ok=True)
+    (prefix / "bin").mkdir(parents=True, exist_ok=True)
+    bash = prefix / "bin/bash"
+    if not bash.exists():
+        bash.symlink_to("/bin/bash")
+    (source / "ANDROID_RELEASE.json").write_text(
+        json.dumps({"schema": 1, "tag": tag, "experimental": True})
+    )
+    (source / "start.sh").write_text(
+        "python3 - \"$@\" <<'PY'\n"
+        "import json,os,pathlib,sys\n"
+        "pathlib.Path(os.environ['CLI_RECORD']).write_text(json.dumps("
+        "{'source':str(pathlib.Path.cwd()),'arguments':sys.argv[1:]}))\n"
+        "PY\n"
+    )
+    return home, prefix, source
+
+
+def cli_action(home, prefix, source, action="activate", extra_env=None):
+    return shell(
+        f"SCHEMII_ANDROID_ROOT={shlex.quote(str(source))}\nmanage_cli {action}",
+        env={
+            "HOME": str(home),
+            "PREFIX": str(prefix),
+            **(extra_env or {}),
+        },
+    )
+
+
+def test_global_cli_runs_from_any_directory_and_preserves_arguments(tmp_path):
+    home, prefix, source = cli_fixture(tmp_path)
+    result = cli_action(home, prefix, source)
+    assert result.returncode == 0, result.stderr
+    assert (home / "schemii").readlink() == source
+    command = prefix / "bin/schemii"
+    assert command.stat().st_mode & 0o777 == 0o700
+    unrelated = tmp_path / "unrelated directory"
+    unrelated.mkdir()
+    record = tmp_path / "cli.json"
+    for action in ("start", "stop", "restart", "status", "logs", "--help"):
+        result = subprocess.run(
+            [str(command), action, "literal argument; no execution"],
+            cwd=unrelated,
+            env={**os.environ, "CLI_RECORD": str(record)},
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(record.read_text())["arguments"] == [
+            "--android",
+            action,
+            "literal argument; no execution",
+        ]
+
+
+def test_cli_upgrade_atomically_selects_new_owned_release(tmp_path):
+    home, prefix, old = cli_fixture(tmp_path, "android-v0.1.0-preview.4")
+    assert cli_action(home, prefix, old).returncode == 0
+    wrapper = (prefix / "bin/schemii").read_bytes()
+    _, _, new = cli_fixture(tmp_path)
+    assert cli_action(home, prefix, new, "check").returncode == 0
+    assert (home / "schemii").readlink() == old
+    upgraded = cli_action(home, prefix, new)
+    assert upgraded.returncode == 0, upgraded.stderr
+    assert (home / "schemii").readlink() == new
+    assert (prefix / "bin/schemii").read_bytes() == wrapper
+    assert old.is_dir()
+    assert not list(home.glob(".schemii-active-*"))
+    assert not list((prefix / "bin").glob(".schemii-command-*"))
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        "folder",
+        "outside-link",
+        "relative-link",
+        "unowned-release-link",
+        "invalid-release-manifest",
+        "foreign-command",
+        "command-symlink",
+        "modified-command",
+    ],
+)
+def test_cli_preflight_preserves_foreign_paths(tmp_path, conflict):
+    home, prefix, source = cli_fixture(tmp_path)
+    active, command = home / "schemii", prefix / "bin/schemii"
+    outside = tmp_path / "user files"
+    outside.mkdir()
+    (outside / "important.txt").write_text("keep")
+    if conflict == "folder":
+        active.mkdir()
+        (active / "important.txt").write_text("keep")
+    elif conflict == "outside-link":
+        active.symlink_to(outside)
+    elif conflict == "relative-link":
+        active.symlink_to(source.relative_to(home))
+    elif conflict == "unowned-release-link":
+        unowned = source.parent / "android-v0.1.0-preview.3"
+        unowned.mkdir()
+        active.symlink_to(unowned)
+    elif conflict == "invalid-release-manifest":
+        invalid = source.parent / "android-v0.1.0-preview.3"
+        invalid.mkdir()
+        (invalid / "ANDROID_RELEASE.json").write_text("[]")
+        (invalid / "start.sh").write_text("user-owned source")
+        active.symlink_to(invalid)
+    elif conflict == "command-symlink":
+        command.symlink_to(outside / "important.txt")
+    elif conflict == "modified-command":
+        assert cli_action(home, prefix, source).returncode == 0
+        command.write_text(command.read_text() + "# user's changes\n")
+    else:
+        command.write_text("user command")
+    old_link = os.readlink(active) if active.is_symlink() else None
+    old_command = command.read_bytes() if command.is_file() else None
+    result = cli_action(home, prefix, source, "check")
+    assert result.returncode != 0
+    assert "preserved" in result.stderr
+    assert (outside / "important.txt").read_text() == "keep"
+    if old_link is not None:
+        assert active.is_symlink() and os.readlink(active) == old_link
+    if old_command is not None:
+        assert command.read_bytes() == old_command
+    if conflict == "folder":
+        assert (active / "important.txt").read_text() == "keep"
+
+
+def test_cli_conflict_blocks_install_before_package_or_guest_mutation(tmp_path):
+    home, prefix, source = cli_fixture(tmp_path)
+    control = home / ".local/share/schemii-android"
+    control.mkdir()
+    (home / "schemii").mkdir()
+    called = tmp_path / "mutated"
+    result = shell(
+        f"SCHEMII_ANDROID_ROOT={shlex.quote(str(source))}\n"
+        f"SCHEMII_ANDROID_CONTROL={shlex.quote(str(control))}\n"
+        f"pkg() {{ touch {shlex.quote(str(called))}; }}\n"
+        f"guest() {{ touch {shlex.quote(str(called))}; }}\n"
+        "install_runtime",
+        env={"HOME": str(home), "PREFIX": str(prefix)},
+    )
+    assert result.returncode != 0
+    assert "Existing ~/schemii" in result.stderr
+    assert not called.exists()
+
+
+def test_cli_pointer_failure_preserves_previous_active_release(tmp_path):
+    home, prefix, old = cli_fixture(tmp_path, "android-v0.1.0-preview.4")
+    assert cli_action(home, prefix, old).returncode == 0
+    wrapper = (prefix / "bin/schemii").read_bytes()
+    _, _, new = cli_fixture(tmp_path)
+    tools_dir = tmp_path / "injected tools"
+    tools_dir.mkdir()
+    shim = tools_dir / "python"
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import os,pathlib,sys\n"
+        "sys.argv=sys.argv[1:]\n"
+        "original=os.replace\n"
+        "def replace(source,destination):\n"
+        "    if str(destination)==os.environ['FAIL_ACTIVE']:\n"
+        "        raise OSError('injected active pointer failure')\n"
+        "    return original(source,destination)\n"
+        "os.replace=replace\n"
+        "exec(compile(sys.stdin.read(),'cli-activation','exec'))\n"
+    )
+    shim.chmod(0o700)
+    result = cli_action(
+        home,
+        prefix,
+        new,
+        extra_env={
+            "PATH": f"{tools_dir}:{os.environ['PATH']}",
+            "FAIL_ACTIVE": str(home / "schemii"),
+        },
+    )
+    assert result.returncode != 0
+    assert "injected active pointer failure" in result.stderr
+    assert (home / "schemii").readlink() == old
+    assert (prefix / "bin/schemii").read_bytes() == wrapper
+    assert not list(home.glob(".schemii-active-*"))
+    assert not list((prefix / "bin").glob(".schemii-command-*"))
+
+
+@pytest.mark.parametrize("guest_status", [0, 7])
+def test_installer_selects_new_cli_only_after_dependencies_succeed(
+    tmp_path, guest_status
+):
+    home, prefix, old = cli_fixture(tmp_path, "android-v0.1.0-preview.4")
+    assert cli_action(home, prefix, old).returncode == 0
+    _, _, new = cli_fixture(tmp_path)
+    control = home / ".local/share/schemii-android"
+    control.mkdir()
+    (prefix / "var/lib/proot-distro/containers/schemii-android/rootfs/opt").mkdir(
+        parents=True
+    )
+    record = tmp_path / "install-actions"
+    result = shell(
+        f"SCHEMII_ANDROID_ROOT={shlex.quote(str(new))}\n"
+        f"SCHEMII_ANDROID_CONTROL={shlex.quote(str(control))}\n"
+        "require_proot() { :; }\n"
+        "require_owned() { :; }\n"
+        "host_running() { return 1; }\n"
+        f"pkg() {{ printf 'packages\\n' >> {shlex.quote(str(record))}; }}\n"
+        f"guest() {{ printf 'dependencies\\n' >> {shlex.quote(str(record))}; return {guest_status}; }}\n"
+        "install_runtime",
+        env={"HOME": str(home), "PREFIX": str(prefix)},
+    )
+    assert result.returncode == guest_status, result.stderr
+    assert record.read_text().splitlines() == ["packages", "dependencies"]
+    assert (home / "schemii").readlink() == (new if guest_status == 0 else old)
+
+
+def test_restart_stops_then_starts_under_one_host_lifecycle_lock(tmp_path):
+    record = tmp_path / "lifecycle"
+    result = shell(
+        "require_termux() { :; }\n"
+        "require_proot() { :; }\n"
+        "require_owned() { :; }\n"
+        "require_installed_source() { :; }\n"
+        "host_running() { return 1; }\n"
+        f"""runtime() {{
+  [[ "$1" == stop ]]
+  if flock -n "$SCHEMII_ANDROID_CONTROL/launcher.lock" -c true; then return 91; fi
+  printf 'stop\\n' >> {shlex.quote(str(record))}
+}}
+start_runtime() {{
+  if flock -n "$SCHEMII_ANDROID_CONTROL/launcher.lock" -c true; then return 92; fi
+  printf 'start\\n' >> {shlex.quote(str(record))}
+}}
+main restart
+""",
+        env={"HOME": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert record.read_text().splitlines() == ["stop", "start"]
+
+
+def test_restart_does_not_start_when_stop_fails(tmp_path):
+    record = tmp_path / "lifecycle"
+    result = shell(
+        f"runtime() {{ printf 'stop\\n' >> {shlex.quote(str(record))}; return 17; }}\n"
+        f"start_runtime() {{ printf 'start\\n' >> {shlex.quote(str(record))}; }}\n"
+        "restart_runtime"
+    )
+    assert result.returncode == 17
+    assert record.read_text().splitlines() == ["stop"]
+
+
+def test_stop_waits_for_outer_owned_runner_before_restart(tmp_path):
+    result = shell(
+        'runtime() { [[ "$1" == stop ]]; }\n'
+        "polls=0\n"
+        "host_running() { polls=$((polls+1)); ((polls<3)); }\n"
+        "sleep() { :; }\n"
+        "stop_runtime\n"
+        '[[ "$polls" == 3 ]]'
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_restart_refuses_to_start_if_outer_session_has_not_closed(tmp_path):
+    record = tmp_path / "lifecycle"
+    result = shell(
+        f"runtime() {{ printf 'stop\\n' >> {shlex.quote(str(record))}; }}\n"
+        "SECONDS=0\n"
+        "host_running() { SECONDS=20; return 0; }\n"
+        f"start_runtime() {{ printf 'start\\n' >> {shlex.quote(str(record))}; }}\n"
+        "restart_runtime"
+    )
+    assert result.returncode != 0
+    assert "PRoot session is still closing" in result.stderr
+    assert record.read_text().splitlines() == ["stop"]
+
+
 def test_guest_preserves_each_argument_and_uses_isolated_userland(
     tmp_path: Path,
 ) -> None:
@@ -255,7 +535,7 @@ def test_boot_enable_preserves_foreign_script(tmp_path: Path) -> None:
     assert "user-owned" in (boot / "schemii").read_text()
 
 
-def test_boot_script_quotes_release_path_and_disable_removes_only_owned(
+def test_boot_script_uses_global_start_and_disable_removes_only_owned(
     tmp_path: Path,
 ) -> None:
     result = shell(
@@ -265,7 +545,8 @@ def test_boot_script_quotes_release_path_and_disable_removes_only_owned(
     )
     assert result.returncode == 0, result.stderr
     boot = tmp_path / ".termux/boot/schemii"
-    assert "release\\ with\\ spaces/start.sh" in boot.read_text()
+    assert "exec /data/data/com.termux/files/usr/bin/schemii start" in boot.read_text()
+    assert "/private/release" not in boot.read_text()
     unrelated = boot.parent / "other"
     unrelated.write_text("preserve")
     result = shell("manage_boot disable-boot", env={"HOME": str(tmp_path)})
