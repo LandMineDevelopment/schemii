@@ -107,6 +107,13 @@ changing it. The global command delegates lifecycle work to the active release's
 `start.sh --android`; it does not create a second server or require shell aliases.
 When trusted tailnet HTTPS is enabled, these commands also own its proxy process.
 
+Metadata admission keeps the normal bounded 16-connection budget for account,
+report-control, foreground and background transactions. It fits within the
+metadata cluster's 24-connection ceiling with separate readiness and maintenance
+headroom. Target-query admission remains separately bounded at eight total and
+two per connection identity; raising metadata headroom does not raise query or
+report row/byte limits.
+
 Other launcher actions are available the same way, for example `schemii logs pi`,
 `schemii doctor`, `schemii credentials DEST`, and `schemii backup DIRECTORY`.
 Use `schemii --help` for all actions. Logs and databases remain in the dedicated

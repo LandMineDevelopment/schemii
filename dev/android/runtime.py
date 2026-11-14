@@ -805,7 +805,9 @@ class Runtime:
                 ),
                 "SCHEMII_SETUP_TOKEN_FILE": str(secret / "account_setup_token"),
                 "SCHEMII_METADATA_TARGET_HOST_ALIASES": "localhost,127.0.0.1,::1",
-                "SCHEMII_METADATA_MAXIMUM_CONNECTIONS": "4",
+                # Auth, report control and background work need independent
+                # short metadata transactions; keep the normal bounded budget.
+                "SCHEMII_METADATA_MAXIMUM_CONNECTIONS": "16",
                 "SCHEMII_TARGET_EGRESS_MODE": "internal-only",
                 "SCHEMII_ALLOWED_TARGET_HOSTS": "127.0.0.1,localhost",
                 "SCHEMII_CONFIG_FILE": str(self.state / "run/schemii.toml"),

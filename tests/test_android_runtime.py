@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
 import importlib.util
@@ -13,7 +14,9 @@ import re
 import stat
 import subprocess
 import sys
+from threading import Event, Lock
 import time
+import tomllib
 from urllib.parse import urlsplit
 
 import pytest
@@ -411,7 +414,7 @@ def test_runtime_environment_keeps_metadata_fence_and_secret_files(
         == "host=127.0.0.1 port=5433 dbname=schemii user=schemii_metadata_app"
     )
     assert "localhost" in env["SCHEMII_METADATA_TARGET_HOST_ALIASES"]
-    assert env["SCHEMII_METADATA_MAXIMUM_CONNECTIONS"] == "4"
+    assert env["SCHEMII_METADATA_MAXIMUM_CONNECTIONS"] == "16"
     assert env["SCHEMII_PI_PASSWORD_FILE"] == str(
         runtime.state / "secrets/opencode_password"
     )
@@ -435,6 +438,82 @@ def test_tailnet_origin_is_explicit_and_legacy_origins_survive(runtime):
     assert origins[-1] == runtime.tailnet_origin
     assert "https://phone.example.ts.net:8001" in origins
     assert "https://localhost:8001" in origins
+
+
+def test_metadata_profile_admits_foreground_and_background_native_work(runtime):
+    from schemii.common.errors import MetadataCapacityError
+    from schemii.common.metadata.config import MetadataConfig
+    from schemii.common.metadata.database import MetadataConnectionFactory
+
+    runtime._secrets()
+    config = MetadataConfig.from_env(
+        runtime._environment(
+            android.validate_config("100.64.2.3", "phone.example.ts.net")
+        )
+    )
+    assert config is not None
+    release_close, attempted = Event(), Event()
+    lock = Lock()
+    attempts = 0
+    natives = []
+
+    class NativeConnection:
+        closed = False
+
+        def close(self):
+            assert release_close.wait(5)
+            self.closed = True
+
+    def connect(*_args, **_kwargs):
+        native = NativeConnection()
+        with lock:
+            natives.append(native)
+        return native
+
+    factory = MetadataConnectionFactory(config, connect)
+
+    def work():
+        nonlocal attempts
+        connection, outcome = None, "admitted"
+        try:
+            connection = factory()
+        except MetadataCapacityError:
+            outcome = "rejected"
+        finally:
+            with lock:
+                attempts += 1
+                if attempts == 5:
+                    attempted.set()
+        if connection is not None:
+            connection.close()
+        return outcome
+
+    # Report control/reauthorization, a migration poll, and foreground API work
+    # share this admission budget. Pending native closes still own their permits.
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(work) for _ in range(5)]
+        try:
+            assert attempted.wait(5)
+            assert factory.admission_snapshot().active == 5
+            assert not any(native.closed for native in natives)
+        finally:
+            release_close.set()
+        assert [future.result() for future in futures] == ["admitted"] * 5
+    assert factory.admission_snapshot().active == 0
+    assert all(native.closed for native in natives)
+
+    # The profile remains bounded; neither extra admission nor early permit
+    # release is used to make the foreground workload succeed.
+    held = [factory() for _ in range(config.maximum_connections)]
+    try:
+        with pytest.raises(MetadataCapacityError):
+            factory()
+    finally:
+        for connection in held:
+            connection.close()
+    assert factory.admission_snapshot().active == 0
+    assert all(native.closed for native in natives)
+    factory.close()
 
 
 def _enable_tailnet_fixture(runtime, tmp_path):
@@ -995,6 +1074,8 @@ def test_configured_ingress_host_passes_readiness_and_secure_phone_auth(
 
 
 def test_cluster_uses_scram_loopback_and_keeps_durability(runtime, monkeypatch):
+    from schemii.common.metadata.config import MetadataConfig
+
     calls = []
 
     def checked(command, **_kwargs):
@@ -1017,6 +1098,24 @@ def test_cluster_uses_scram_loopback_and_keeps_durability(runtime, monkeypatch):
     assert "fsync = on" in configuration
     assert "synchronous_commit = on" in configuration
     assert "full_page_writes = on" in configuration
+    environment = runtime._environment(
+        android.validate_config("100.64.2.3", "phone.example.ts.net")
+    )
+    metadata = MetadataConfig.from_env(environment)
+    assert metadata is not None
+    maximum_entry = re.search(r"^max_connections = (\d+)$", configuration, re.M)
+    assert maximum_entry is not None
+    maximum = int(maximum_entry[1])
+    # Separate readiness (2), migration (1) and PG17 superuser reserve (3) must
+    # fit even alongside the app's full metadata admission budget.
+    assert metadata.maximum_connections + 2 + 1 + 3 <= maximum
+    runtime._write_runtime_config(
+        android.validate_config("100.64.2.3", "phone.example.ts.net")
+    )
+    profile = tomllib.loads((runtime.state / "run/schemii.toml").read_text())
+    assert profile["postgres"]["connections"]["maximum_total"] == 8
+    assert profile["postgres"]["connections"]["maximum_per_identity"] == 2
+    assert profile["console"]["results"]["maximum_live_read_sessions"] == 4
 
 
 def test_major_version_mismatch_never_reinitializes(runtime, monkeypatch):
