@@ -25,6 +25,7 @@ FILES = {
     "README.md",
     "pyproject.toml",
     "constraints.docker.txt",
+    "dev/runtime-contract.json",
     "start.sh",
     "dev/schemii.toml",
     "docs/android-release.md",
@@ -58,6 +59,8 @@ PRIVATE_COMPONENTS = {
     "test-results",
     "backups",
     "downloads",
+    "pgdata",
+    "postgres-data",
 }
 PRIVATE_NAMES = {
     "credentials.json",
@@ -192,6 +195,12 @@ def metadata(tag: str, commit: str, files: dict[str, tuple[bytes, int]]) -> dict
             "python": "3.13",
             "postgresql": "17",
             "node": "22.22.2",
+        },
+        "dependency_inputs": {
+            path: hashlib.sha256(files[path][0]).hexdigest()
+            for path in ("dev/runtime-contract.json", "constraints.docker.txt",
+                         "pyproject.toml", "ai/prototype/package.json",
+                         "ai/prototype/package-lock.json")
         },
         "device_acceptance": "pending",
         "files": {

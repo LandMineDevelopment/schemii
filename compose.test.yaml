@@ -14,6 +14,8 @@ services:
     build:
       context: .
       dockerfile: ai/prototype/Dockerfile
+      args:
+        SCHEMII_SOURCE_COMMIT: ${SCHEMII_SOURCE_COMMIT:-unknown}
     network_mode: none
     user: node
     init: true
@@ -33,6 +35,8 @@ services:
     build:
       context: .
       dockerfile: ai/prototype/Dockerfile
+      args:
+        SCHEMII_SOURCE_COMMIT: ${SCHEMII_SOURCE_COMMIT:-unknown}
     command: ["node", "server.js"]
     environment:
       SCHEMII_PI_PASSWORD_FILE: /run/secrets/opencode_password
@@ -73,6 +77,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        SCHEMII_SOURCE_COMMIT: ${SCHEMII_SOURCE_COMMIT:-unknown}
     environment:
       SCHEMII_DEPLOYMENT_MODE: authenticated
       SCHEMII_AUTH_ENABLED: "1"
@@ -80,6 +86,7 @@ services:
       SCHEMII_DEVELOPER_INSPECTION: "1"
       SCHEMII_TARGET_EGRESS_MODE: ${SCHEMII_TARGET_EGRESS_MODE:-internal-only}
       SCHEMII_ALLOWED_TARGET_HOSTS: ${SCHEMII_ALLOWED_TARGET_HOSTS:-demo-postgres,postgres}
+      SCHEMII_METADATA_MAXIMUM_CONNECTIONS: "16"
       SCHEMII_STORAGE_MODE: postgresql
       SCHEMII_METADATA_DSN: "host=metadata-postgres port=5432 dbname=${SCHEMII_TEST_POSTGRES_DB:-schemii_test} user=${SCHEMII_METADATA_APP_USER:-schemii_metadata_app}"
       SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_app_password
@@ -167,6 +174,7 @@ services:
     pids_limit: ${SCHEMII_METADATA_PIDS:-256}
     logging: *bounded-logging
     image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    command: ["postgres", "-c", "max_connections=100"]
     environment:
       POSTGRES_DB: ${SCHEMII_TEST_POSTGRES_DB:-schemii_test}
       POSTGRES_USER: ${SCHEMII_TEST_POSTGRES_USER:-schemii}
@@ -226,6 +234,7 @@ services:
     pids_limit: ${SCHEMII_DEMO_PIDS:-256}
     logging: *bounded-logging
     image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    command: ["postgres", "-c", "max_connections=100"]
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: schemii_demo_admin
@@ -326,12 +335,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        SCHEMII_SOURCE_COMMIT: ${SCHEMII_SOURCE_COMMIT:-unknown}
     environment:
       SCHEMII_DEPLOYMENT_MODE: authenticated
       SCHEMII_AUTH_ENABLED: "1"
       SCHEMII_SETUP_TOKEN_FILE: /run/secrets/account_setup_token
       SCHEMII_TARGET_EGRESS_MODE: ${SCHEMII_TARGET_EGRESS_MODE:-internal-only}
       SCHEMII_ALLOWED_TARGET_HOSTS: ${SCHEMII_ALLOWED_TARGET_HOSTS:-demo-postgres,postgres}
+      SCHEMII_METADATA_MAXIMUM_CONNECTIONS: "16"
       SCHEMII_STORAGE_MODE: postgresql
       SCHEMII_METADATA_DSN: "host=metadata-postgres port=5432 dbname=${SCHEMII_TEST_POSTGRES_DB:-schemii_test} user=${SCHEMII_METADATA_APP_USER:-schemii_metadata_app}"
       SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_app_password

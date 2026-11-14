@@ -597,6 +597,19 @@ if [[ "$SCHEMII_LAUNCH_ACTION" == "test-ai-metadata" ]]; then
   exec docker "${compose_args[@]}" exec -T schemii python - < "$ROOT_DIR/tests/integration/ai_operation_contract.py"
 fi
 
+# Bind each newly built image to its source; content hashes also cover dirty builds.
+SCHEMII_SOURCE_COMMIT=unknown
+if command -v git >/dev/null 2>&1 \
+    && runtime_source_commit="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null)" \
+    && [[ "$runtime_source_commit" =~ ^[0-9a-f]{40}$ ]]; then
+  SCHEMII_SOURCE_COMMIT="$runtime_source_commit"
+  if runtime_source_status="$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal 2>/dev/null)"; then
+    if [[ -n "$runtime_source_status" ]]; then SCHEMII_SOURCE_COMMIT+="+dirty"; fi
+  else
+    SCHEMII_SOURCE_COMMIT=unknown
+  fi
+fi
+export SCHEMII_SOURCE_COMMIT
 printf 'Building the current Schemii application image...\n'
 startup_timing_next build passed
 if [[ -n "$SCHEMII_PI_PROTOTYPE_URL" ]]; then

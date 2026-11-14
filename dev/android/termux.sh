@@ -99,11 +99,10 @@ root=pathlib.Path("/opt/schemii")
 try:
  record=json.loads(pathlib.Path("/opt/schemii-runtime.json").read_text())
  expected=record["source_files"]
- names=["constraints.docker.txt","pyproject.toml","ai/prototype/package-lock.json","ai/prototype/package.json","ai/prototype/server.js"]
+ names=["dev/runtime-contract.json","constraints.docker.txt","pyproject.toml","ai/prototype/package-lock.json","ai/prototype/package.json","ai/prototype/server.js"]
  names.extend(str(p.relative_to(root)) for p in sorted((root/"src").rglob("*")) if p.is_file() and "__pycache__" not in p.parts and p.suffix!=".pyc")
- for directory in (root/"dev/android/tailnet-proxy",root/"dev/android/bin"):
-  names.extend(str(p.relative_to(root)) for p in sorted(directory.rglob("*")) if p.is_file())
- if (root/"dev/android/host.py").is_file(): names.append("dev/android/host.py")
+ for directory in (root/"dev/android",):
+  names.extend(str(p.relative_to(root)) for p in sorted(directory.rglob("*")) if p.is_file() and "__pycache__" not in p.parts and p.suffix!=".pyc")
  valid=set(names)==set(expected) and all(hashlib.sha256((root/name).read_bytes()).hexdigest()==expected[name] for name in names)
 except (OSError,ValueError,KeyError,TypeError):
  valid=False
