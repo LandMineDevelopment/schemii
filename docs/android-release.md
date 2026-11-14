@@ -41,7 +41,7 @@ below the 900-second result/ingress window. Desktop streaming stays at 120 secon
    pkg install curl
    curl --fail --location --proto '=https' --tlsv1.2 \
      --output "$HOME/install-android.sh" \
-     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.11/install-android.sh
+     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.12/install-android.sh
    ```
 
    Inspect the downloaded file, then run it:
@@ -53,7 +53,7 @@ below the 900-second result/ingress window. Desktop streaming stays at 120 secon
 The standalone installer embeds the exact release archive checksum and source
 commit. It verifies the download, complete file inventory and safe archive paths
 before extraction. It installs a new version directory under
-`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.11`, then delegates runtime
+`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.12`, then delegates runtime
 installation to that source's `./start.sh --android install`. After dependency
 installation succeeds, it installs the global `schemii` command and points the
 visible `~/schemii` folder to that version. Existing changed source is preserved

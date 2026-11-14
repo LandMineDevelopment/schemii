@@ -22,6 +22,82 @@ async function bookstoreWorkspace(request) {
   return workspace;
 }
 
+async function expectTableConsoleGeometry(page) {
+  // Wait for pane/viewport transitions, then measure the actual runtime children:
+  // createSqlConsole inserts Explain/Analyze before the native textarea.
+  await expect(async () => {
+    const geometry = await page.locator("#inspector-console-content").evaluate(content => {
+      const box = node => {
+        const rect = node.getBoundingClientRect();
+        return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, height: rect.height };
+      };
+      const actions = content.querySelector(".query-plan-actions");
+      const styles = getComputedStyle(actions);
+      return {
+        content: box(content),
+        actions: box(actions),
+        actionHeight: box(actions.querySelector("button")).height,
+        actionPadding: parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom),
+        editor: box(content.querySelector("textarea")),
+        footer: box(content.querySelector("footer")),
+        overflow: content.scrollWidth > content.clientWidth || document.documentElement.scrollWidth > innerWidth,
+      };
+    });
+    expect(geometry.actions.height, "toolbar must not consume the editor's spare height")
+      .toBeLessThanOrEqual(geometry.actionHeight + geometry.actionPadding + 2);
+    expect(Math.abs(geometry.actions.top - geometry.content.top)).toBeLessThanOrEqual(2);
+    expect(Math.abs(geometry.editor.top - geometry.actions.bottom), "query starts directly below the toolbar")
+      .toBeLessThanOrEqual(2);
+    expect(geometry.editor.height).toBeGreaterThan(80);
+    expect(Math.abs(geometry.editor.bottom - geometry.footer.top)).toBeLessThanOrEqual(2);
+    expect(Math.abs(geometry.footer.bottom - geometry.content.bottom)).toBeLessThanOrEqual(2);
+    expect(geometry.editor.left).toBeGreaterThanOrEqual(geometry.content.left - 1);
+    expect(geometry.editor.right).toBeLessThanOrEqual(geometry.content.right + 1);
+    expect(geometry.overflow).toBe(false);
+  }).toPass({ timeout: 7_500 });
+}
+
+test("table console keeps its query below a compact toolbar with rows collapsed on desktop and mobile", async ({ page, request }, testInfo) => {
+  const workspace = await bookstoreWorkspace(request);
+  await page.goto(`/?workspace=${workspace.id}&layer=tables&table=authors`);
+  await page.getByRole("button", { name: "Open table rows and console" }).click();
+  await page.locator("#show-inspector-console").click();
+  await expect(page.locator("#inspector-rows-content")).toBeHidden();
+  if (testInfo.project.name === "desktop-chromium") await expect(page.locator("#inspector")).toBeVisible();
+  else await expect(page.locator("#inspector")).toBeHidden();
+
+  const draft = page.getByRole("textbox", { name: "Table-scoped read-only SQL query" });
+  await expect(draft).toHaveValue('SELECT *\nFROM "bookstore"."authors"\nLIMIT 100;');
+  await expectTableConsoleGeometry(page);
+
+  // Long drafts must scroll inside the same editor, with a usable caret/selection.
+  const statement = "SELECT 260 AS alignment_marker;";
+  const sql = `${statement}\n${Array.from({ length: 120 }, (_, i) => `-- draft line ${i}`).join("\n")}`;
+  await draft.fill(sql);
+  await draft.press("Control+End");
+  await expect.poll(() => draft.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+  await expectTableConsoleGeometry(page);
+  await draft.press("Control+Home");
+  // Chromium may scroll within the textarea's top padding when revealing Home.
+  await expect.poll(() => draft.evaluate(node => node.scrollTop))
+    .toBeLessThanOrEqual(await draft.evaluate(node => parseFloat(getComputedStyle(node).paddingTop) + 1));
+  expect(await draft.evaluate(node => node.selectionStart)).toBe(0);
+  await draft.press("Shift+End");
+  expect(await draft.evaluate(node => node.value.slice(node.selectionStart, node.selectionEnd))).toBe(statement);
+  await draft.press("Control+Enter");
+  await expect(page.locator("#inspector-sql-results tbody")).toContainText("260");
+
+  await page.locator("#show-inspector-console").click();
+  await expect(draft).toHaveValue(sql);
+  await expectTableConsoleGeometry(page);
+  await page.locator("#inspector-rows-header").click({ button: "right" });
+  await expect(page.locator("#main-layout")).toHaveClass(/inspector-data-maximized/);
+  await expectTableConsoleGeometry(page);
+  await page.locator("#inspector-rows-header").click({ button: "right" });
+  await expect(page.locator("#main-layout")).not.toHaveClass(/inspector-data-maximized/);
+  await expectTableConsoleGeometry(page);
+});
+
 test("inspector ports database rows and the console workflow while migration stays separate", async ({ page, request }, testInfo) => {
   const desktop = testInfo.project.name === "desktop-chromium";
   const workspace = await databaseDesignWorkspace(request);
