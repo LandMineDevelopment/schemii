@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# Versioned release bootstrap. Download this file, inspect it, then run with bash.
+set -Eeuo pipefail
+umask 077
+
+TAG='@TAG@'
+ARCHIVE='@ARCHIVE@'
+SHA256='@SHA256@'
+COMMIT='@COMMIT@'
+
+if [[ "${1-}" == --help ]]; then
+  printf 'Install Schemii %s (%s) into Termux private storage.\n' "$TAG" "$COMMIT"
+  printf 'Usage: bash install-android.sh [--stop-only]\nRequires official Termux on ARM64 Android and network access.\n'
+  printf -- '--stop-only verifies/extracts this release and stops the existing runtime without installing dependencies.\n'
+  exit 0
+fi
+MODE=install
+if (( $# == 1 )) && [[ "$1" == --stop-only ]]; then
+  MODE=stop
+elif (( $# != 0 )); then
+  printf 'Unknown arguments. Use --help.\n' >&2
+  exit 2
+fi
+case "${PREFIX-}" in
+  /data/data/com.termux/files/usr|/data/user/0/com.termux/files/usr) ;;
+  *) printf 'Run this installer inside the official Termux Android app.\n' >&2; exit 1 ;;
+esac
+[[ "$(uname -m)" == aarch64 ]] || { printf 'This preview requires ARM64 (aarch64).\n' >&2; exit 1; }
+[[ "$(id -u)" != 0 ]] || { printf 'Run as the normal unrooted Termux app user.\n' >&2; exit 1; }
+command -v pkg >/dev/null || { printf 'Termux pkg is unavailable.\n' >&2; exit 1; }
+if ! command -v python >/dev/null || ! command -v curl >/dev/null; then
+  pkg install -y python curl
+fi
+
+TEMPORARY="$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/schemii-download.XXXXXXXX")"
+trap 'rm -rf -- "$TEMPORARY"' EXIT
+curl --fail --location --proto '=https' --tlsv1.2 \
+  --output "$TEMPORARY/$ARCHIVE" \
+  "https://github.com/LandMineDevelopment/schemii/releases/download/$TAG/$ARCHIVE"
+
+SOURCE="$(python - "$TEMPORARY/$ARCHIVE" "$HOME" "$TAG" "$SHA256" "$COMMIT" <<'PY'
+# BEGIN_RELEASE_INSTALLER_PYTHON
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import shutil
+import stat
+import sys
+import tarfile
+import tempfile
+
+MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_FILES = 20000
+
+
+def digest_stream(stream):
+    digest = hashlib.sha256()
+    while True:
+        chunk = stream.read(1024 * 1024)
+        if not chunk:
+            return digest.hexdigest()
+        digest.update(chunk)
+
+
+def regular_name(name, top):
+    path = PurePosixPath(name)
+    if path.is_absolute() or not name.startswith(top + '/'):
+        raise ValueError('Archive has an unexpected root')
+    parts = name.split('/')
+    if any(part in ('', '.', '..') for part in parts):
+        raise ValueError('Archive contains an unsafe path')
+    return '/'.join(parts[1:])
+
+
+def read_manifest(bundle, top, tag, commit):
+    members = bundle.getmembers()
+    if len(members) > MAX_FILES:
+        raise ValueError('Archive has too many files')
+    names, total = {}, 0
+    for member in members:
+        if not member.isfile() or member.issym() or member.islnk():
+            raise ValueError('Archive may contain only regular files')
+        path = regular_name(member.name, top)
+        if path in names or member.size > MAX_FILE_BYTES or member.size < 0:
+            raise ValueError('Archive contains duplicate or oversized entries')
+        if member.mode not in (0o644, 0o755):
+            raise ValueError('Archive contains unsafe permissions')
+        names[path] = member
+        total += member.size
+    if total > MAX_TOTAL_BYTES:
+        raise ValueError('Archive is too large')
+    metadata = names.get('ANDROID_RELEASE.json')
+    if metadata is None or metadata.size > 4 * 1024 * 1024:
+        raise ValueError('Release metadata is missing or oversized')
+    with bundle.extractfile(metadata) as stream:
+        manifest = json.load(stream)
+    if (manifest.get('schema') != 1 or manifest.get('tag') != tag
+            or manifest.get('commit') != commit or manifest.get('archive_root') != top
+            or manifest.get('experimental') is not True):
+        raise ValueError('Release identity does not match this installer')
+    expected_runtime = {'architecture': 'aarch64', 'debian': '13', 'python': '3.13',
+                        'postgresql': '17', 'node': '22.22.2'}
+    if manifest.get('runtime') != expected_runtime:
+        raise ValueError('Unexpected release runtime')
+    files = manifest.get('files')
+    if not isinstance(files, dict) or set(files) != set(names) - {'ANDROID_RELEASE.json'}:
+        raise ValueError('Release file inventory does not match the archive')
+    for path, details in files.items():
+        member = names[path]
+        if (not isinstance(details, dict) or details.get('size') != member.size
+                or details.get('mode') != member.mode):
+            raise ValueError('Release file attributes do not match')
+        with bundle.extractfile(member) as stream:
+            if digest_stream(stream) != details.get('sha256'):
+                raise ValueError('Release file checksum does not match')
+    return manifest, names
+
+
+def check_existing(destination, manifest, metadata_bytes):
+    if destination.is_symlink() or not destination.is_dir():
+        raise ValueError('Release destination is not an ordinary directory')
+    expected = set(manifest['files']) | {'ANDROID_RELEASE.json'}
+    directories = {str(parent) for path in expected
+                   for parent in PurePosixPath(path).parents if str(parent) != '.'}
+    # Only these installation products may coexist with the immutable source.
+    generated = {'.schemii', 'build', 'src/schemii.egg-info',
+                 'ai/prototype/node_modules'}
+    for current, children, files in os.walk(destination, followlinks=False):
+        relative = Path(current).relative_to(destination)
+        for name in list(children):
+            path = (relative / name).as_posix()
+            if path in generated or name == '__pycache__':
+                children.remove(name)
+            elif (Path(current) / name).is_symlink() or path not in directories:
+                raise ValueError('Existing release has unexpected source; it was preserved')
+        if any((relative / name).as_posix() not in expected for name in files):
+            raise ValueError('Existing release has unexpected source; it was preserved')
+    for path, details in manifest['files'].items():
+        local = destination / path
+        components = [destination.joinpath(*PurePosixPath(path).parts[:i])
+                      for i in range(1, len(PurePosixPath(path).parts) + 1)]
+        if any(component.is_symlink() for component in components) or not local.is_file():
+            raise ValueError('Existing release source is missing or symlinked; it was preserved')
+        with local.open('rb') as stream:
+            if digest_stream(stream) != details['sha256']:
+                raise ValueError('Existing release source was changed; it was preserved')
+        if stat.S_IMODE(local.stat().st_mode) != details['mode']:
+            raise ValueError('Existing release permissions changed; it was preserved')
+    metadata = destination / 'ANDROID_RELEASE.json'
+    if metadata.is_symlink() or not metadata.is_file() or metadata.read_bytes() != metadata_bytes:
+        raise ValueError('Existing release metadata changed; it was preserved')
+
+
+def install_archive(archive, releases, tag, expected_sha, commit):
+    archive, releases = Path(archive), Path(releases)
+    with archive.open('rb') as stream:
+        if digest_stream(stream) != expected_sha:
+            raise ValueError('Download checksum mismatch; nothing was installed')
+    top = 'schemii-' + tag
+    with tarfile.open(archive, 'r:gz') as bundle:
+        manifest, names = read_manifest(bundle, top, tag, commit)
+        with bundle.extractfile(names['ANDROID_RELEASE.json']) as stream:
+            metadata_bytes = stream.read()
+        # Validate all archive paths, types and hashes before creating anything.
+        if any(parent.is_symlink() for parent in (releases, *releases.parents)):
+            raise ValueError('Install parent must not be symlinked')
+        releases.mkdir(parents=True, exist_ok=True, mode=0o700)
+        releases.chmod(0o700)
+        destination = releases / tag
+        if destination.exists() or destination.is_symlink():
+            check_existing(destination, manifest, metadata_bytes)
+            return destination
+        temporary = Path(tempfile.mkdtemp(prefix='.install-', dir=releases))
+        try:
+            for path, member in names.items():
+                target = temporary / path
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with bundle.extractfile(member) as source, target.open('xb') as output:
+                    shutil.copyfileobj(source, output)
+                target.chmod(member.mode)
+            # Another installer cannot silently replace a completed installation.
+            if destination.exists() or destination.is_symlink():
+                raise ValueError('Release destination appeared during install; it was preserved')
+            os.rename(temporary, destination)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+        return destination
+
+
+def main():
+    archive, home, tag, expected_sha, commit = sys.argv[1:]
+    home_path = Path(home)
+    resolved_home = home_path.resolve(strict=True)
+    allowed = (Path('/data/data/com.termux/files/home'), Path('/data/user/0/com.termux/files/home'))
+    if str(resolved_home) not in {str(path.resolve()) for path in allowed}:
+        raise ValueError('Termux HOME must use app-private internal storage')
+    releases = home_path / '.local/share/schemii/releases'
+    print(install_archive(archive, releases, tag, expected_sha, commit))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, OSError, KeyError, TypeError, tarfile.TarError, json.JSONDecodeError) as error:
+        print('Android download installer: ' + str(error), file=sys.stderr)
+        raise SystemExit(1)
+# END_RELEASE_INSTALLER_PYTHON
+PY
+)"
+# BEGIN_RELEASE_ACTION
+run_release_action() {
+  local mode=$1 source=$2
+  cd -- "$source"
+  if [[ "$mode" == stop ]]; then
+    printf 'Using verified release to stop the existing runtime; dependencies and database files are preserved.\n'
+    bash ./start.sh --android stop || return
+    printf 'Stopped. Rerun the downloaded installer without --stop-only to install this release.\n'
+    return
+  fi
+  [[ "$mode" == install ]] || { printf 'Invalid release action.\n' >&2; return 2; }
+  bash ./start.sh --android install || return
+  printf '\nInstalled source: %s\n' "$source"
+  printf 'Easy-to-find active folder: ~/schemii\n'
+  printf 'Run from any Termux directory: schemii start | stop | restart | status\n'
+  printf 'Next, use your phone address from the Tailscale app:\n'
+  printf '  schemii configure --tailnet-ip 100.X.Y.Z --hostname PHONE.TAILNET.ts.net\n'
+  printf '  schemii start\n'
+  printf 'Optional trusted HTTPS after setup: schemii stop; schemii tailnet-enable; schemii start; schemii tailnet-login\n'
+  printf 'Read ~/schemii/docs/android-release.md for certificate trust, first account and device checks.\n'
+}
+# END_RELEASE_ACTION
+printf 'Verified %s at commit %s.\n' "$TAG" "$COMMIT"
+run_release_action "$MODE" "$SOURCE"

@@ -71,6 +71,7 @@ async function selectTable(page, name) {
 
 test("inspector preserves drafts until discard and removes unsaved columns locally", async ({ page, request }) => {
   await withDesign(request, async ({ workspace }) => {
+    const savedDesign = await json(await request.get(`${API}/${workspace.id}/design`));
     await page.goto(`/?workspace=${workspace.id}&layer=tables`);
     await selectTable(page, "editor_alpha");
     const name = page.locator("#inspector-table-name");
@@ -93,10 +94,18 @@ test("inspector preserves drafts until discard and removes unsaved columns local
     await expect(rows).toHaveCount(2);
     const draft = rows.last();
     await draft.getByRole("textbox", { name: "Column name", exact: true }).fill("scratch");
+    await expect(save).toBeEnabled();
     await draft.getByRole("button", { name: "Remove scratch", exact: true }).click();
     await expect(rows).toHaveCount(1);
+    await expect(save).toBeDisabled();
+    await expect(page.locator("#discard-inspector-table-button")).toBeDisabled();
+    await expect(page.locator("#inspector-table-status")).toContainText("Saved in design revision");
+    expect(await json(await request.get(`${API}/${workspace.id}/design`))).toEqual(savedDesign);
+
+    await name.fill("another_draft");
     await expect(save).toBeEnabled();
     await page.locator("#discard-inspector-table-button").click();
+    await expect(name).toHaveValue("editor_beta");
     await expect(save).toBeDisabled();
     await expect(rows).toHaveCount(1);
   });

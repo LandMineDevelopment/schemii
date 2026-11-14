@@ -539,6 +539,8 @@ def commands(profile: str, base: str) -> list[list[str]]:
                 ".schemii/test-selection/report-validation.json",
             ]
         ]
+    if profile == "full":
+        result.append(["python", "scripts/check_runtime_parity.py"])
     if "node" in selected:
         result.append(["npm", "test"])
     if "static" in selected:
