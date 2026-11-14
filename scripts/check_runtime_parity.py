@@ -473,6 +473,12 @@ def check(root: Path = ROOT) -> dict:
         == contract["private_state"]["release_private_suffixes"],
         "release private-suffix policy drift",
     )
+    context_rules = (root / ".dockerignore").read_text().splitlines()
+    for suffix in contract["private_state"]["release_private_suffixes"]:
+        require(
+            "**/*" + suffix in context_rules,
+            f"Docker private suffix exclusion missing: {suffix}",
+        )
     for component in contract["private_state"]["release_excludes"]:
         for prefix in ("src", "dev/android", "ai/prototype"):
             require(

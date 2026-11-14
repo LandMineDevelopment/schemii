@@ -15,6 +15,7 @@ from dev.runtime_manifest import manifest
 @pytest.fixture
 def source(tmp_path):
     for name in (
+        ".dockerignore",
         "Dockerfile",
         "compose.test.yaml",
         "pyproject.toml",
@@ -252,6 +253,24 @@ def test_full_ci_runs_parity_before_expensive_layers():
 def stage_docker_builder(source, destination):
     """Stage actual first-stage COPY inputs; never invoke Docker or a server."""
     import shlex
+    import fnmatch
+
+    # Exercise the actual recursive basename/suffix rules used for private
+    # context inputs. This is deliberately not a general Dockerignore parser.
+    recursive = [
+        rule.removeprefix("**/")
+        for rule in (source / ".dockerignore").read_text().splitlines()
+        if rule.startswith("**/")
+    ]
+
+    def ignored(directory, names):
+        return [
+            name
+            for name in names
+            if name == "__pycache__"
+            or name.endswith(".egg-info")
+            or any(fnmatch.fnmatchcase(name, rule) for rule in recursive)
+        ]
 
     destination.mkdir()
     for line in (source / "Dockerfile").read_text().split("\nFROM ")[0].splitlines():
@@ -268,9 +287,7 @@ def stage_docker_builder(source, destination):
                         path,
                         target,
                         dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns(
-                            "__pycache__", "*.pyc", "*.egg-info"
-                        ),
+                        ignore=ignored,
                     )
                 else:
                     target.mkdir(parents=True, exist_ok=True)
@@ -291,6 +308,9 @@ def test_real_docker_copy_inventory_binds_wheel_inputs_and_excludes_private_ai_s
         private = source / "ai/prototype" / name
         private.parent.mkdir(parents=True, exist_ok=True)
         private.write_text("synthetic-private-marker")
+    for suffix in (".p12", ".pfx", ".pgpass", ".db"):
+        asset = source / "src/schemii/common/web/assets" / ("test-owned" + suffix)
+        asset.write_text("synthetic-private-marker")
     stage = stage_docker_builder(source, tmp_path / "docker-stage")
     record = manifest(stage, "a" * 40)
     actual = {str(p.relative_to(stage)) for p in stage.rglob("*") if p.is_file()}
@@ -354,3 +374,10 @@ def test_launcher_provenance_needs_no_host_python_and_does_not_claim_clean_after
         },
     )
     assert result.stdout == expected
+
+
+@pytest.mark.parametrize("suffix", [".p12", ".pfx", ".pgpass", ".db"])
+def test_real_docker_context_cannot_lose_private_asset_exclusion(source, suffix):
+    change(source, ".dockerignore", "**/*" + suffix + "\n", "")
+    with pytest.raises(ParityError, match="private suffix exclusion missing"):
+        check(source)

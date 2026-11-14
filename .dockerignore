@@ -70,3 +70,10 @@ dev/*
 **/password
 **/password.txt
 **/pgpass
+**/*.p12
+**/*.pfx
+**/*.pgpass
+**/*.log
+**/*.pyc
+**/*.sqlite
+**/*.db
