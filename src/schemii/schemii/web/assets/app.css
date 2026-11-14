@@ -224,10 +224,11 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .inspector-console-bar { display: flex; width: 100%; min-height: 48px; flex: none; align-items: center; justify-content: space-between; gap: 18px; padding: 7px 13px; border: 0; color: inherit; text-align: left; background: #11171e; cursor: pointer; transition: background .15s; }
 .inspector-console-bar > span:first-child { display: grid; min-width: 0; gap: 2px; }
 .inspector-console-bar > span:last-child { overflow: hidden; color: #687788; font: 8px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.inspector-console-content { display: grid; min-height: 0; flex: 1; grid-template-rows: minmax(0, 1fr) auto; opacity: 1; transform: translate3d(0, 0, 0); background: #080d12; transition: opacity .22s ease, transform .34s cubic-bezier(.22, 1, .36, 1); }
+/* Only the editor grows; the optional query-plan toolbar and footer keep their natural height. */
+.inspector-console-content { display: flex; min-height: 0; flex: 1; flex-direction: column; opacity: 1; transform: translate3d(0, 0, 0); background: #080d12; transition: opacity .22s ease, transform .34s cubic-bezier(.22, 1, .36, 1); }
 .inspector-data-workspace[data-active-pane="rows"] .inspector-console-content { opacity: 0; transform: translate3d(0, 6px, 0); }
 .inspector-data-workspace[data-active-pane="console"] .inspector-rows-content { opacity: 0; transform: translate3d(0, -6px, 0); }
-.inspector-console-content > textarea { width: 100%; height: 100%; min-height: 0; resize: none; padding: 15px 16px; border: 0; outline: 0; color: #d7e0ea; background: transparent; font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.inspector-console-content > textarea { width: 100%; min-width: 0; min-height: 0; flex: 1; overflow: auto; resize: none; padding: 15px 16px; border: 0; outline: 0; color: #d7e0ea; background: transparent; font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .inspector-console-content > textarea:focus { box-shadow: inset 3px 0 #65a9ff; }
 .catalog-stats { display: grid; grid-template-columns: repeat(3, 1fr); margin: 0; padding: 13px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .catalog-stats div { border-right: 1px solid var(--line); }
