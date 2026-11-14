@@ -11,7 +11,7 @@ COPY dev/runtime-contract.json dev/runtime_manifest.py ./dev/
 COPY dev/schemii.toml ./dev/
 COPY dev/ingress/nginx.conf ./dev/ingress/
 COPY dev/postgres/*.sh dev/postgres/*.sql ./dev/postgres/
-COPY ai/prototype ./ai/prototype
+COPY ai/prototype/*.js ai/prototype/package.json ai/prototype/package-lock.json ai/prototype/Dockerfile ./ai/prototype/
 ARG SCHEMII_SOURCE_COMMIT=unknown
 RUN python dev/runtime_manifest.py --source-commit "$SCHEMII_SOURCE_COMMIT" > /runtime-build.json
 RUN python -m pip wheel --constraint constraints.docker.txt --wheel-dir /wheels .

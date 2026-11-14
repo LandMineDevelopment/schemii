@@ -158,6 +158,32 @@
       "secrets/demo_target_password",
       "secrets/account_setup_token",
       "secrets/opencode_password"
+    ],
+    "release_private_names": [
+      "account_setup_token",
+      "credentials.json",
+      "credentials.txt",
+      "demo_admin_password",
+      "demo_target_password",
+      "login.txt",
+      "metadata_app_password",
+      "metadata_encryption_key",
+      "metadata_password",
+      "opencode_password",
+      "password",
+      "password.txt",
+      "pgpass"
+    ],
+    "release_private_suffixes": [
+      ".key",
+      ".pem",
+      ".p12",
+      ".pfx",
+      ".pgpass",
+      ".log",
+      ".pyc",
+      ".sqlite",
+      ".db"
     ]
   },
   "dependency_inputs": {

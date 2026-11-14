@@ -19,6 +19,9 @@ def source(tmp_path):
         "compose.test.yaml",
         "pyproject.toml",
         "constraints.docker.txt",
+        "README.md",
+        "LICENSE",
+        "start.sh",
     ):
         shutil.copyfile(ROOT / name, tmp_path / name)
     for name in ("src", "dev", "ai/prototype"):
@@ -244,3 +247,110 @@ def test_full_ci_runs_parity_before_expensive_layers():
     from scripts.ci.test_selection import commands
 
     assert commands("full", "HEAD")[0] == ["python", "scripts/check_runtime_parity.py"]
+
+
+def stage_docker_builder(source, destination):
+    """Stage actual first-stage COPY inputs; never invoke Docker or a server."""
+    import shlex
+
+    destination.mkdir()
+    for line in (source / "Dockerfile").read_text().split("\nFROM ")[0].splitlines():
+        if not line.startswith("COPY "):
+            continue
+        tokens = shlex.split(line)[1:]
+        target = destination / tokens[-1]
+        for pattern in tokens[:-1]:
+            found = list(source.glob(pattern))
+            assert found, pattern
+            for path in found:
+                if path.is_dir():
+                    shutil.copytree(
+                        path,
+                        target,
+                        dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns(
+                            "__pycache__", "*.pyc", "*.egg-info"
+                        ),
+                    )
+                else:
+                    target.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, target / path.name)
+    return destination
+
+
+def test_real_docker_copy_inventory_binds_wheel_inputs_and_excludes_private_ai_state(
+    source, tmp_path
+):
+    for name in (
+        "credentials.json",
+        "password.txt",
+        ".env",
+        "private/secret.json",
+        "secrets/key.json",
+    ):
+        private = source / "ai/prototype" / name
+        private.parent.mkdir(parents=True, exist_ok=True)
+        private.write_text("synthetic-private-marker")
+    stage = stage_docker_builder(source, tmp_path / "docker-stage")
+    record = manifest(stage, "a" * 40)
+    actual = {str(p.relative_to(stage)) for p in stage.rglob("*") if p.is_file()}
+    assert set(record["source_files"]) == actual
+    assert not any(
+        "synthetic-private-marker" in p.read_text(errors="replace")
+        for p in stage.rglob("*")
+        if p.is_file()
+    )
+    for name in ("README.md", "LICENSE"):
+        before = record["source_files"][name]
+        (stage / name).write_text(
+            (stage / name).read_text() + "\nchanged test fixture\n"
+        )
+        assert manifest(stage, "a" * 40)["source_files"][name] != before
+    # The source-checkout helper also excludes known private names even when
+    # invoked before context assembly; it does not depend on Docker for hygiene.
+    assert not any(
+        name.endswith("credentials.json")
+        for name in manifest(source, "a" * 40)["source_files"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "failure", "expected"),
+    [
+        ("", False, "a" * 40),
+        (" M source", False, "a" * 40 + "+dirty"),
+        ("", True, "unknown"),
+    ],
+)
+def test_launcher_provenance_needs_no_host_python_and_does_not_claim_clean_after_failed_git_status(
+    tmp_path, status, failure, expected
+):
+    import os
+    import subprocess
+
+    git = tmp_path / "git"
+    git.write_text(
+        '#!/bin/sh\ncase "$*" in *rev-parse*) printf "%s" "$FIXTURE_COMMIT";; *status*) printf "%s" "$FIXTURE_STATUS"; exit "$FIXTURE_FAILURE";; esac\n'
+    )
+    git.chmod(0o700)
+    source = (ROOT / "start.sh").read_text()
+    block = source.split(
+        "# Bind each newly built image to its source; content hashes also cover dirty builds.\n",
+        1,
+    )[1].split("printf 'Building the current Schemii application image", 1)[0]
+    assert "python" not in block
+    result = subprocess.run(
+        ["bash", "-c", block + '\nprintf "%s" "$SCHEMII_SOURCE_COMMIT"'],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:" + os.environ["PATH"],
+            "ROOT_DIR": str(tmp_path),
+            "FIXTURE_COMMIT": "a" * 40,
+            "FIXTURE_STATUS": status,
+            "FIXTURE_FAILURE": str(int(failure)),
+        },
+    )
+    assert result.stdout == expected

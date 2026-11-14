@@ -8,10 +8,11 @@ import hashlib
 import json
 from pathlib import Path
 import re
-import subprocess
 
 INPUTS = (
     "Dockerfile",
+    "README.md",
+    "LICENSE",
     "compose.test.yaml",
     "pyproject.toml",
     "constraints.docker.txt",
@@ -32,6 +33,8 @@ def manifest(root: Path, commit: str) -> dict:
         raise ValueError("Invalid source commit identity")
     contract = json.loads((root / "dev/runtime-contract.json").read_text())
     excluded = set(contract["private_state"]["release_excludes"])
+    private_names = set(contract["private_state"]["release_private_names"])
+    private_suffixes = tuple(contract["private_state"]["release_private_suffixes"])
     paths = {root / name for name in INPUTS}
     for prefix in PREFIXES:
         paths.update(
@@ -40,6 +43,16 @@ def manifest(root: Path, commit: str) -> dict:
             if path.is_file()
             and "__pycache__" not in path.parts
             and path.suffix != ".pyc"
+            and path.name not in private_names
+            and not path.name.endswith(private_suffixes)
+            and (
+                prefix != "ai/prototype"
+                or (path.parent == root / prefix and path.suffix == ".js")
+            )
+            and (
+                prefix != "dev/postgres"
+                or (path.parent == root / prefix and path.suffix in (".sh", ".sql"))
+            )
             and not excluded.intersection(path.relative_to(root).parts)
             and not any(
                 part.startswith((".env", ".venv"))
@@ -67,30 +80,12 @@ def manifest(root: Path, commit: str) -> dict:
     }
 
 
-def source_commit(root: Path) -> str:
-    try:
-        commit = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=root, text=True
-        ).strip()
-        dirty = subprocess.check_output(
-            ["git", "status", "--porcelain", "--untracked-files=normal"], cwd=root
-        )
-        return commit + ("+dirty" if dirty else "")
-    except (OSError, subprocess.CalledProcessError):
-        return "unknown"
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--source-commit", default="unknown")
-    parser.add_argument("--print-commit", action="store_true")
     args = parser.parse_args()
-    print(
-        source_commit(args.root)
-        if args.print_commit
-        else json.dumps(manifest(args.root, args.source_commit), sort_keys=True)
-    )
+    print(json.dumps(manifest(args.root, args.source_commit), sort_keys=True))
     return 0
 
 

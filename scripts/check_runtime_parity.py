@@ -463,6 +463,16 @@ def check(root: Path = ROOT) -> dict:
         set(contract["shared_sources"]) <= set(builder.PREFIXES),
         "Android shared release sources missing",
     )
+    require(
+        set(builder.PRIVATE_NAMES)
+        == set(contract["private_state"]["release_private_names"]),
+        "release private-name policy drift",
+    )
+    require(
+        list(builder.PRIVATE_SUFFIXES)
+        == contract["private_state"]["release_private_suffixes"],
+        "release private-suffix policy drift",
+    )
     for component in contract["private_state"]["release_excludes"]:
         for prefix in ("src", "dev/android", "ai/prototype"):
             require(

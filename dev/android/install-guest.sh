@@ -17,7 +17,7 @@ discard_unactivated_environment() {
 }
 activate_runtime() {
   python3 - "$1" "$2" "$3" <<'PY'
-import hashlib, importlib.metadata, json, os, pathlib, secrets, subprocess, sys, tempfile
+import hashlib, json, os, pathlib, secrets, subprocess, sys, tempfile
 base=pathlib.Path(sys.argv[1])
 root=base/'opt/schemii'
 opt=base/'opt'
