@@ -1257,6 +1257,30 @@ def test_start_refuses_unknown_lock_and_keeps_prior_ownership_receipt(
     assert receipt_path.read_bytes() == before
 
 
+def test_prepare_tailnet_rejects_unknown_lock_before_any_guest_mutation(
+    runtime, monkeypatch, capsys
+):
+    directory = runtime.state / "postgres/target"
+    directory.mkdir()
+    pidfile = directory / "postmaster.pid"
+    contents = f"987654\n{directory}\n"
+    pidfile.write_text(contents)
+    monkeypatch.setattr(android, "Runtime", lambda: runtime)
+    monkeypatch.setattr(android, "process_identity", lambda _pid: None)
+    monkeypatch.setattr(
+        runtime, "_prepare", lambda: pytest.fail("preflight must precede preparation")
+    )
+    monkeypatch.setattr(
+        runtime, "_secrets", lambda: pytest.fail("preflight must precede secrets")
+    )
+    monkeypatch.setattr(
+        runtime, "_tls", lambda _config: pytest.fail("preflight must precede TLS")
+    )
+    assert android.main(["prepare-tailnet"]) == 1
+    assert "Unverified PostgreSQL target" in capsys.readouterr().err
+    assert pidfile.read_text() == contents
+
+
 def test_captured_orphan_member_authorizes_only_its_original_group(
     runtime, monkeypatch
 ):

@@ -14,6 +14,7 @@ Usage: schemii COMMAND [ARGUMENTS]
   install                         Install the dedicated Debian 13 ARM64 runtime
   configure --tailnet-ip IP --hostname NAME
   start | stop | restart | status  Manage the complete phone backend
+  wait-network                   Wait up to 120 seconds for the configured VPN address
   doctor                         Inspect runtime dependencies and device checks
   logs [SERVICE]                 Read bounded private logs
   export-ca DEST | credentials DEST  Export CA or private setup references
@@ -379,6 +380,7 @@ manage_boot() {
   [[ ! -e "$target.tmp" && ! -L "$target.tmp" ]] || fail 'Existing boot temporary file is preserved; inspect it before retrying.'
   {
     printf '#!%s/bin/bash\n# Schemii Android preview boot v1\n' "$PREFIX"
+    printf 'set -eu\n%q wait-network\n' "$PREFIX/bin/schemii"
     printf 'exec %q start\n' "$PREFIX/bin/schemii"
   } > "$target.tmp"
   chmod 700 "$target.tmp"
@@ -389,7 +391,7 @@ main() {
   local action=${1:---help}
   case "$action" in --help|-h|help) usage; return;; esac
   shift
-  case "$action" in install|configure|start|stop|restart|status|doctor|logs|backup|restore|verify-backup|export-ca|credentials|reset-password|tailnet-enable|tailnet-disable|tailnet-login|enable-boot|disable-boot) ;; *) fail "Unknown command: $action"; return 1;; esac
+  case "$action" in install|configure|start|stop|restart|status|doctor|logs|backup|restore|verify-backup|export-ca|credentials|reset-password|tailnet-enable|tailnet-disable|tailnet-login|enable-boot|disable-boot|wait-network) ;; *) fail "Unknown command: $action"; return 1;; esac
   if [[ "$action" == reset-password ]]; then
     if ! { (($# == 1)) || { (($# == 2)) && [[ "$1" == -- ]]; }; }; then
       fail 'Usage: schemii reset-password [--] USERNAME; enter the password only at the hidden prompts.' || return 2
@@ -405,7 +407,7 @@ main() {
   [[ $(realpath -- "$SCHEMII_ANDROID_CONTROL") == "$(realpath -- "$HOME")/"* ]] || fail 'Control directory must stay in Termux private home.'
   safe_control_paths
   # Serialize host lifecycle mutations; read-only commands never wait on a start.
-  case "$action" in status|doctor|logs|tailnet-login) ;; *) exec 9>"$SCHEMII_ANDROID_CONTROL/launcher.lock"; flock -n 9 || fail 'Another Android lifecycle action is running.';; esac
+  case "$action" in status|doctor|logs|tailnet-login|wait-network) ;; *) exec 9>"$SCHEMII_ANDROID_CONTROL/launcher.lock"; flock -n 9 || fail 'Another Android lifecycle action is running.';; esac
   if [[ "$action" == install ]]; then install_runtime "$@"; return; fi
   require_proot
   require_owned
@@ -415,6 +417,7 @@ main() {
     start) start_runtime "$@";;
     stop) stop_runtime "$@";;
     restart) restart_runtime "$@";;
+    wait-network) (($# == 0)) || fail 'wait-network takes no arguments.'; native_host wait-network;;
     enable-boot|disable-boot) (($# == 0)) || fail "$action takes no arguments."; manage_boot "$action";;
     *) runtime "$action" "$@";;
   esac

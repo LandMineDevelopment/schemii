@@ -41,7 +41,7 @@ below the 900-second result/ingress window. Desktop streaming stays at 120 secon
    pkg install curl
    curl --fail --location --proto '=https' --tlsv1.2 \
      --output "$HOME/install-android.sh" \
-     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.12/install-android.sh
+     https://github.com/LandMineDevelopment/schemii/releases/download/android-v0.1.0-preview.13/install-android.sh
    ```
 
    Inspect the downloaded file, then run it:
@@ -53,7 +53,7 @@ below the 900-second result/ingress window. Desktop streaming stays at 120 secon
 The standalone installer embeds the exact release archive checksum and source
 commit. It verifies the download, complete file inventory and safe archive paths
 before extraction. It installs a new version directory under
-`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.12`, then delegates runtime
+`$HOME/.local/share/schemii/releases/android-v0.1.0-preview.13`, then delegates runtime
 installation to that source's `./start.sh --android install`. After dependency
 installation succeeds, it installs the global `schemii` command and points the
 visible `~/schemii` folder to that version. Existing changed source is preserved
@@ -388,8 +388,24 @@ schemii enable-boot
 Use `schemii disable-boot` to remove only Schemii's own boot script. Enable Tailscale's
 always-on VPN and exempt **both Termux and Tailscale** from battery optimization
 using the phone's Settings. Boot startup needs the phone's first unlock and a
-ready VPN. If the VPN is not ready, inspect the recorded failure and run `start`
-after it connects; do not assume the service silently recovered.
+ready VPN. The generated script runs `schemii wait-network`, which waits up to
+120 seconds for the configured Tailscale IPv4 address to become bindable, then
+calls `schemii start` once. It uses the existing `configure` network settings in
+the retained userland; no separate boot address is needed. A timeout or invalid
+configuration stops before starting services. Inspect the Termux:Boot failure,
+connect Tailscale and run `schemii start`; startup failures are not retried.
+After upgrading, rerun `schemii enable-boot` to refresh an existing owned script.
+
+Termux:Boot dispatches scripts independently, so filename sorting does not
+guarantee one script finishes before another. Schemii's script owns its VPN gate
+and start sequence. First unlock remains required; this is not pre-unlock or
+unattended-reboot acceptance.
+
+After an interrupted run, the guest verifies each retained PostgreSQL lock
+against that cluster's exact guest path and previously captured, now-dead PID.
+PostgreSQL keeps responsibility for removing its own stale lock and recovering
+WAL. Unknown, live or symlinked locks are refused with retained files preserved;
+do not delete locks to force startup.
 
 A wake lock or process supervisor cannot guarantee that Android keeps the
 backend alive. Doze, memory pressure and firmware process limits still need
