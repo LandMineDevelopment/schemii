@@ -135,6 +135,7 @@ export function createColumnTypeAnalysis({
         entry.request?.abort();
         entry.queued = false;
         entries.delete(entry);
+        if (failure) status();
         if (!entries.size) dispose();
       },
     };
@@ -151,6 +152,7 @@ export function createColumnTypeAnalysis({
 
   return {
     add, dispose,
+    get disposed() { return disposed; },
     retry() {
       if (!active() || !failure) return;
       failure = null;

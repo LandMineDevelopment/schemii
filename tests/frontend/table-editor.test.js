@@ -153,3 +153,13 @@ test("permission denial stays explicit once and exposes an access recovery actio
   assert.match(f.warnings()[0].children[0].textContent, /not permitted.*HTTP 403.*product_access_denied.*administrator/);
   f.close();
 });
+
+test("deleting a failed draft column clears the shared error", async () => {
+  const f = fixture({ analyze: async () => { throw { code: "request_timeout" }; } });
+  await f.tick(); await f.type(0, "text"); await f.tick();
+  assert.equal(f.warnings().length, 1);
+  const failed = f.rows()[0];
+  failed.__cancelTypeAnalysis(); failed.remove();
+  assert.equal(f.warnings().length, 0);
+  f.close();
+});

@@ -208,3 +208,17 @@ test("cancelled transport stays neutral; disposed baseline discovery cannot laun
   assert.equal(stale.calls.length, 0);
   assert.equal(stale.changes.some(value => value.status === "ready"), false);
 });
+
+test("removing the only failed row clears the group error, including the final analysis row", async () => {
+  for (const withPeer of [true, false]) {
+    const h = harness({ analyze: async () => { throw { code: "request_timeout" }; } });
+    const failed = h.add("failed");
+    if (withPeer) h.add("unchanged");
+    await h.tick(); failed.select("text"); await h.tick();
+    assert.equal(h.statuses.at(-1).error.code, "request_timeout");
+    failed.dispose();
+    assert.equal(h.statuses.at(-1).error, null);
+    assert.equal(h.session.disposed, !withPeer);
+    h.session.dispose();
+  }
+});

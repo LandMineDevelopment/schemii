@@ -41,7 +41,9 @@ export function createTableEditor({
   const typeAnalysisSessions = new Map();
 
   function typeAnalysisSession(container) {
-    if (typeAnalysisSessions.has(container)) return typeAnalysisSessions.get(container).session;
+    const existing = typeAnalysisSessions.get(container);
+    if (existing && !existing.session.disposed) return existing.session;
+    existing?.warning.remove();
     const { activeWorkspace, design } = getContext();
     const warning = element("div", { className: "design-type-warning", hidden: true, attrs: { role: "status", "aria-live": "polite" } });
     const copy = element("p");
