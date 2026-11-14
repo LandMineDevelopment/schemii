@@ -751,6 +751,9 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .migration-conversion-custom > button { margin-top: 10px; }
 .migration-conversion .migration-conversion-error { color: #f0a6ae; }
 .design-type-warning { grid-column: 1 / -1; margin: 0; padding: 8px; border: 1px solid #80652b; border-radius: 7px; background: #282114; color: #e9c473; font-size: 9px; line-height: 1.5; }
+.design-type-warning[data-analysis-status="pending"] { padding: 0; border: 0; background: none; color: var(--muted); }
+.design-type-warning > p { margin: 0 0 8px; }
+
 .migration-badge { display: inline-flex; min-height: 18px; align-items: center; padding: 0 6px; border: 1px solid #3c4754; border-radius: 999px; color: #8996a4; background: #131a22; font: 700 6px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
 .migration-badge.success { border-color: #37694d; color: #7dd6a1; background: #102119; }
 .migration-badge.warning { border-color: #725d2b; color: #d7b45d; background: #221d10; }
