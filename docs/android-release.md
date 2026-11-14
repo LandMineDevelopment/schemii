@@ -422,3 +422,14 @@ Source-bound automated packaging and lifecycle tests cover a different boundary
 from these physical-device checks. Release notes must state which checks actually
 ran and which remain pending. Keep raw logs, traces, backups and credentials
 private. Track the work in [issue #254](https://github.com/LandMineDevelopment/schemii/issues/254).
+
+## Preventing deployment drift
+
+New release source includes the [shared runtime contract](runtime-parity.md).
+Android reads shared security/metadata/preview defaults and explicit phone budgets
+from it; the release and installed identity must include that exact contract.
+Run the parity checker and focused negative controls before packaging, then use
+the [common authenticated HTTPS smoke](runtime-api-smoke.md) on explicitly owned
+disposable deployments. These source checks do not establish physical-device,
+provider, browser, pressure or recovery acceptance and do not update any installed
+release or the frozen interview demo.

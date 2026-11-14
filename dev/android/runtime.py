@@ -789,15 +789,14 @@ class Runtime:
             ):
                 env.pop(key)
         secret = self.state / "secrets"
+        contract = json.loads((self.source / "dev/runtime-contract.json").read_text())
+        env.update(contract["shared_environment"])
+        env.update(contract["platforms"]["android"]["environment"])
         env.update(
             {
                 "PATH": f"/opt/node/bin:/opt/schemii-venv/bin:{PG_BIN}:/usr/bin:/bin",
                 "PYTHONUNBUFFERED": "1",
                 "PYTHONDONTWRITEBYTECODE": "1",
-                "SCHEMII_DEPLOYMENT_MODE": "authenticated",
-                "SCHEMII_AUTH_ENABLED": "1",
-                "SCHEMII_STORAGE_MODE": "postgresql",
-                "SCHEMII_DEVELOPER_INSPECTION": "1",
                 "SCHEMII_METADATA_DSN": "host=127.0.0.1 port=5433 dbname=schemii user=schemii_metadata_app",
                 "SCHEMII_METADATA_PASSWORD_FILE": str(secret / "metadata_app_password"),
                 "SCHEMII_METADATA_ENCRYPTION_KEY_FILE": str(
@@ -805,10 +804,6 @@ class Runtime:
                 ),
                 "SCHEMII_SETUP_TOKEN_FILE": str(secret / "account_setup_token"),
                 "SCHEMII_METADATA_TARGET_HOST_ALIASES": "localhost,127.0.0.1,::1",
-                # Auth, report control and background work need independent
-                # short metadata transactions; keep the normal bounded budget.
-                "SCHEMII_METADATA_MAXIMUM_CONNECTIONS": "16",
-                "SCHEMII_TARGET_EGRESS_MODE": "internal-only",
                 "SCHEMII_ALLOWED_TARGET_HOSTS": "127.0.0.1,localhost",
                 "SCHEMII_CONFIG_FILE": str(self.state / "run/schemii.toml"),
                 "SCHEMII_PI_PROTOTYPE_URL": "http://127.0.0.1:4097",
@@ -822,11 +817,6 @@ class Runtime:
                         f"https://{config['tailnet_ip']}:8001",
                     )
                 ),
-                "SCHEMER_PREVIEW_ROWS": "10000",
-                "SCHEMER_PREVIEW_BYTES": "8388608",
-                "SCHEMER_DASHBOARD_PREVIEW_ROWS": "50000",
-                "SCHEMER_DASHBOARD_PREVIEW_BYTES": "16777216",
-                "SCHEMER_STREAM_SECONDS": "600",
             }
         )
         if self.tailnet_origin:
@@ -1005,14 +995,24 @@ class Runtime:
 
     def _write_runtime_config(self, config: dict) -> None:
         app_config = (self.source / "dev/schemii.toml").read_text()
+        contract = json.loads((self.source / "dev/runtime-contract.json").read_text())
+        desktop = contract["platforms"]["docker"]["target_admission"]
+        phone = contract["platforms"]["android"]["target_admission"]
         replacements = {
-            "maximum_total = 20": "maximum_total = 8",
-            "maximum_per_identity = 4": "maximum_per_identity = 2",
-            "maximum_live_read_sessions = 12": "maximum_live_read_sessions = 4",
-            "maximum_concurrent_turns = 4": "maximum_concurrent_turns = 1",
-            "maximum_concurrent_turns_per_user = 2": "maximum_concurrent_turns_per_user = 1",
+            **{
+                f"{key} = {desktop[key]}": f"{key} = {value}"
+                for key, value in phone.items()
+            },
+            **{
+                f"{path.rsplit('.', 1)[-1]} = {contract['platforms']['docker']['configuration'][path]}": f"{path.rsplit('.', 1)[-1]} = {value}"
+                for path, value in contract["platforms"]["android"][
+                    "configuration"
+                ].items()
+            },
         }
         for old, new in replacements.items():
+            if app_config.count(old) != 1:
+                raise RuntimeFailure(f"Shared runtime configuration drift: {old}")
             app_config = app_config.replace(old, new)
         write_private(self.state / "run/schemii.toml", app_config)
         template = (self.source / "dev/android/nginx.conf.in").read_text()

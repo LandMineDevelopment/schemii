@@ -17,15 +17,14 @@ discard_unactivated_environment() {
 }
 activate_runtime() {
   python3 - "$1" "$2" "$3" <<'PY'
-import hashlib, json, os, pathlib, secrets, subprocess, sys, tempfile
+import hashlib, importlib.metadata, json, os, pathlib, secrets, subprocess, sys, tempfile
 base=pathlib.Path(sys.argv[1])
 root=base/'opt/schemii'
 opt=base/'opt'
-files=['constraints.docker.txt','pyproject.toml','ai/prototype/package-lock.json','ai/prototype/package.json','ai/prototype/server.js']
+files=['dev/runtime-contract.json','constraints.docker.txt','pyproject.toml','ai/prototype/package-lock.json','ai/prototype/package.json','ai/prototype/server.js']
 files.extend(str(path.relative_to(root)) for path in sorted((root/'src').rglob('*')) if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc')
-for directory in (root/'dev/android/tailnet-proxy',root/'dev/android/bin'):
-    files.extend(str(path.relative_to(root)) for path in sorted(directory.rglob('*')) if path.is_file())
-if (root/'dev/android/host.py').is_file(): files.append('dev/android/host.py')
+for directory in (root/'dev/android',):
+    files.extend(str(path.relative_to(root)) for path in sorted(directory.rglob('*')) if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc')
 record={'format':'schemii-android-install-v1','debian':'13','architecture':'arm64',
         'postgresql_major':17,'python_minor':'3.13','node':'22.22.2',
         'image':'debian:trixie-slim@sha256:24a01011d10eba3a023bc8585b9650b8b29021240d4217c05b905e09ef4a5232',
@@ -33,6 +32,8 @@ record={'format':'schemii-android-install-v1','debian':'13','architecture':'arm6
 manifest=root/'ANDROID_RELEASE.json'
 if manifest.is_file():
     record['release']=json.loads(manifest.read_text())
+record['python_packages']=json.loads(subprocess.check_output([sys.argv[2]+'/bin/python','-c','import importlib.metadata,json; print(json.dumps({d.metadata["Name"]:d.version for d in importlib.metadata.distributions()}))'],text=True))
+record['runtime_contract']=json.loads((root/'dev/runtime-contract.json').read_text())
 record['packages']=subprocess.check_output(['dpkg-query','-W','-f=${binary:Package}=${Version}\n'],text=True).splitlines()
 path=opt/'schemii-runtime.json'
 if path.is_symlink() or (path.exists() and not path.is_file()):

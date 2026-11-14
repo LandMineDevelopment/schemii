@@ -733,6 +733,9 @@ def activation_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture\n")
+    contract = source / "dev/runtime-contract.json"
+    contract.parent.mkdir(parents=True, exist_ok=True)
+    contract.write_text((ROOT / "dev/runtime-contract.json").read_text())
     old = base / "opt/old-environment"
     new = base / "opt/new-environment"
     old_node = base / "opt/old-node"
@@ -740,6 +743,8 @@ def activation_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     for directory in [old, new, old_node, new_node]:
         directory.mkdir()
         (directory / "executable").write_text("preserve\n")
+    (new / "bin").mkdir()
+    (new / "bin/python").symlink_to(sys.executable)
     (base / "opt/schemii-venv").symlink_to(old)
     (base / "opt/node").symlink_to(old_node)
     (base / "opt/schemii-runtime.json").write_text('{"previous":true}\n')
@@ -808,6 +813,9 @@ exec(compile(sys.stdin.read(),'activation-helper','exec'))
     manifest = json.loads((base / "opt/schemii-runtime.json").read_text())
     assert manifest["venv"] == str(new)
     assert manifest["postgresql_major"] == 17
+    assert manifest["runtime_contract"]["schema"] == 1
+    assert isinstance(manifest["python_packages"], dict)
+    assert "dev/runtime-contract.json" in manifest["source_files"]
 
 
 def test_activation_manifest_stage_failure_keeps_executable_links(

@@ -1,0 +1,171 @@
+{
+  "schema": 1,
+  "services": {
+    "docker": [
+      "ai-prototype",
+      "ai-prototype-runtime",
+      "schemii",
+      "ingress",
+      "metadata-postgres",
+      "metadata-bootstrap",
+      "demo-postgres",
+      "demo-bootstrap",
+      "postgres-seed",
+      "demo-fixture"
+    ],
+    "android": [
+      "metadata",
+      "target",
+      "pi",
+      "app",
+      "ingress"
+    ],
+    "android_optional": [
+      "tailnet"
+    ]
+  },
+  "shared_environment": {
+    "SCHEMII_DEPLOYMENT_MODE": "authenticated",
+    "SCHEMII_AUTH_ENABLED": "1",
+    "SCHEMII_STORAGE_MODE": "postgresql",
+    "SCHEMII_DEVELOPER_INSPECTION": "1",
+    "SCHEMII_METADATA_MAXIMUM_CONNECTIONS": "16",
+    "SCHEMII_TARGET_EGRESS_MODE": "internal-only",
+    "SCHEMER_PREVIEW_ROWS": "10000",
+    "SCHEMER_PREVIEW_BYTES": "8388608",
+    "SCHEMER_DASHBOARD_PREVIEW_ROWS": "50000",
+    "SCHEMER_EXPORT_SECONDS": "900"
+  },
+  "platforms": {
+    "docker": {
+      "environment": {
+        "SCHEMER_DASHBOARD_PREVIEW_BYTES": "33554432",
+        "SCHEMER_STREAM_SECONDS": "120"
+      },
+      "target_admission": {
+        "maximum_total": 20,
+        "maximum_per_identity": 4
+      },
+      "postgres_max_connections": 100,
+      "metadata_reserve": 8,
+      "python": "3.12",
+      "reason": "Digest-pinned glibc Python image; container network, UID, cgroup and read-only isolation. Larger desktop query budgets.",
+      "configuration": {
+        "console.results.maximum_live_read_sessions": 12,
+        "ai.maximum_concurrent_turns": 4,
+        "ai.maximum_concurrent_turns_per_user": 2
+      },
+      "sql_locale": "Alpine/musl PostgreSQL 17 (observed 17.11); libc locale/collation can differ from glibc even with identical en_US.utf8 names. No byte-identical SQL ordering guarantee."
+    },
+    "android": {
+      "environment": {
+        "SCHEMER_DASHBOARD_PREVIEW_BYTES": "16777216",
+        "SCHEMER_STREAM_SECONDS": "600"
+      },
+      "target_admission": {
+        "maximum_total": 8,
+        "maximum_per_identity": 2
+      },
+      "postgres_max_connections": 24,
+      "metadata_reserve": 8,
+      "python": "3.13",
+      "reason": "Debian 13 ARM64 glibc wheels; smaller phone memory/SQL/AI budgets, longer streams. PRoot shares the Termux UID, trusted-owner SQL only; native tsnet HTTPS proxy stays outside PRoot (netlink emulation stalled).",
+      "configuration": {
+        "console.results.maximum_live_read_sessions": 4,
+        "ai.maximum_concurrent_turns": 1,
+        "ai.maximum_concurrent_turns_per_user": 1
+      },
+      "sql_locale": "Debian/glibc PostgreSQL 17 (observed 17.12); package patch version recorded at install. Explicit COLLATE \"C\" matched comparison outputs; do not normalize product SQL.",
+      "proot_environment": {
+        "PROOT_DONT_SHARE_LIBANDROID_SHMEM": "1"
+      }
+    }
+  },
+  "readiness": "/api/v1/readiness",
+  "dependencies": {
+    "python": {
+      "annotated-doc": "0.0.5",
+      "annotated-types": "0.8.0",
+      "anyio": "4.14.2",
+      "cffi": "2.1.1",
+      "click": "8.5.0",
+      "cryptography": "50.0.1",
+      "fastapi": "0.141.1",
+      "h11": "0.16.0",
+      "idna": "3.19",
+      "pglast": "7.20",
+      "psycopg": "3.3.4",
+      "psycopg-binary": "3.3.4",
+      "pycparser": "3.0",
+      "pydantic": "2.13.5",
+      "pydantic-core": "2.46.5",
+      "starlette": "1.6.0",
+      "sqlglot": "28.10.1",
+      "typing-extensions": "4.16.0",
+      "typing-inspection": "0.4.4",
+      "uvicorn": "0.52.4"
+    },
+    "node": "22.22.2",
+    "pi": "0.87.1",
+    "postgresql_major": "17",
+    "go": "1.27.4",
+    "tailscale": "v1.104.7",
+    "pi_node_minimum": "22.19.0"
+  },
+  "images": {
+    "python": "python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a",
+    "postgres": "postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73",
+    "node": "node:22.22.2-alpine3.22@sha256:b77017c37f430e4466ff497058948a2f16e8b59779600d53711eeb7b999b0f4e",
+    "ingress": "nginx:1.29.1-alpine@sha256:42a516af16b852e33b7682d5ef8acbd5d13fe08fecadc7ed98605ba5e3b26ab8",
+    "android": "debian:trixie-slim@sha256:24a01011d10eba3a023bc8585b9650b8b29021240d4217c05b905e09ef4a5232"
+  },
+  "node_arm64_sha256": "e9e1930fd321a470e29bb68f30318bf58e3ecb4acb4f1533fb19c58328a091fe",
+  "shared_sources": [
+    "src/",
+    "ai/prototype/",
+    "dev/postgres/"
+  ],
+  "private_state": {
+    "release_excludes": [
+      ".schemii",
+      "secrets",
+      "credentials",
+      "backups",
+      "logs",
+      "node_modules",
+      "pgdata",
+      "postgres-data"
+    ],
+    "android_backup": [
+      "config.json",
+      "secrets",
+      "tls",
+      "postgres/metadata",
+      "postgres/target"
+    ],
+    "docker_backup": "metadata, keys, configuration and selected metadata records; target rows excluded (separate target backup required)",
+    "android_backup_optional": [
+      "tailnet"
+    ],
+    "docker_backup_payloads": [
+      "metadata.dump",
+      "key-probe.json",
+      "identity.json",
+      "secrets/metadata_password",
+      "secrets/metadata_app_password",
+      "secrets/metadata_encryption_key",
+      "secrets/demo_admin_password",
+      "secrets/demo_target_password",
+      "secrets/account_setup_token",
+      "secrets/opencode_password"
+    ]
+  },
+  "dependency_inputs": {
+    "pyproject.toml": "28011f34ba1fb1adc42ff550b58fa9f61153e6469c8d649f19f80979e177bd81",
+    "constraints.docker.txt": "710bfbb8390d15df4be136145e343d7cfdc2d7e7d4719a96b61f2eaf0e6605d2",
+    "ai/prototype/package.json": "28af9f47a08a279cd0fb374d61d80087e38f0fced9e2689f23fcb7da7dc8649c",
+    "ai/prototype/package-lock.json": "fffb5de9f1469868dc611117161ad8dbdff10dad4713cb733ed16abbdc0a6ad9",
+    "dev/android/tailnet-proxy/go.mod": "4b7c25a6c0f12c0096ab9188add8a87171682c77c234778583ba0c3ed750ed7d",
+    "dev/android/tailnet-proxy/go.sum": "a08fa8d9e3c7db68151b1d7a168c316a66176ed23da8947414d2df72891becfb"
+  }
+}

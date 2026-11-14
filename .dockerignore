@@ -35,3 +35,23 @@ postgres-data
 testing
 artifacts
 secrets
+
+# Public runtime provenance inputs; private state remains excluded.
+!dev/
+dev/*
+!dev/runtime-contract.json
+!dev/runtime_manifest.py
+!dev/schemii.toml
+!dev/ingress/
+!dev/postgres/
+
+**/.schemii
+**/secrets
+**/credentials
+**/backups
+**/logs
+**/pgdata
+**/postgres-data
+**/.env*
+**/*.key
+**/*.pem
