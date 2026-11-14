@@ -198,9 +198,13 @@ def metadata(tag: str, commit: str, files: dict[str, tuple[bytes, int]]) -> dict
         },
         "dependency_inputs": {
             path: hashlib.sha256(files[path][0]).hexdigest()
-            for path in ("dev/runtime-contract.json", "constraints.docker.txt",
-                         "pyproject.toml", "ai/prototype/package.json",
-                         "ai/prototype/package-lock.json")
+            for path in (
+                "dev/runtime-contract.json",
+                "constraints.docker.txt",
+                "pyproject.toml",
+                "ai/prototype/package.json",
+                "ai/prototype/package-lock.json",
+            )
         },
         "device_acceptance": "pending",
         "files": {
