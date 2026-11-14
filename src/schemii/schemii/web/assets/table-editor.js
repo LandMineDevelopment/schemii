@@ -1,5 +1,7 @@
 import { element, errorPanel, replace } from "#common/dom.js";
 import { updateDesignTable } from "./design.js";
+import { api } from "./api.js";
+import { columnTypeKey, createColumnTypeAnalysis } from "./column-type-analysis.js";
 import { createIconButton } from "/assets/common/ui.js";
 import { createSearchableSelect } from "/assets/common/searchable-select.js";
 import { installSortableList } from "/assets/common/sortable.js";
@@ -30,11 +32,44 @@ export function createTableEditor({
   notify,
   showExpressionHelp,
   analyzeColumnType,
+  loadTypeAnalysisHistory = api.getDesignHistory,
 }) {
   let editingId = null;
   let dirty = false;
   let populating = false;
   let designColumnDraftSequence = 0;
+  const typeAnalysisSessions = new Map();
+
+  function typeAnalysisSession(container) {
+    if (typeAnalysisSessions.has(container)) return typeAnalysisSessions.get(container).session;
+    const { activeWorkspace, design } = getContext();
+    const warning = element("div", { className: "design-type-warning", hidden: true, attrs: { role: "status", "aria-live": "polite" } });
+    const copy = element("p");
+    const retry = element("button", { type: "button", className: "ui-button compact", text: "Retry conversion checks" });
+    warning.append(copy, retry);
+    container.before(warning);
+    const session = createColumnTypeAnalysis({
+      workspaceId: activeWorkspace.id,
+      design,
+      loadHistory: loadTypeAnalysisHistory,
+      analyze: analyzeColumnType,
+      isActive: () => getContext().activeWorkspace?.id === activeWorkspace.id
+        && getContext().activeWorkspace?.connectionId === activeWorkspace.connectionId
+        && getContext().design === design && container.isConnected,
+      onStatus: ({ error }) => {
+        warning.hidden = !error;
+        if (!error) return;
+        const code = /^[a-z0-9_]+$/.test(error.code || "") ? error.code : "request_failed";
+        const status = error.status ? `HTTP ${error.status} · ` : "";
+        copy.textContent = error.status === 403
+          ? `Conversion checks are not permitted (${status}${code}). Ask an administrator to check your access. You can save this design; migration review must validate type changes before applying them.`
+          : `Conversion checks are unavailable (${status}${code}). Retry the checks or save this design; migration review must validate type changes before applying them.`;
+      },
+    });
+    retry.addEventListener("click", () => session.retry());
+    typeAnalysisSessions.set(container, { session, warning });
+    return session;
+  }
 
   function appendDesignColumn({
     id = null,
@@ -81,39 +116,25 @@ export function createTableEditor({
     });
     const typeInput = typeSelector.input;
     const typeWarning = element("p", { className: "design-type-warning", hidden: true, attrs: { role: "status", "aria-live": "polite" } });
-    let typeAnalysisTimer = null;
-    let typeAnalysisController = null;
-    let typeAnalysisVersion = 0;
-    const cancelTypeAnalysis = () => {
-      typeAnalysisVersion += 1;
-      clearTimeout(typeAnalysisTimer);
-      typeAnalysisController?.abort();
-    };
-    const scheduleTypeAnalysis = () => {
-      cancelTypeAnalysis();
-      const workspaceId = getContext().activeWorkspace?.id;
-      if (!id || !getContext().activeWorkspace?.connectionId) return;
-      const targetType = typeInput.value;
-      const version = typeAnalysisVersion;
-      typeWarning.hidden = true;
-      typeAnalysisTimer = setTimeout(async () => {
-        if (!row.isConnected || getContext().activeWorkspace?.id !== workspaceId) return;
-        typeAnalysisController = new AbortController();
-        try {
-          const analysis = await analyzeColumnType(workspaceId, { columnId: id, targetType }, { signal: typeAnalysisController.signal });
-          if (version !== typeAnalysisVersion || !row.isConnected || getContext().activeWorkspace?.id !== workspaceId) return;
-          typeWarning.hidden = !analysis.requiresConversion;
-          typeWarning.textContent = analysis.requiresConversion
-            ? `${analysis.reason}. You can save this design. During migration, explicitly choose how existing values should be converted; strict conversion is the recommended default.`
-            : "";
-        } catch (error) {
-          if (version !== typeAnalysisVersion || !row.isConnected || error?.code === "request_cancelled") return;
-          typeWarning.hidden = false;
-          typeWarning.textContent = "The conversion check is unavailable. You can save this design; migration review will validate the type change before applying it.";
-        }
-      }, 300);
-    };
-    row.__cancelTypeAnalysis = cancelTypeAnalysis;
+    const typeAnalysis = id && getContext().activeWorkspace?.connectionId
+      ? typeAnalysisSession(container).add({
+        columnId: id,
+        targetType: dataType,
+        isActive: () => row.isConnected,
+        onChange: ({ status, analysis }) => {
+          typeWarning.dataset.analysisStatus = status;
+          typeWarning.hidden = !["pending", "conversion-required"].includes(status);
+          typeWarning.textContent = status === "pending"
+            ? "Checking conversion…"
+            : status === "conversion-required"
+              ? `${analysis.reason}. You can save this design. During migration, explicitly choose how existing values should be converted; strict conversion is the recommended default.`
+              : "";
+        },
+      })
+      : null;
+    const scheduleTypeAnalysis = () => typeAnalysis?.select(typeInput.value);
+    row.__cancelTypeAnalysis = () => typeAnalysis?.dispose();
+    row.__originalDataType = dataType;
     typeSelector.root.dataset.changeObjectId = transitionId;
     typeSelector.root.dataset.changeField = "dataType";
     const typeModifierCopy = element("span", { className: "design-type-modifier-summary" });
@@ -307,7 +328,7 @@ export function createTableEditor({
           tone: "amber",
         }]);
         typeSelector.destroy();
-        cancelTypeAnalysis();
+        row.__cancelTypeAnalysis();
         row.remove();
         sorter.refresh();
         onMutate?.();
@@ -343,12 +364,15 @@ export function createTableEditor({
     syncBehavior();
     row.__designTypeSelector = typeSelector;
     container.append(row);
-    scheduleTypeAnalysis();
     sorter.refresh();
     return row;
   }
 
   function clearDesignColumns(container) {
+    const analysis = typeAnalysisSessions.get(container);
+    analysis?.session.dispose();
+    analysis?.warning.remove();
+    typeAnalysisSessions.delete(container);
     for (const row of container.children) {
       row.__cancelTypeAnalysis?.();
       row.__designTypeSelector?.destroy();
@@ -363,7 +387,8 @@ export function createTableEditor({
       return {
         id: row.dataset.designColumnId || null,
         name: row.querySelector("[data-design-column-name]").value,
-        dataType: row.querySelector("[data-design-column-type]").value,
+        dataType: columnTypeKey(row.querySelector("[data-design-column-type]").value) === columnTypeKey(row.__originalDataType)
+          ? row.__originalDataType : row.querySelector("[data-design-column-type]").value,
         nullable: row.querySelector("[data-design-column-nullable]").checked,
         primary: row.querySelector("[data-design-column-primary]").checked,
         defaultExpression: behavior === "default" ? expression : null,
@@ -398,11 +423,20 @@ export function createTableEditor({
 
   function markInspectorTableDirty() {
     if (populating || !editingId) return;
-    dirty = true;
+    const saved = getContext().design?.content.tables.find(table => table.id === editingId);
+    const signature = (name, columns) => JSON.stringify([name, columns.map(column => [
+      column.id, column.name, column.dataType, column.nullable, column.primary,
+      column.defaultExpression ?? null, column.identity ?? null, column.generatedExpression ?? null,
+    ])]);
+    const primaryIds = new Set(saved?.keys.find(key => key.kind === "primary")?.columnIds || []);
+    dirty = !saved || signature(elements.inspectorTableName.value, designColumnValues(elements.inspectorDesignColumns))
+      !== signature(saved.name, saved.columns.map(column => ({ ...column, primary: primaryIds.has(column.id) })));
     updateInspectorColumnCount();
     updateInspectorTableActions();
     onDraftChange();
-    replace(elements.inspectorTableStatus, element("span", { text: "Unsaved changes · save to edit related objects." }));
+    replace(elements.inspectorTableStatus, element("span", { text: dirty
+      ? "Unsaved changes · save to edit related objects."
+      : `Saved in design revision ${getContext().design?.revision ?? "current"}.` }));
   }
 
   function populateInspectorTableEditor(table) {
