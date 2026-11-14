@@ -147,6 +147,23 @@ setup tokens, cookies, backups, SSH keys and private operation evidence outside
 tracked files. A cold backup containing the proxy's identity is sensitive; do not
 run duplicate restored identities concurrently.
 
+The optional owned Termux:Boot script waits up to 120 seconds with
+`schemii wait-network` before one `schemii start`. The gate reads the same
+retained `config.json` as the guest and probes its configured Tailscale address
+without starting services. Rerun `schemii enable-boot` after an upgrade to update
+an existing owned script. Other private boot integrations can use the same gate,
+but Termux:Boot scripts run independently; keep dependent actions in one script
+rather than relying on filename order. A failed gate or start needs operator
+inspection. Android first unlock and a ready VPN remain prerequisites.
+
+Native startup delegates PostgreSQL lock admission to the guest before preparing
+secrets/TLS or starting the proxy. A retained lock records a guest data directory,
+which must not be compared to Termux's physical rootfs path. Only previously
+owned, dead-PID locks for the exact metadata/target guest paths are admitted;
+PostgreSQL then handles stale-lock removal and WAL recovery. Do not quarantine or
+delete a lock as a routine recovery step, adopt a live PID, or reset retained
+state to clear a preflight refusal.
+
 Direct SSH has been verified while the phone is available. Termux force-stop,
 reboot, Doze, battery management and VPN reconnect recovery are not validated.
 If access disappears, report the actual failing check and coordinate with the

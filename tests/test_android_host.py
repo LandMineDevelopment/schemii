@@ -388,3 +388,180 @@ def test_native_invocation_uses_public_termux_roots_and_real_state(
         assert host_module.is_current(host.proxy_identity)
     finally:
         host._cleanup()
+
+
+@pytest.mark.parametrize("cluster", ["metadata", "target"])
+@pytest.mark.parametrize(
+    "lock_case",
+    [
+        "owned",
+        "unknown",
+        "foreign-path",
+        "physical-path",
+        "live",
+        "symlink",
+        "directory-symlink",
+        "alias",
+    ],
+)
+def test_native_start_checks_retained_postgres_locks_in_guest_namespace(
+    tmp_path, monkeypatch, cluster, lock_case
+):
+    import runtime as guest_module
+
+    monkeypatch.chdir(tmp_path)
+    host = host_module.Host(tmp_path, tmp_path / "prefix", tmp_path / "control")
+    host.runtime._prepare()
+    host.runtime.configure("100.64.2.3", "phone.example.ts.net")
+    host_module.write_private(
+        host.state / "tailnet/config.json", '{"hostname":"schemii-phone"}'
+    )
+    guest_state = guest_module.DEFAULT_STATE
+    directory = host.state / "postgres" / cluster
+    directory.mkdir()
+    guest_directory = guest_state / "postgres" / cluster
+    lock_directory = {
+        "foreign-path": "/other/postgres/metadata",
+        "physical-path": str(directory),
+        "alias": f"{guest_directory}/../{cluster}",
+    }.get(lock_case, str(guest_directory))
+    pidfile = directory / "postmaster.pid"
+    contents = f"123456\n{lock_directory}\n"
+    if lock_case == "symlink":
+        outside = tmp_path / "foreign.pid"
+        outside.write_text(contents)
+        pidfile.symlink_to(outside)
+    else:
+        pidfile.write_text(contents)
+    if lock_case == "directory-symlink":
+        outside = tmp_path / "foreign-cluster"
+        directory.rename(outside)
+        directory.symlink_to(outside, target_is_directory=True)
+    status = host.state / "run/status.json"
+    status.write_text(
+        json.dumps(
+            {
+                "services": {
+                    cluster: {
+                        "pid": 456789 if lock_case == "unknown" else 123456,
+                        "start_ticks": 25,
+                        "pgid": 123456,
+                        "boot_id": "previous-boot",
+                    }
+                }
+            }
+        )
+    )
+    previous = status.read_bytes()
+    monkeypatch.setattr(
+        guest_module,
+        "process_identity",
+        lambda pid: (
+            {"pid": pid, "start_ticks": 99, "pgid": pid, "boot_id": "current-boot"}
+            if lock_case == "live"
+            else None
+        ),
+    )
+    monkeypatch.setattr(host_module.signal, "signal", lambda *_args: None)
+    if lock_case == "owned":
+        # This is the real native/guest mismatch, before entering guest I/O.
+        with pytest.raises(host_module.RuntimeFailure, match="Unverified PostgreSQL"):
+            host.runtime._assert_startable()
+    calls = []
+
+    def guest_preflight(action, _seconds):
+        assert action == "prepare-tailnet"
+        calls.append(action)
+        # Model PRoot's filesystem namespace, mapping only filesystem I/O.
+        # The real preflight still compares the guest postmaster.pid path.
+        with monkeypatch.context() as guest_namespace:
+            for name in ("read_text", "exists", "is_symlink"):
+                original = getattr(Path, name)
+
+                def mapped(path, *args, _original=original, **kwargs):
+                    if path.is_relative_to(guest_state):
+                        path = host.state / path.relative_to(guest_state)
+                    return _original(path, *args, **kwargs)
+
+                guest_namespace.setattr(Path, name, mapped)
+            guest_module.Runtime(guest_state, tmp_path)._assert_startable()
+        return {"prepared": True}
+
+    def stop_before_proxy():
+        calls.append("proxy")
+        raise host_module.RuntimeFailure("test stopped before services")
+
+    monkeypatch.setattr(host, "_call", guest_preflight)
+    monkeypatch.setattr(host, "_spawn_proxy", stop_before_proxy)
+    expected = "test stopped" if lock_case == "owned" else "Unverified PostgreSQL"
+    with pytest.raises(host_module.RuntimeFailure, match=expected):
+        host.run()
+    expected_calls = (
+        ["prepare-tailnet", "proxy"] if lock_case == "owned" else ["prepare-tailnet"]
+    )
+    assert calls == expected_calls
+    assert status.read_bytes() == previous
+    assert pidfile.read_text() == contents
+    assert host.proxy is None and host.guest is None
+
+
+@pytest.mark.parametrize("available_after", [0, 2, None])
+def test_boot_waits_once_for_configured_vpn_address_with_bounded_deadline(
+    tmp_path, monkeypatch, available_after
+):
+    host = host_module.Host(tmp_path, tmp_path / "prefix", tmp_path / "control")
+    host.runtime._prepare()
+    host.runtime.configure("100.64.2.3", "phone.example.ts.net")
+    clock = [0.0]
+    probes = []
+
+    class Probe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def bind(self, address):
+            probes.append(address)
+            if available_after is None or clock[0] < available_after:
+                raise OSError(host_module.errno.EADDRNOTAVAIL, "VPN not ready")
+
+    monkeypatch.setattr(host_module.socket, "socket", Probe)
+    monkeypatch.setattr(host_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        host_module.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    if available_after is None:
+        with pytest.raises(host_module.RuntimeFailure, match="timed out; no services"):
+            host.wait_network(seconds=3)
+        assert clock[0] == 3
+    else:
+        host.wait_network(seconds=3)
+        assert clock[0] == available_after
+    assert probes == [("100.64.2.3", 0)] * (int(clock[0]) + 1)
+    assert host.proxy is None and host.guest is None
+
+
+def test_boot_network_gate_fails_immediately_for_invalid_config_or_probe_error(
+    tmp_path, monkeypatch
+):
+    host = host_module.Host(tmp_path, tmp_path / "prefix", tmp_path / "control")
+    host.runtime._prepare()
+    with pytest.raises(host_module.RuntimeFailure, match="Configure the phone"):
+        host.wait_network()
+    host.runtime.configure("100.64.2.3", "phone.example.ts.net")
+
+    def unavailable():
+        raise OSError(host_module.errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(host_module.socket, "socket", unavailable)
+    monkeypatch.setattr(
+        host_module.time,
+        "sleep",
+        lambda _seconds: pytest.fail("must not retry a permission failure"),
+    )
+    with pytest.raises(host_module.RuntimeFailure, match="Cannot check"):
+        host.wait_network()

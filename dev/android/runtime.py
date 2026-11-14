@@ -1541,7 +1541,7 @@ class Runtime:
         for name in ("metadata", "target"):
             directory = self.state / "postgres" / name
             pidfile = directory / "postmaster.pid"
-            if not pidfile.exists():
+            if not pidfile.exists() and not pidfile.is_symlink():
                 continue
             try:
                 lines = pidfile.read_text().splitlines()
@@ -1551,7 +1551,9 @@ class Runtime:
                     recorded = status.get("recovery_services", {}).get(name, {})
                 valid = (
                     pid > 1
-                    and Path(lines[1]).resolve() == directory.resolve()
+                    and not directory.is_symlink()
+                    and not pidfile.is_symlink()
+                    and lines[1] == str(directory)
                     and recorded.get("pid") == pid
                     and isinstance(recorded.get("start_ticks"), int)
                     and process_identity(pid) is None

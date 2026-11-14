@@ -7,12 +7,14 @@ Only start.sh invokes this module. No database is started outside the guest.
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -97,6 +99,28 @@ class Host:
             "--dns-server",
             "100.100.100.100:53",
         ]
+
+    def wait_network(self, seconds: float = 120) -> None:
+        """Wait once at boot for the same VPN address the guest must bind."""
+        address = self.runtime.config()["tailnet_ip"]
+        deadline = time.monotonic() + seconds
+        while True:
+            try:
+                with socket.socket() as probe:
+                    probe.bind((address, 0))
+                return
+            except OSError as error:
+                if error.errno != errno.EADDRNOTAVAIL:
+                    raise RuntimeFailure(
+                        "Cannot check the configured VPN address; no services were started"
+                    ) from None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeFailure(
+                    "Boot network readiness timed out; no services were started. "
+                    "Connect Tailscale, then run schemii start"
+                )
+            time.sleep(min(1, remaining))
 
     def _record(self, state: str, error: str | None = None) -> None:
         fingerprint = json.dumps(
@@ -280,12 +304,14 @@ class Host:
                 raise RuntimeFailure(
                     "A native stack owner or retained child is active; stop it first"
                 )
-            self.runtime._assert_startable()
             for sig in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(sig, lambda _sig, _frame: self.stop_event.set())
             error = None
             self._record("starting")
             try:
+                # PostgreSQL records guest paths in postmaster.pid. Its locked
+                # preflight belongs inside PRoot, before secrets/TLS or services;
+                # this native Runtime sees the physical rootfs path instead.
                 self._call("prepare-tailnet", 90)
                 (self.state / "run/tailnet.json").unlink(missing_ok=True)
                 self._spawn_proxy()
@@ -481,6 +507,10 @@ def main() -> int:
             )
         if action == "run":
             host.run()
+            return 0
+        if action == "wait-network":
+            print("Waiting up to 120 seconds for the configured Tailscale address.")
+            host.wait_network()
             return 0
         if action == "stop":
             value = host.stop()
