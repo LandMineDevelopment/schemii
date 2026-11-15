@@ -11,7 +11,7 @@ network-transition and full backend acceptance stay coordinator-owned.
 
 `dev/android/tailnet-proxy/` retains the pinned Go/tsnet dependency graph. Its
 common implementation owns enrollment, protected state, exclusive node locking,
-authenticated node name, certificate issuance/validation, TLS, HTTP reverse proxy,
+authenticated node name, certificate verification/readiness, TLS, HTTP reverse proxy,
 Host/Origin/forwarding semantics, streaming and shutdown. Two platform adapters
 supply network observation, DNS, socket routing, public trust and ingress policy.
 
@@ -185,6 +185,73 @@ allowlist. An empty `SSL_CERT_DIR` does not disable Go's default root directorie
 The retained loopback CA is a separate pool used only
 for the upstream hop. No insecure TLS or HTTP fallback is provided.
 
+### Android certificate acquisition and renewal
+
+R273-03 identified a deterministic unsupported API in the earlier node path:
+SDK `local.Client.CertPair` calls `GET /localapi/v0/cert/`, whose only registration
+file explicitly excludes Android. Cached files do not bypass that request. Linux
+and Termux retain this supported SDK endpoint and its existing behavior.
+
+Android instead uses the **public `local.Client.SetDNS`** operation and the
+**existing pinned `tailscale.com/tempfork/acme.Client` library**. This is an import
+of the SDK's published library, not a new fork or dependency. Its exported
+`HTTPClient` supplies the required transport boundary. `HasACME` remains true in
+the actual Android file selection; common LocalAPI registers `set-dns` and
+`cert-domains`. No LocalBackend, reflection, private or test-only SDK interface is
+used. Before acquisition, before SetDNS, and before committing a certificate,
+the provider requires a running/online authenticated node, MagicDNS and its exact
+hostname in current `StatusWithoutPeers.CertDomains`. The only DNS name sent is
+`_acme-challenge.<that-hostname>`. Authorizations, order identifiers and the CSR
+must match that single hostname; wildcard/foreign authorizations fail closed.
+The SDK's SetDNS contract independently restricts accepted names/values at the
+control server. Actual enrolled control-server acceptance remains a runtime gate.
+
+The CA directory is the pinned library's normal production Let's Encrypt URL.
+There is no host JSON/environment CA override. Every directory, nonce, account,
+authorization, order and certificate request uses an explicit HTTPS client with
+the Android public roots, TLS hostname verification, bounded timeouts and the
+mandatory netns socket hook/cookie registry. Its resolver retains the approved
+standard SDK bootstrap. CA-provided request URLs must stay on the directory's
+HTTPS origin; proxy inheritance, redirects, plain HTTP, alternate TLS dialers and
+`http.DefaultClient` are unavailable. The provider pins the same network epoch
+for new and pooled connections, response bodies, cancellation and cached returns.
+Loss/stop revokes socket I/O and prevents stale certificate success. No ACME
+challenge listener or public ingress is opened; only dns-01 is used.
+The supported SetDNS API has no delete operation (its backend rejects an empty
+value); like the SDK's own dns-01 flow, this adapter leaves TXT lifecycle to
+control rather than inventing a cleanup request. Its actual provider behavior is
+part of later enrolled acceptance.
+
+The SDK-compatible private files remain `certs/acme-account.key.pem`, `<host>.key`
+and `<host>.crt`. Existing account and leaf keys are reused without rotation.
+Missing, malformed, linked, unreadable or mismatched retained state fails rather
+than creating a replacement identity. A genuinely empty state creates keys once,
+persists them as mode0600, and reuses them after interruption. Each verified cert
+replaces only its `.crt` through a mode0600 temp/fsync/rename/directory-fsync; its
+key remains fixed, so a reader cannot see a mixed-key certificate generation.
+The durable retry record also binds hashes of both key files before their first
+CA use; losing/replacing all key/certificate files cannot silently reset identity.
+The node lock and cancellable provider gate serialize operations. No private CA
+is accepted as a public tailnet certificate root.
+
+A cancellable worker checks renewal each minute, including when ingress is idle;
+renewal is due after two thirds of the certificate lifetime. It joins before
+provider/SDK shutdown and uses the shared certificate verifier and readiness
+store. A still-valid verified cached certificate remains usable after a renewal
+failure, with explicit `certificate_renewal_error` and `certificate_retry_at`
+status fields. Expired, wrong-domain, untrusted or stale-epoch certificates never
+become ready. The private atomic `<host>.renewal.json` checkpoint is written
+**before** any CA operation. Failures back off from five minutes exponentially to
+one day; ACME429 Retry-After can extend the delay and is not retried in-place.
+The public SetDNS API does not expose response retry headers, so its failures use
+that same durable conservative backoff. At most two short retries cover other
+retryable ACME responses; every operation has a bounded caller/parent deadline.
+Keys and checkpoints survive cancellation/process restart. Logs/status never
+include challenge payloads, signed request bodies or private key material.
+An in-flight renewal does not hold up handshakes that can still read and verify
+the existing certificate/key/identity checkpoint. Cache reads remain fenced by
+current node approval, public trust, time and network epoch.
+
 A host can retain a NetworkBridge, then call `start(String configuration)` and
 later `close()`. Start accepts only this JSON schema, with clean absolute private
 paths supplied by the host:
@@ -275,7 +342,7 @@ For the pinned SDK's actual Android socket-control and bootstrap paths, run:
 ```bash
 python3 dev/android/tailnet-proxy/sdk_controls.py \
   --go PINNED_GO/bin/go --go-cache PRIVATE_GO_CACHE \
-  --output-dir PRIVATE_NEW_CONTROL_OUTPUT
+  --output-dir PRIVATE_NEW_CONTROL_OUTPUT --certificate-controls
 ```
 
 This host-only control verifies inspected SDK source against the retained module
@@ -295,6 +362,16 @@ prove a successful public bootstrap HTTPS exchange or Android framework binding.
 The receipt records every overlay, source/tool hash, command and exit. No cached
 SDK or production dependency file is patched. `--registration-ref COMMIT` retains
 the old registration as a failing counterexample without checking out old files.
+
+Certificate controls additionally apply the SDK's real Android cert-route file
+selection, reproduce the actual old CertPair404, verify common set-dns/cert-domains
+registration, and run the real shared provider/ACME transport through the SDK
+Android control body with both capability states. Owned TLS CA/LocalAPI fixtures
+verify signed ACME requests, the exact DNS TXT challenge, CSR and issued chain;
+they cover cache/key retention, renewal while idle, rate-limit persistence,
+cancellation, wrong identity/trust/time, incomplete state, cookie ownership and
+active epoch revocation. They are host controls, not enrolled Android/provider
+acceptance. Unchanged Java/JNI evidence is reused by exact input/header hashes.
 
 Required later evidence: actual signed API36 APK callback execution; native Moto
 ARM64 execution/page size; independent control-plane/DNS/certificate issuance and

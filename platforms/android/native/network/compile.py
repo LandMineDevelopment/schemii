@@ -107,6 +107,20 @@ def build(args):
         "go": "1.27.4",
         "go_compiler_sha256": sha(go),
         "ndk_compiler_sha256": sha(compiler),
+        "go_environment": {
+            key: environment[key]
+            for key in (
+                "GOROOT",
+                "GOPATH",
+                "GOMODCACHE",
+                "GOTMPDIR",
+                "GOCACHE",
+                "GOTOOLCHAIN",
+                "GOPROXY",
+                "TMPDIR",
+            )
+            if key in environment
+        },
         "bridge_sha256": bridge_digest,
         "command": command,
         "cflags": environment["CGO_CFLAGS"],

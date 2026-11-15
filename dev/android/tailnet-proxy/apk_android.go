@@ -27,9 +27,11 @@ import (
 	"time"
 	"unsafe"
 
+	"tailscale.com/client/local"
 	"tailscale.com/ipn"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/netns"
+	"tailscale.com/tempfork/acme"
 	"tailscale.com/tsd"
 	"tailscale.com/tsnet"
 )
@@ -236,6 +238,40 @@ func (p *apkPlatform) install() error {
 	return nil
 }
 func (p *apkPlatform) configure(*tsnet.Server) error { return p.install() }
+
+func (p *apkPlatform) certificates(parent context.Context, control *local.Client, directory, host string) (certificateClient, func(), error) {
+	// cert/ is excluded by the SDK's Android build. Its public SetDNS route and
+	// pinned ACME client remain available. Never expose LocalBackend/TestHooks.
+	ctx, cancel := context.WithCancel(parent)
+	current := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := p.epoch.current(); err != nil {
+			return err
+		}
+		snapshot, err := androidSnapshot()
+		if err != nil || !snapshot.Available || snapshot.Generation != p.epoch.generation {
+			return certificateError("certificate network epoch is unavailable")
+		}
+		return nil
+	}
+	monitor := netmon.NewStatic()
+	client, closeHTTP, err := certificateHTTPClient(ctx, acme.LetsEncryptURL, p.publicRoots, monitor, current)
+	if err != nil {
+		cancel()
+		monitor.Close()
+		return nil, nil, err
+	}
+	var once sync.Once
+	close := func() { once.Do(func() { cancel(); closeHTTP(); monitor.Close() }) }
+	provider, err := newACMECertificates(ctx, control, directory, host, acme.LetsEncryptURL, p.publicRoots, client, current)
+	if err != nil {
+		close()
+		return nil, nil, err
+	}
+	return provider, close, nil
+}
 func (p *apkPlatform) started(server *tsnet.Server, store *statusStore) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

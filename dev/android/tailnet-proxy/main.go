@@ -130,6 +130,13 @@ func protectManagedState(directory, host string) error {
 		}
 		for _, entry := range entries {
 			name := entry.Name()
+			if base, ok := strings.CutSuffix(name, ".renewal.json"); ok {
+				if !validDNSName(base) {
+					return errors.New("private certificate retry cache has an unsupported name")
+				}
+				paths = append(paths, filepath.Join(certs, name))
+				continue
+			}
 			base, cert := strings.CutSuffix(name, ".crt")
 			if !cert {
 				base, cert = strings.CutSuffix(name, ".key")
@@ -201,6 +208,8 @@ type status struct {
 	Listening                 bool     `json:"listening"`
 	CertificateReady          bool     `json:"certificate_ready"`
 	CertificateExpiresAt      int64    `json:"certificate_expires_at,omitempty"`
+	CertificateRenewalError   string   `json:"certificate_renewal_error,omitempty"`
+	CertificateRetryAt        int64    `json:"certificate_retry_at,omitempty"`
 	NetworkRequired           bool     `json:"network_required,omitempty"`
 	NetworkGeneration         uint64   `json:"network_generation,omitempty"`
 	VerifiedNetworkGeneration uint64   `json:"verified_network_generation,omitempty"`
@@ -355,11 +364,19 @@ func fetchPublicCertificate(ctx context.Context, client certificateClient, direc
 	}
 	certPEM, keyPEM, err := client.CertPair(ctx, host)
 	if err != nil {
+		var providerError certificateError
+		if errors.As(err, &providerError) {
+			return nil, providerError // Already classified; never contains CA bodies/tokens.
+		}
 		if retryAfter, limited := local.RateLimitRetryAfter(err); limited {
 			return nil, fmt.Errorf("tailnet certificate issuance is rate limited; retry after %d seconds", int64(retryAfter.Seconds())+1)
 		}
 		return nil, errors.New("tailnet certificate issuance failed; check MagicDNS, HTTPS approval and internet access")
 	}
+	return publicCertificateAt(certPEM, keyPEM, host, roots, time.Now())
+}
+
+func publicCertificateAt(certPEM, keyPEM []byte, host string, roots *x509.CertPool, now time.Time) (*tls.Certificate, error) {
 	pair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil || len(pair.Certificate) == 0 {
 		return nil, errors.New("tailnet returned an invalid certificate/key pair")
@@ -378,7 +395,7 @@ func fetchPublicCertificate(ctx context.Context, client certificateClient, direc
 	}
 	// A nil Roots uses Debian's system roots. The private Schemii ingress CA
 	// deliberately belongs only to the upstream transport, never this check.
-	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: host, Roots: roots, Intermediates: intermediates}); err != nil {
+	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: host, Roots: roots, Intermediates: intermediates, CurrentTime: now}); err != nil {
 		return nil, errors.New("tailnet certificate is not valid for its hostname and system trust roots")
 	}
 	pair.Leaf = leaf
@@ -607,12 +624,17 @@ func run(ctx context.Context, cfg config) (returned error) {
 	if !allowed {
 		return errors.New("enable HTTPS certificates for this node in the tailnet")
 	}
+	certificates, closeCertificates, err := platform.certificates(ctx, client, cfg.StateDir, host)
+	if err != nil {
+		return err
+	}
+	defer closeCertificates()
 	issuance, finishIssuance := context.WithTimeout(ctx, 90*time.Second)
 	if err := store.update(func(value *status) { value.StartupStage = "certificate issuance" }); err != nil {
 		finishIssuance()
 		return err
 	}
-	certificate, certErr := fetchPublicCertificate(issuance, client, cfg.StateDir, host, platform.roots())
+	certificate, certErr := fetchPublicCertificate(issuance, certificates, cfg.StateDir, host, platform.roots())
 	err = certErr
 	finishIssuance()
 	if err != nil {
@@ -627,8 +649,15 @@ func run(ctx context.Context, cfg config) (returned error) {
 	if err = store.update(func(value *status) {
 		value.CertificateReady = true
 		value.CertificateExpiresAt = certificate.Leaf.NotAfter.Unix()
+		value.CertificateRenewalError, value.CertificateRetryAt = certificateRenewalState(certificates)
 	}); err != nil {
 		return err
+	}
+	if renewable, ok := certificates.(interface {
+		startRenewal(*statusStore, chan<- error, time.Duration) func()
+	}); ok {
+		stopRenewal := renewable.startRenewal(store, failures, time.Minute)
+		defer stopRenewal()
 	}
 	handler, transport, err := proxyHandler(target, caPEM, host)
 	if err != nil {
@@ -659,17 +688,8 @@ func run(ctx context.Context, cfg config) (returned error) {
 				}
 				issuance, cancel := context.WithTimeout(hello.Context(), time.Minute)
 				defer cancel()
-				pair, err := fetchPublicCertificate(issuance, client, cfg.StateDir, host, platform.roots())
-				statusErr := store.update(func(s *status) {
-					s.CertificateReady = err == nil
-					s.Error = ""
-					if err != nil {
-						s.Error = err.Error()
-					}
-					if err == nil {
-						s.CertificateExpiresAt = pair.Leaf.NotAfter.Unix()
-					}
-				})
+				pair, err := fetchPublicCertificate(issuance, certificates, cfg.StateDir, host, platform.roots())
+				statusErr := storeCertificateResult(store, certificates, pair, err)
 				if err != nil {
 					return nil, err
 				}

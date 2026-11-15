@@ -44,7 +44,8 @@ func (f *SchemiiControlFixture) Owned() int {
 	defer f.p.epoch.mu.Unlock()
 	return len(f.p.epoch.sockets)
 }
-func (f *SchemiiControlFixture) Revoke() error { return f.p.epoch.revoke() }
+func (f *SchemiiControlFixture) Revoke() error  { return f.p.epoch.revoke() }
+func (f *SchemiiControlFixture) Current() error { return f.p.epoch.current() }
 func (f *SchemiiControlFixture) Close() {
 	_ = f.Revoke()
 	SetAndroidProtectFunc(nil)

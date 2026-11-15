@@ -22,6 +22,15 @@ type socketEpoch struct {
 func newSocketEpoch(generation uint64) *socketEpoch {
 	return &socketEpoch{generation: generation, sockets: make(map[int]uint64)}
 }
+
+func (e *socketEpoch) current() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return errors.New("Android socket epoch revoked")
+	}
+	return nil
+}
 func (e *socketEpoch) bind(fd int, bind func(uint64, int) error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

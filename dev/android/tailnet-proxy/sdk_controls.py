@@ -87,6 +87,22 @@ def source_guards(sdk):
         "net/netns/netns.go": [
             'runtime.GOOS == "android" && disableAndroidBindToActiveNetwork.Swap(v)',
         ],
+        "client/local/cert.go": [
+            "//go:build !js && !ts_omit_acme",
+            'lc.send(ctx, "POST", "/localapi/v0/set-dns?"+v.Encode(), 200, nil)',
+        ],
+        "ipn/localapi/cert.go": ["//go:build !ios && !android && !js && !ts_omit_acme"],
+        "ipn/localapi/localapi.go": [
+            'if buildfeatures.HasACME {\n\t\tRegister("set-dns", (*Handler).serveSetDNS)',
+            '"cert-domains":',
+        ],
+        "feature/buildfeatures/feature_acme_enabled.go": [
+            "//go:build !ts_omit_acme",
+            "const HasACME = true",
+        ],
+        "ipn/ipnlocal/peerapi_linux.go": ["//go:build linux && !android"],
+        "tempfork/acme/acme.go": ["HTTPClient *http.Client"],
+        "tempfork/acme/http.go": ["if c.HTTPClient != nil {\n\t\treturn c.HTTPClient"],
     }
     for path, snippets in checks.items():
         body = (sdk / path).read_text()
@@ -116,6 +132,11 @@ def main():
     parser.add_argument("--go", type=Path, required=True)
     parser.add_argument("--go-cache", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--certificate-controls",
+        action="store_true",
+        help="Also compile actual Android LocalAPI route selection and shared ACME consumer controls",
+    )
     parser.add_argument(
         "--registration-ref",
         help="Counterexample: extract install hooks from this Git commit",
@@ -221,6 +242,8 @@ def main():
         "control/controlclient",
         "control/controlhttp",
     ]
+    if args.certificate_controls:
+        packages.append("ipn/localapi")
     # Compile the production packages with only our focused controls. Upstream
     # test suites need unrelated, unretained test dependencies; do not fetch any.
     replacements = {
@@ -268,6 +291,23 @@ def main():
         "control/controlhttp/schemii_control_test.go",
         (FIXTURES / "controlhttp_test.go").read_bytes(),
     )
+    if args.certificate_controls:
+        # Android excludes this Linux TUN-only consumer of a Linux netns API.
+        replacements[str(sdk / "ipn/ipnlocal/peerapi_linux.go")] = ""
+        replacements[str(sdk / "ipn/localapi/cert.go")] = ""
+        overlay(
+            "ipn/localapi/disabled_stubs.go",
+            (sdk / "ipn/localapi/disabled_stubs.go")
+            .read_bytes()
+            .replace(b"//go:build ios || android || js", b"//go:build linux", 1),
+        )
+        overlay(
+            "ipn/localapi/schemii_certificate_test.go",
+            (FIXTURES / "localapi_certificate_test.go").read_bytes(),
+        )
+        physical = out / "certificate-provider-test.go"
+        physical.write_bytes((FIXTURES / "certificate_provider_test.go").read_bytes())
+        replacements[str(MODULE / "schemii_certificate_test.go")] = str(physical)
     overlay_file = out / "overlay.json"
     overlay_file.write_text(json.dumps({"Replace": replacements}, indent=2) + "\n")
     command = [
@@ -286,6 +326,8 @@ def main():
         "tailscale.com/control/controlclient",
         "tailscale.com/control/controlhttp",
     ]
+    if args.certificate_controls:
+        command += ["tailscale.com/ipn/localapi", "."]
     start = time.time()
     with (out / "test.log").open("x") as log:
         result = subprocess.run(
@@ -296,6 +338,19 @@ def main():
         "kind": "source-extracted-host-sdk-controls",
         "head": head,
         "command": command,
+        "environment": {
+            k: env[k]
+            for k in (
+                "GOTOOLCHAIN",
+                "GOROOT",
+                "GOCACHE",
+                "GOMODCACHE",
+                "GOPATH",
+                "GOTMPDIR",
+                "GOPROXY",
+            )
+            if k in env
+        },
         "cwd": str(MODULE),
         "exit": result.returncode,
         "elapsed_seconds": time.time() - start,

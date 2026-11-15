@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"net"
 
+	"tailscale.com/client/local"
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/netns"
@@ -23,6 +24,7 @@ type networkPlatform interface {
 	stopped()
 	ingressAvailable() bool
 	roots() *x509.CertPool
+	certificates(context.Context, *local.Client, string, string) (certificateClient, func(), error)
 }
 
 func (c config) networkPlatform() networkPlatform {

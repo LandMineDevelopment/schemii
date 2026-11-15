@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"tailscale.com/client/local"
 	"tailscale.com/tsnet"
 )
 
@@ -87,3 +88,7 @@ func (termuxPlatform) started(*tsnet.Server, *statusStore) {}
 func (termuxPlatform) stopped()                            {}
 
 func (termuxPlatform) ingressAvailable() bool { return true }
+
+func (termuxPlatform) certificates(_ context.Context, client *local.Client, _, _ string) (certificateClient, func(), error) {
+	return client, func() {}, nil // The Linux SDK retains its supported cert/ route.
+}
