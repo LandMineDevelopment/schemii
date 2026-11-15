@@ -52,9 +52,20 @@ public final class ProbeActivity extends Activity {
         setContentView(view);
         new Thread(() -> {
             JSONObject report = new JSONObject();
+            File dir = new File(getFilesDir(), "probe-v1");
             try {
-                File dir = new File(getFilesDir(), "probe-v1");
+                report.put("run_id", UUID.randomUUID().toString())
+                    .put("started_at_ms", System.currentTimeMillis()).put("stack_acceptance", false);
+                try (InputStream input = getAssets().open("runtime/native-provenance.json")) {
+                    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                    byte[] buffer = new byte[4096];
+                    for (int n; (n = input.read(buffer)) != -1;) bytes.write(buffer, 0, n);
+                    JSONObject build = new JSONObject(bytes.toString("UTF-8"));
+                    report.put("source_commit", build.getString("source_commit"))
+                        .put("packaged_abis", build.getJSONArray("abis"));
+                }
                 if (!dir.isDirectory() && !dir.mkdir()) throw new IOException("Cannot create probe state");
+                Files.deleteIfExists(new File(dir, "report.json").toPath());
                 String lib = getApplicationInfo().nativeLibraryDir;
                 String probe = lib + "/libruntime_probe.so";
                 JSONArray checks = new JSONArray();
@@ -85,13 +96,22 @@ public final class ProbeActivity extends Activity {
                     .put("abis", new JSONArray(Arrays.asList(android.os.Build.SUPPORTED_ABIS)))
                     .put("checks", checks).put("stack_acceptance", false)
                     .put("pending", "PG17 two clusters, Python extensions, Node/Pi, Go, Moto, pre-PIN tailnet");
-                try (FileOutputStream out = new FileOutputStream(new File(dir, "report.json"))) {
-                    out.write((report.toString(2) + "\n").getBytes("UTF-8"));
-                    out.getFD().sync();
-                }
             } catch (Exception error) {
                 try { report.put("error", error.toString()).put("stack_acceptance", false); }
                 catch (Exception ignored) { /* JSONObject keys above are constants. */ }
+            }
+            try {
+                File temporary = new File(dir, "report.tmp");
+                try (FileOutputStream out = new FileOutputStream(temporary)) {
+                    out.write((report.toString(2) + "\n").getBytes("UTF-8"));
+                    out.getFD().sync();
+                }
+                Files.move(temporary.toPath(), new File(dir, "report.json").toPath(),
+                           java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                           java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (Exception error) {
+                try { report.put("report_write_error", error.toString()); }
+                catch (Exception ignored) { /* Fixed JSON key. */ }
             }
             runOnUiThread(() -> view.setText(report.toString()));
         }, "runtime-probes").start();

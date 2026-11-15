@@ -94,8 +94,15 @@ static int owner_control(void) {
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "owner-control")) return owner_control();
     if (argc == 2 && !strcmp(argv[1], "identity")) {
-        printf("{\"probe\":\"packaged-native\",\"uid\":%u,\"page_size\":%ld}\n",
-               (unsigned)getuid(), sysconf(_SC_PAGESIZE));
+#if defined(__aarch64__)
+        const char *abi = "arm64-v8a";
+#elif defined(__x86_64__)
+        const char *abi = "x86_64";
+#else
+#error Unsupported probe ABI
+#endif
+        printf("{\"probe\":\"packaged-native\",\"abi\":\"%s\",\"uid\":%u,\"page_size\":%ld}\n",
+               abi, (unsigned)getuid(), sysconf(_SC_PAGESIZE));
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "writable-exec")) {

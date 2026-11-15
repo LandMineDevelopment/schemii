@@ -152,6 +152,23 @@ def native(cache, out, abi):
     return {str(p.relative_to(out)): digest(p) for p in sorted(dst.iterdir())}
 
 
+def helper_identity(helper):
+    root = helper.resolve().parents[1]
+    hashes = {str(p.relative_to(root)): digest(p) for p in
+              [helper.resolve(), root / 'scripts/build-android-release.py']}
+    provenance = root / 'provenance.json'
+    if provenance.exists():
+        record = json.loads(provenance.read_text())
+        if record['files'] != hashes: raise ValueError('Helper snapshot identity drift')
+        return {'source_head': record['source_head'], 'files': hashes, 'kind': 'snapshot'}
+    head = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+    for name in hashes:
+        committed = subprocess.check_output(['git', '-C', str(root), 'show', f'{head}:{name}'])
+        if hashlib.sha256(committed).hexdigest() != hashes[name]:
+            raise ValueError('Helper/selector have uncommitted changes; use an immutable snapshot')
+    return {'source_head': head, 'files': hashes, 'kind': 'checkout'}
+
+
 def stage_shared(out, helper, commit):
     """Use #265's real validator, then recheck exact bytes extracted from the APK."""
     spec = importlib.util.spec_from_file_location('apk_parity', helper)
@@ -202,6 +219,7 @@ def build(args, cache):
     for abi in abis:
         artifacts.update(native(cache, out, abi))
     commit = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    helper_before = helper_identity(args.parity_helper)
     module, record = stage_shared(out, args.parity_helper.resolve(), commit)
     provenance = {
         'schema': 1, 'kind': 'disposable-feasibility', 'stack_acceptance': False,
@@ -210,12 +228,7 @@ def build(args, cache):
         'native_files': artifacts, 'toolchain_lock_sha256': digest(HERE / 'toolchain.lock.json'),
         'adapter_sources': {str(p.relative_to(ROOT)): digest(p) for p in sorted(HERE.rglob('*'))
                             if p.is_file() and '__pycache__' not in p.parts},
-        'parity_helper': {
-            'sha256': digest(args.parity_helper),
-            'selector_sha256': digest(args.parity_helper.resolve().parents[1] / 'scripts/build-android-release.py'),
-            'checkout_commit': subprocess.check_output(['git', '-C', str(args.parity_helper.resolve().parents[1]),
-                                                       'rev-parse', 'HEAD'], text=True).strip(),
-        },
+        'parity_helper': helper_identity(args.parity_helper),
         'host_tools': {name: {'version': subprocess.check_output([name, '--version'], text=True,
                                                                  stderr=subprocess.STDOUT).strip(),
                              'binary_sha256': digest(Path(shutil.which(name)).resolve())}
@@ -278,6 +291,8 @@ def build(args, cache):
     with zipfile.ZipFile(signed) as apk: apk.extractall(extracted)
     packaged_record = json.loads((extracted / 'assets/runtime/shared-source.json').read_text())
     module.check_apk_sources(ROOT, extracted / 'assets/shared', packaged_record, commit)
+    if helper_identity(args.parity_helper) != helper_before:
+        raise ValueError('Helper changed during the build; acceptance refused')
     receipt = {'apk': str(signed), 'apk_sha256': digest(signed), 'source_commit': commit,
                'shared_readback': 'passed', 'stack_acceptance': False, 'native': provenance}
     (out / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')

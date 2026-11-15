@@ -1,5 +1,6 @@
 """Focused controls for tool input and native package inspection, not runtime acceptance."""
 import hashlib
+import json
 import importlib.util
 from pathlib import Path
 import stat
@@ -76,6 +77,22 @@ class BuildControls(unittest.TestCase):
             p.write_bytes(b'wrong')
             with self.assertRaises(ValueError): build.fetch('https://unused.invalid', '0' * 64, p)
             self.assertEqual(p.read_bytes(), b'wrong')
+
+    def test_helper_snapshot_binds_selector(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'scripts').mkdir()
+            helper = root / 'scripts/check_runtime_parity.py'
+            selector = root / 'scripts/build-android-release.py'
+            helper.write_text('# helper')
+            selector.write_text('# selector')
+            record = {'source_head': 'a' * 40, 'files': {
+                'scripts/check_runtime_parity.py': build.digest(helper),
+                'scripts/build-android-release.py': build.digest(selector)}}
+            (root / 'provenance.json').write_text(json.dumps(record))
+            self.assertEqual(build.helper_identity(helper)['source_head'], 'a' * 40)
+            selector.write_text('# changed')
+            with self.assertRaises(ValueError): build.helper_identity(helper)
 
     def test_elf_abi_and_page_alignment(self):
         self.assertEqual(verify.elf_identity(elf(), 'arm64-v8a')['load_alignment'], 16384)

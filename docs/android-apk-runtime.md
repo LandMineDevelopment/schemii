@@ -87,8 +87,11 @@ private per-build copy. No core application source is patched.
 The normal build loads the canonical `scripts/check_runtime_parity.py` APIs from
 #265. Until its separate branch is integrated, `--parity-helper /absolute/path`
 can identify that exact helper for a diagnostic build. Native provenance records
-the helper checkout head, helper SHA256 and its committed-file-selector SHA256;
-this external-path bridge is not integrated-source acceptance.
+the helper head, helper SHA256 and its committed-file-selector SHA256.
+An immutable coordinator snapshot with adjacent `provenance.json` is supported;
+changed snapshot bytes or dirty helper/selector checkouts are refused, and both
+inputs are checked again before the receipt. This external-path bridge is not
+integrated-source acceptance.
 
 The build selects an independent full Git HEAD, calls `apk_source_manifest`,
 stages each listed file from `git show HEAD:path`, and calls `check_apk_sources`.
@@ -179,6 +182,11 @@ Still required before runtime264 or host integration can be accepted:
 - Coordinator-scheduled tailnet/trusted HTTPS, six-service readiness, physical
   install, pre-PIN boot with retained PIN, full local acceptance and independent
   exact-head review. No phone or shared deployment was changed by this work.
+
+Probe reports carry a fresh run ID, timestamp, packaged source head and ABI
+inventory. Launch exceptions are persisted atomically, so a failed translated
+launch cannot leave an old success report as current evidence. ARM64 translation
+is diagnostic only and may reject direct executable launches.
 
 Private build logs/receipts and emulator reports live in the owned cache.
 `./ci.sh --plan --base origin/main` selects full acceptance for these new files;
