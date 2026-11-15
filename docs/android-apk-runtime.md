@@ -259,6 +259,10 @@ enabled while Pi and both clusters are live. It checks durable readiness, enable
 authentication, denial of an anonymous session, then graceful lifespan completion
 and listener closure. This internal transport is the eventual proxy backend,
 not a substitute for trusted tailnet HTTPS or full API/browser acceptance.
+The pinned Uvicorn0.52.4 intentionally re-raises its captured SIGTERM after
+shutdown; signal exit alone cannot pass. The probe records the actual status,
+requires startup/shutdown-complete markers and listener closure. The original
+non-debuggable failure from an incorrect exit-zero-only oracle is retained.
 
 ## Host/runtime interface and coexistence
 

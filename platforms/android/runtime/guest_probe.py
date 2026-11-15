@@ -554,10 +554,22 @@ def shared_http_probe():
         raise AssertionError("Unauthenticated session request was admitted")
     if not stop_child(entry):
         raise RuntimeError("Shared HTTP graceful lifespan stop deadline")
-    assert process.returncode == 0, "Shared HTTP app did not exit cleanly"
     lifecycle = logpath.read_text()
-    assert "Application startup complete." in lifecycle
-    assert "Application shutdown complete." in lifecycle
+    termination = {
+        "exit": process.returncode,
+        "startup_complete": "Application startup complete." in lifecycle,
+        "shutdown_complete": "Application shutdown complete." in lifecycle,
+        "uvicorn": importlib.metadata.version("uvicorn"),
+    }
+    REPORT["http_lifecycle"] = termination
+    persist()
+    # The pinned Uvicorn Server.capture_signals restores the previous handler
+    # and re-raises SIGTERM *after* lifespan shutdown. Signal status alone cannot
+    # prove graceful cleanup: require both actual lifecycle markers as well.
+    assert process.returncode in (0, -signal.SIGTERM), termination
+    assert termination["startup_complete"] and termination["shutdown_complete"], (
+        termination
+    )
     with socket.socket() as control:
         control.settimeout(2)
         assert control.connect_ex((HOST, port)) != 0, (
@@ -569,6 +581,7 @@ def shared_http_probe():
         "authentication_enabled": True,
         "anonymous_session_denied": True,
         "lifespan_start_and_graceful_shutdown": True,
+        "termination": termination,
         "listener_closed": True,
         "external_https_acceptance": "pending",
     }
