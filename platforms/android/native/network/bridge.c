@@ -23,10 +23,11 @@ static struct call borrow(void) {
     pthread_mutex_lock(&owner_lock);
     JavaVM *vm = owner_vm;
     if (vm && owner_bridge) {
-        if ((*vm)->GetEnv(vm, (void **)&c.env, JNI_VERSION_1_6) == JNI_EDETACHED) {
+        jint status = (*vm)->GetEnv(vm, (void **)&c.env, JNI_VERSION_1_6);
+        if (status == JNI_EDETACHED) {
             if ((*vm)->AttachCurrentThread(vm, &c.env, NULL) == JNI_OK) c.attached = 1;
             else c.env = NULL;
-        }
+        } else if (status != JNI_OK) c.env = NULL;
         if (c.env) c.bridge = (*c.env)->NewLocalRef(c.env, owner_bridge);
     }
     pthread_mutex_unlock(&owner_lock);

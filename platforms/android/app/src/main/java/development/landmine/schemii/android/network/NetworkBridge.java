@@ -20,6 +20,7 @@ import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,6 +36,7 @@ public final class NetworkBridge implements AutoCloseable {
     private final ConnectivityManager manager;
     private final ExecutorService dnsExecutor = Executors.newSingleThreadExecutor();
     private final Object lock = new Object();
+    private final Object closeLock = new Object();
     private static final class Query {
         final CancellationSignal signal = new CancellationSignal();
         final CountDownLatch finished = new CountDownLatch(1);
@@ -49,20 +51,31 @@ public final class NetworkBridge implements AutoCloseable {
     private LinkProperties properties;
     private long generation = 1;
     private boolean closed;
+    private boolean blocked;
     private boolean registered;
     private boolean detached;
 
     private final ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
         @Override public void onAvailable(Network n) {
-            synchronized (lock) { network = n; capabilities = null; properties = null; changedLocked(); }
+            synchronized (lock) { if (n.equals(network)) return; network = n; capabilities = null; properties = null; blocked = false; changedLocked(); }
             nativeChanged();
         }
         @Override public void onCapabilitiesChanged(Network n, NetworkCapabilities c) {
-            synchronized (lock) { if (!n.equals(network)) return; capabilities = c; changedLocked(); }
+            synchronized (lock) {
+                if (!n.equals(network)) return;
+                boolean changed = capabilities == null || eligible(capabilities) != eligible(c);
+                capabilities = c;
+                if (!changed) return;
+                changedLocked();
+            }
             nativeChanged();
         }
         @Override public void onLinkPropertiesChanged(Network n, LinkProperties p) {
-            synchronized (lock) { if (!n.equals(network)) return; properties = p; changedLocked(); }
+            synchronized (lock) { if (!n.equals(network) || Objects.equals(properties,p)) return; properties = p; changedLocked(); }
+            nativeChanged();
+        }
+        @Override public void onBlockedStatusChanged(Network n, boolean value) {
+            synchronized (lock) { if (!n.equals(network) || blocked == value) return; blocked = value; changedLocked(); }
             nativeChanged();
         }
         @Override public void onLost(Network n) {
@@ -76,7 +89,10 @@ public final class NetworkBridge implements AutoCloseable {
 
     public NetworkBridge(Context context) throws IOException {
         manager = (ConnectivityManager) context.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (manager == null || !nativeAttach()) throw new IOException("Network bridge unavailable or already owned");
+        if (manager == null || !nativeAttach()) {
+            dnsExecutor.shutdownNow();
+            throw new IOException("Network bridge unavailable or already owned");
+        }
         try {
             // Observe the default network. Never silently select an underlying
             // non-VPN network to bypass a different application's VPN policy.
@@ -94,12 +110,14 @@ public final class NetworkBridge implements AutoCloseable {
         lock.notifyAll();
     }
 
+    private static boolean eligible(NetworkCapabilities c) {
+        return c != null && c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            && c.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            && c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            && !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
+    }
     private boolean availableLocked() {
-        return !closed && network != null && capabilities != null && properties != null
-            && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-            && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-            && !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
+        return !closed && !blocked && network != null && properties != null && eligible(capabilities);
     }
 
     private Network captureLocked(long expected) throws IOException {
@@ -224,8 +242,14 @@ public final class NetworkBridge implements AutoCloseable {
                 TimeUnit.NANOSECONDS.timedWait(lock, remaining);
             }
         }
-        return new JSONObject(nativeProbe()).put("android_dns_queries", dnsCount.get())
+        JSONObject result = new JSONObject(nativeProbe()).put("android_dns_queries", dnsCount.get())
             .put("android_socket_binds", bindCount.get()).put("stack_acceptance", false);
+        synchronized (lock) {
+            if (!availableLocked() || result.optLong("generation", 0) != generation) {
+                result.put("ready", false).put("error", "network generation changed before probe delivery");
+            }
+        }
+        return result;
     }
 
     /** Host supplies roots/endpoint/state paths through the agreed JSON contract. */
@@ -236,16 +260,39 @@ public final class NetworkBridge implements AutoCloseable {
         }
     }
 
+    // A timed-out outer probe may request cancellation while native code is
+    // still unwinding. Revoke/unregister now; retain its JNI owner until Stop
+    // confirms completion. The host must contain an uninterruptible process.
+    void requestCancellation() throws IOException {
+        synchronized (lock) { if (closed) return; closed = true; changedLocked(); }
+        IOException failure = null;
+        synchronized (closeLock) {
+            if (registered) {
+                try { manager.unregisterNetworkCallback(callback); }
+                catch (RuntimeException error) { failure = new IOException("Network callback unregistration failed", error); }
+                finally { registered = false; }
+            }
+        }
+        try { nativeChanged(); }
+        finally { dnsExecutor.shutdownNow(); nativeStop(1); }
+        if (failure != null) throw failure;
+    }
+
     @Override public void close() throws IOException {
-        synchronized (lock) { if (detached) return; if (!closed) { closed = true; changedLocked(); } }
-        if (registered) { manager.unregisterNetworkCallback(callback); registered = false; }
-        nativeChanged();
-        dnsExecutor.shutdownNow();
-        // Never detach callbacks while a half-initialized node is still using
-        // them. The host owns containment of this dedicated process on failure.
-        if (!nativeStop(15000)) throw new IOException("Native stop incomplete; retain dedicated process ownership");
-        nativeDetach();
-        synchronized (lock) { detached = true; }
+        IOException failure = null;
+        try { requestCancellation(); } catch (IOException error) { failure = error; }
+        synchronized (closeLock) {
+            synchronized (lock) { if (detached) { if (failure != null) throw failure; return; } }
+            // Never detach while a half-initialized node still uses callbacks.
+            if (!nativeStop(15000)) {
+                IOException incomplete = new IOException("Native stop incomplete; retain dedicated process ownership");
+                if (failure != null) incomplete.addSuppressed(failure);
+                throw incomplete;
+            }
+            nativeDetach();
+            synchronized (lock) { detached = true; }
+        }
+        if (failure != null) throw failure;
     }
 
     private native boolean nativeAttach();

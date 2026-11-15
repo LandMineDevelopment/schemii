@@ -46,6 +46,8 @@ type apkPlatform struct {
 	server             *tsnet.Server // Published only after Start has finished.
 	verifiedGeneration uint64
 	verifiedAt         time.Time
+	epoch              *socketEpoch
+	cancel             context.CancelFunc
 	store              *statusStore
 }
 
@@ -53,9 +55,10 @@ var installedAPK atomic.Pointer[apkPlatform]
 var dnsRequest atomic.Uint64
 var apkSession struct {
 	sync.Mutex
-	cancel      context.CancelFunc
-	done        chan struct{}
-	uncontained bool
+	cancel         context.CancelFunc
+	done           chan struct{}
+	uncontained    bool
+	networkRetired bool
 }
 
 func androidSnapshot() (networkSnapshot, error) {
@@ -116,27 +119,39 @@ func (p *apkPlatform) ingressAvailable() bool {
 	return err == nil && snapshot.Available && snapshot.Generation == p.verifiedGeneration && time.Since(p.verifiedAt) < 30*time.Second
 }
 
-func apkInterfaces() ([]netmon.Interface, error) {
+func (p *apkPlatform) interfaces() ([]netmon.Interface, error) {
 	snapshot, err := androidSnapshot()
 	if err != nil {
 		return nil, err
 	}
+	if snapshot.Generation != p.epoch.generation {
+		return nil, errors.New("Android interface epoch revoked")
+	}
 	return snapshot.interfaces()
 }
-func bindAndroidSocket(fd int) error {
-	snapshot, err := androidSnapshot()
-	if err != nil || !snapshot.Available {
-		return errors.New("no usable Android network")
+func (p *apkPlatform) revokeSockets() {
+	if err := p.epoch.revoke(); err != nil {
+		apkSession.Lock()
+		apkSession.uncontained = true
+		apkSession.Unlock()
+		if p.cancel != nil {
+			p.cancel()
+		}
 	}
-	if C.schemii_android_bind(C.uint64_t(snapshot.Generation), C.int(fd)) != 1 {
-		return errors.New("Android socket binding denied or network generation changed")
-	}
-	return nil
 }
-func androidDNS(ctx context.Context, query []byte) ([]byte, error) {
+
+func (p *apkPlatform) bindSocket(fd int) error {
+	return p.epoch.bind(fd, func(generation uint64, fd int) error {
+		if C.schemii_android_bind(C.uint64_t(generation), C.int(fd)) != 1 {
+			return errors.New("Android socket binding denied or network epoch revoked")
+		}
+		return nil
+	})
+}
+func androidDNS(ctx context.Context, generation uint64, query []byte) ([]byte, error) {
 	snapshot, err := androidSnapshot()
-	if err != nil || !snapshot.Available {
-		return nil, errors.New("Android DNS network unavailable")
+	if err != nil || !snapshot.Available || snapshot.Generation != generation {
+		return nil, errors.New("Android DNS network epoch unavailable")
 	}
 	request := dnsRequest.Add(1)
 	timeout := 10 * time.Second
@@ -166,9 +181,14 @@ func androidDNS(ctx context.Context, query []byte) ([]byte, error) {
 }
 
 func (p *apkPlatform) install() error {
-	if _, err := apkInterfaces(); err != nil {
+	snapshot, err := androidSnapshot()
+	if err != nil {
 		return err
 	}
+	if _, err := snapshot.interfaces(); err != nil {
+		return err
+	}
+	p.epoch = newSocketEpoch(snapshot.Generation)
 	pem := C.schemii_android_roots()
 	if pem == nil {
 		return errors.New("Android public system roots unavailable")
@@ -195,11 +215,21 @@ func (p *apkPlatform) install() error {
 			return err
 		}
 	}
-	installResolver(bridgeResolver(androidDNS), apkInterfaces)
+	installResolver(bridgeResolver(func(ctx context.Context, query []byte) ([]byte, error) {
+		return androidDNS(ctx, p.epoch.generation, query)
+	}), p.interfaces)
 	netns.SetAndroidProtectFunc(nil) // This app neither owns nor requests a VPN.
-	netns.SetAndroidBindToNetworkFunc(bindAndroidSocket)
+	netns.SetAndroidBindToNetworkFunc(p.bindSocket)
 	netns.SetEnabled(true)
 	installedAPK.Store(p)
+	current, err := androidSnapshot()
+	if err != nil || !current.Available || current.Generation != p.epoch.generation {
+		p.revokeSockets()
+		if p.cancel != nil {
+			p.cancel()
+		}
+		return errors.New("Android network changed during adapter initialization")
+	}
 	return nil
 }
 func (p *apkPlatform) configure(*tsnet.Server) error { return p.install() }
@@ -210,6 +240,8 @@ func (p *apkPlatform) started(server *tsnet.Server, store *statusStore) {
 	p.changedLocked()
 }
 func (p *apkPlatform) stopped() {
+	installedAPK.CompareAndSwap(p, nil)
+	p.revokeSockets()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.server, p.store = nil, nil
@@ -217,6 +249,17 @@ func (p *apkPlatform) stopped() {
 func (p *apkPlatform) changedLocked() {
 	snapshot, err := androidSnapshot()
 	p.verifiedGeneration = 0
+	if err != nil || !snapshot.Available || snapshot.Generation != p.epoch.generation {
+		p.revokeSockets()
+		if p.config.StateDir != "" {
+			apkSession.Lock()
+			apkSession.networkRetired = true
+			apkSession.Unlock()
+		}
+		if p.cancel != nil {
+			p.cancel()
+		}
+	}
 	if p.store != nil {
 		_ = p.store.update(func(s *status) {
 			s.NetworkRequired = true
@@ -255,6 +298,9 @@ func resultJSON(value any) *C.char {
 func beginAPK() (context.Context, chan struct{}, error) {
 	apkSession.Lock()
 	defer apkSession.Unlock()
+	if apkSession.networkRetired {
+		return nil, nil, errors.New("network epoch retired; host must recreate the dedicated network process")
+	}
 	if apkSession.uncontained {
 		return nil, nil, errors.New("incomplete SDK initialization requires host process containment")
 	}
@@ -280,12 +326,14 @@ func SchemiiNetworkProbe() *C.char {
 	defer close(done)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	p := &apkPlatform{}
+	p := &apkPlatform{cancel: cancel}
+	defer installedAPK.CompareAndSwap(p, nil)
 	out := map[string]any{"schema": 1, "probe": "android-network-v1", "ready": false, "stack_acceptance": false, "tailscale_version": tailscaleVersion}
 	if err := p.install(); err != nil {
 		out["error"] = err.Error()
 		return resultJSON(out)
 	}
+	defer p.revokeSockets()
 	snapshot, _ := androidSnapshot()
 	out["generation"], out["network_handle"], out["interfaces"], out["private_dns"] = snapshot.Generation, snapshot.Handle, snapshot.Addresses, snapshot.PrivateDNS
 	out["native_bridge_sha256"] = C.GoString(C.schemii_android_bridge_identity())
@@ -302,6 +350,7 @@ func SchemiiNetworkProbe() *C.char {
 		return resultJSON(out)
 	}
 	out["sdk_interfaces_ok"] = true
+	out["socket_cookie_required"] = true
 	proof, err := proveUnderlay(ctx, p.publicRoots, monitor)
 	for name, value := range proof {
 		out[name] = value
@@ -340,8 +389,11 @@ func SchemiiNetworkStart(configuration *C.char) *C.char {
 	if err != nil {
 		return resultJSON(map[string]any{"error": err.Error(), "started": false})
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
 	go func() {
 		defer close(done)
+		defer cancel()
 		err := run(ctx, cfg)
 		if errors.Is(err, errInitializationIncomplete) {
 			apkSession.Lock()

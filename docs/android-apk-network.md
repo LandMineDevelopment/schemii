@@ -69,6 +69,12 @@ Java sources with the existing source set, add `ACCESS_NETWORK_STATE` alongside
 JSONObject network = development.landmine.schemii.android.network.NetworkProbe.run(context);
 ```
 
+`NetworkProbe.run(Context)` must be called off the main thread. A 45-second
+Future deadline covers network discovery, JNI work and normal cleanup. Timeout
+or interruption requests native cancellation, unregisters callbacks and closes
+DNS work; a still-unwinding native operation retains its explicitly owned JNI
+reference until Stop confirms completion. The host must contain a process if
+native cleanup cannot be confirmed; a timed-out Future is never a readiness pass.
 `NetworkProbe.run(Context)` returns actual Java/Go/JNI callback outcomes and closes
 the bridge. It performs no enrollment, no backend startup and no tailnet
 listener registration. Its result includes network generation/handle, observed
@@ -95,7 +101,10 @@ fails closed. This conservative policy intentionally may report blocked even
 when a different VPN would allow bypass; changing that behavior requires explicit
 policy review and device evidence. It never changes the other VPN's settings.
 
-Callbacks advance a generation, cancel pending DNS and invalidate readiness.
+Effective network/policy/LinkProperties changes advance a generation, cancel
+pending DNS, revoke owned socket I/O and invalidate readiness. Identical framework
+callbacks do not create a new epoch; blocked-status changes do. Each probe/node
+lifetime pins DNS, metadata and socket binding to that one generation.
 LinkProperties and NetworkInterface provide real interface names/indices, MTUs,
 flags, addresses/prefixes including IPv6, gateway and Private DNS state. Go rejects
 missing or invalid metadata and supplies non-nil AltAddrs to the SDK rather than
@@ -113,7 +122,11 @@ request and response generation are checked; stale answers are discarded.
 [Network.bindSocket](https://developer.android.com/reference/android/net/Network)
 is invoked before connecting each SDK socket via its pinned Android binding hook.
 Java duplicates the descriptor for the call and closes only its duplicate. Go
-keeps the real socket. TCP control/bootstrap/DERP and UDP transport use the same
+keeps the real socket. A kernel SO_COOKIE identity registry revokes owned socket
+I/O on change/stop without retaining duplicate descriptors. A temporary duplicate
+is obtained and checked against its original cookie before shutdown, so reused
+FD numbers cannot revoke unrelated sockets. Missing kernel cookie support fails
+closed and must be tested by the actual Android probe. TCP control/bootstrap/DERP and UDP transport use the same
 binding boundary; loopback backend connections deliberately do not. Go leaves
 Android netns hooks enabled, unlike the Termux platform. No VPN protect callback
 is installed because this app owns no VPN. Bind failures are errors, not ambient
@@ -173,8 +186,13 @@ network generation/verification fields. `ready` here remains **ingress/node**
 readiness, not complete backend acceptance. It requires a current unexpired
 verified certificate, online node, registered listener and (on APK) a current
 network-generation proof. Network callbacks invalidate proof immediately; a
-bounded DNS/public TLS underlay check renews proof after changes and at most
-30-second freshness. Old-generation results cannot overwrite newer state.
+bounded DNS/public TLS underlay check maintains at most 30-second freshness
+within the pinned epoch. Old-generation results cannot overwrite newer state.
+An SDK node whose epoch is
+revoked stops; the host must recreate its dedicated network process before
+restart, retaining its private node identity/state. This discards SDK DNS caches
+instead of silently mixing old-network DNS with new-network sockets. Seamless
+host reconnect/state continuity remains a later acceptance gate.
 Authenticated hostname changes invalidate the existing listener and stop the
 node so the host can reconfigure origins explicitly. The certificate callback
 revalidates the exact SNI, chain, dates and key on each handshake. Expiry and

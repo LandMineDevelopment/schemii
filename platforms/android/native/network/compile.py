@@ -75,7 +75,7 @@ def build(args):
         CC=str(compiler),
         GOMAXPROCS="3",
         CGO_CFLAGS=f"-DSCHEMII_NETWORK_BRIDGE_SHA256={bridge_digest}",
-        CGO_LDFLAGS="-Wl,-z,max-page-size=16384",
+        CGO_LDFLAGS="-Wl,-z,max-page-size=16384 -Wl,-soname,libschemii_network.so",
         GOCACHE=str(args.go_cache.resolve() if args.go_cache else out / "go-cache"),
     )
     library = out / "libschemii_network.so"
