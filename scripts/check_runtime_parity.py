@@ -64,6 +64,21 @@ def environment(service: str) -> dict[str, str]:
     return result
 
 
+def postgres_settings(text: str) -> dict[str, str]:
+    """Read the complete generated cluster config, rejecting duplicate overrides."""
+    settings = {}
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = re.fullmatch(r"([a-z_]+)\s*=\s*(.+)", line)
+        require(match is not None, "unsupported PostgreSQL configuration")
+        assert match
+        name, value = match.groups()
+        require(name not in settings, f"duplicate PostgreSQL setting: {name}")
+        settings[name] = value.strip()
+    return settings
+
+
 def source_module(root: Path, name: str):
     spec = importlib.util.spec_from_file_location(
         "parity_" + name.replace("/", "_"), root / name
@@ -77,6 +92,28 @@ def source_module(root: Path, name: str):
 def check(root: Path = ROOT) -> dict:
     contract = json.loads((root / "dev/runtime-contract.json").read_text())
     require(contract["schema"] == 1, "unsupported runtime contract")
+    policy = contract["postgresql_policy"]
+    require(
+        policy
+        == {
+            "cluster_names": ["metadata", "target"],
+            "settings": {
+                "fsync": "on",
+                "synchronous_commit": "on",
+                "full_page_writes": "on",
+                "password_encryption": "'scram-sha-256'",
+            },
+            "application_role_flags": [
+                "LOGIN",
+                "NOSUPERUSER",
+                "NOCREATEDB",
+                "NOCREATEROLE",
+                "NOINHERIT",
+                "NOREPLICATION",
+            ],
+        },
+        "shared PostgreSQL safety policy drift",
+    )
     for platform in ("docker", "android"):
         profile = contract["platforms"][platform]
         require(
@@ -241,28 +278,35 @@ def check(root: Path = ROOT) -> dict:
                 else configured[parts[0]][parts[1]] == value,
                 f"Android configuration drift: {path}",
             )
-        for name, port in [("metadata", 5433), ("target", 5434)]:
+        for name, port in zip(policy["cluster_names"], (5433, 5434), strict=True):
             directory = runtime.state / "postgres" / name
             (directory / "global").mkdir(parents=True)
             (directory / "PG_VERSION").write_text("17")
             (directory / "global/pg_control").touch()
-            runtime._spawn = lambda *args, **kwargs: None
+            launches = []
+            runtime._spawn = lambda *args, **kwargs: launches.append(args)
             runtime._wait = lambda *args, **kwargs: None
             runtime._cluster(name, port)
-            pg = (directory / "postgresql.conf").read_text()
             require(
-                f"max_connections = {contract['platforms']['android']['postgres_max_connections']}\n"
-                in pg,
+                launches
+                == [(name, [str(android.PG_BIN / "postgres"), "-D", str(directory)])],
+                "Android PostgreSQL cluster launch drift",
+            )
+            pg = postgres_settings((directory / "postgresql.conf").read_text())
+            require(
+                pg.get("max_connections")
+                == str(contract["platforms"]["android"]["postgres_max_connections"]),
                 "Android PostgreSQL budget drift",
             )
-            for setting in (
-                "fsync = on",
-                "synchronous_commit = on",
-                "full_page_writes = on",
-                "listen_addresses = '127.0.0.1'",
-                "password_encryption = 'scram-sha-256'",
-            ):
-                require(setting in pg, f"Android durability/security drift: {setting}")
+            require(pg.get("port") == str(port), "Android PostgreSQL endpoint drift")
+            for setting, value in (
+                contract["postgresql_policy"]["settings"]
+                | {"listen_addresses": "'127.0.0.1'"}
+            ).items():
+                require(
+                    pg.get(setting) == value,
+                    f"Android durability/security drift: {setting}",
+                )
     runtime_source = (root / "dev/android/runtime.py").read_text()
     for marker in (
         contract["readiness"],
@@ -277,6 +321,35 @@ def check(root: Path = ROOT) -> dict:
         )
     # Detect overrides that would silently undo contract values, including duplicates.
     tree = ast.parse(runtime_source)
+    bootstrap = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_bootstrap_database"
+    )
+    role_sql = [
+        node.args[0].value
+        for node in ast.walk(bootstrap)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "sql"
+        and node.func.attr == "SQL"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+        and node.args[0].value.startswith("ALTER ROLE ")
+    ]
+    flags = " ".join(policy["application_role_flags"])
+    require(
+        role_sql == ["ALTER ROLE {} " + flags + " PASSWORD {}"],
+        "Android application role policy drift",
+    )
+    for name in ("metadata-bootstrap.sh", "demo-bootstrap.sh"):
+        sql = (root / "dev/postgres" / name).read_text()
+        declarations = re.findall(r"(?:CREATE|ALTER) ROLE %I (.+) PASSWORD %L", sql)
+        require(
+            declarations == [flags, flags], f"{name}: application role policy drift"
+        )
     spawned = {
         node.args[0].value
         for node in ast.walk(tree)
@@ -507,13 +580,120 @@ def check(root: Path = ROOT) -> dict:
     }
 
 
+def apk_source_manifest(root: Path, commit: str) -> dict:
+    """Bind the shared payload to committed bytes using the existing release owner.
+
+    This is a source manifest, not an APK/runtime acceptance receipt. The caller
+    must obtain the expected commit independently of the packaged manifest.
+    """
+    require(bool(re.fullmatch(r"[0-9a-f]{40}", commit)), "APK source commit required")
+    builder = source_module(ROOT, "scripts/build-android-release.py")
+    try:
+        resolved, files = builder.source_files(root, commit)
+    except (builder.BuildError, OSError) as error:
+        raise ParityError(f"APK committed source: {error}") from error
+    require(resolved == commit, "APK source commit mismatch")
+    contract_bytes = files["dev/runtime-contract.json"][0]
+    contract = json.loads(contract_bytes)
+    require(contract["schema"] == 1, "unsupported runtime contract")
+    prefixes = tuple(contract["shared_sources"])
+    require(
+        set(prefixes) == {"src/", "ai/prototype/", "dev/postgres/"},
+        "APK shared source ownership drift",
+    )
+    required = {"dev/runtime-contract.json", *contract["dependency_inputs"]}
+    require(required <= files.keys(), "APK dependency source missing")
+    hashes = {
+        name: hashlib.sha256(data).hexdigest()
+        for name, (data, _) in sorted(files.items())
+        if name in required or name.startswith(prefixes)
+    }
+    for name, digest in contract["dependency_inputs"].items():
+        require(hashes[name] == digest, f"APK dependency input drift: {name}")
+    return {
+        "schema": 1,
+        "platform": "android-apk",
+        "commit": commit,
+        "source_files": hashes,
+        "runtime_contract": contract,
+    }
+
+
+def check_apk_sources(
+    root: Path, payload: Path, record: dict, expected_commit: str
+) -> dict:
+    """Verify an extracted *shared source* payload, including unexpected files.
+
+    Native libraries and toolchain artifacts belong to the APK build manifest,
+    outside this directory. Never follow links into runtime/private state.
+    """
+    require(isinstance(record, dict), "APK source manifest must be an object")
+    expected = apk_source_manifest(root, expected_commit)
+    require(
+        json.dumps(record, sort_keys=True) == json.dumps(expected, sort_keys=True),
+        "APK source manifest drift",
+    )
+    require(
+        payload.is_dir()
+        and not any(path.is_symlink() for path in (payload, *payload.parents)),
+        "APK payload missing or linked",
+    )
+    actual = {}
+
+    def walk_error(error):
+        raise ParityError("APK payload is unreadable") from error
+
+    for directory, directories, filenames in os.walk(
+        payload, followlinks=False, onerror=walk_error
+    ):
+        for name in directories + filenames:
+            path = Path(directory) / name
+            require(not path.is_symlink(), "APK payload cannot contain links")
+            if path.is_dir():
+                continue
+            require(path.is_file(), "APK payload must contain regular files")
+            relative = path.relative_to(payload).as_posix()
+            require(relative in expected["source_files"], "APK unexpected payload file")
+            with path.open("rb") as stream:
+                actual[relative] = hashlib.file_digest(stream, "sha256").hexdigest()
+    require(actual == expected["source_files"], "APK payload inventory/content drift")
+    return {
+        "schema": 1,
+        "status": "passed",
+        "commit": expected_commit,
+        "contract_sha256": expected["source_files"]["dev/runtime-contract.json"],
+        "shared_file_count": len(actual),
+        "apk_runtime_acceptance": "pending",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--apk-source-manifest", type=Path)
+    parser.add_argument("--apk-shared-payload", type=Path)
+    parser.add_argument("--source-commit")
     args = parser.parse_args()
+    apk_arguments = (
+        args.apk_source_manifest,
+        args.apk_shared_payload,
+        args.source_commit,
+    )
+    if any(apk_arguments) and not all(apk_arguments):
+        parser.error(
+            "APK validation requires manifest, shared payload and source commit"
+        )
     previous = os.umask(0o077)
     try:
-        print(json.dumps(check(args.root), sort_keys=True))
+        result = check(args.root)
+        if args.apk_source_manifest:
+            result["apk_sources"] = check_apk_sources(
+                args.root,
+                args.apk_shared_payload,
+                json.loads(args.apk_source_manifest.read_text()),
+                args.source_commit,
+            )
+        print(json.dumps(result, sort_keys=True))
     except (ParityError, OSError, ValueError, KeyError, IndexError) as error:
         parser.exit(1, f"Runtime parity: {error}\n")
     finally:

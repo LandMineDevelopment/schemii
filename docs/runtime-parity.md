@@ -139,3 +139,21 @@ Source checks here establish drift detection and packaging contracts. Actual
 Linux image build, disposable PostgreSQL, authenticated HTTPS/browser, provider,
 physical phone execution, pressure, cold restore, Doze/VPN/reboot acceptance need
 their own retained evidence. A pending device gate stays pending.
+
+## APK adapter extension (#265)
+
+The [APK shared-source helper and integration gates](android-apk-parity.md) extend
+this same contract. The helper reuses the committed Android release selection and
+verifies an extracted shared-source payload against independently selected source
+SHA and actual file bytes. It does not require a native module on existing
+Linux/Termux runs. The real APK build consumer, native provenance, generated host
+policy and physical Android acceptance remain separate pending gates.
+
+`postgresql_policy` records the two metadata/target cluster names, enabled
+`fsync`/`synchronous_commit`/`full_page_writes`, SCRAM password encryption and
+restricted application role flags. Existing source checks now inspect complete
+generated Termux PostgreSQL configurations and exact launch commands, rejecting
+duplicate settings that could override safe values. Termux and shared Docker
+bootstrap role declarations must retain `NOSUPERUSER NOCREATEDB NOCREATEROLE
+NOINHERIT NOREPLICATION`. These deterministic controls do not start PostgreSQL or
+establish deployed database policy.
