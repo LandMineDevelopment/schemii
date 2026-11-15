@@ -241,6 +241,15 @@ The owner approved standard SDK HTTPS bootstrap DNS; selected-network binding,
 socket registration and revocation are still mandatory. Corrected immutable
 source/library handoff and independent review are pending with owner268.
 
+The network consumer also requires each immutable handoff's build-receipt digest,
+ABI and compiled bridge digest. It derives SHA256 from the committed `bridge.c`
+followed by `bridge.h`, checks both handoff and receipt, and records this expected
+identity in APK provenance. A future actual probe must return that exact
+`native_bridge_sha256`; missing/mismatching values mark the report failed while
+preserving its original contents. Byte/packaging controls do not lift the execution
+hold. Initial5ff15825 is an ancestor of heldcc7 and cannot substitute for the
+corrected, independently reviewed input.
+
 `--log-report` is explicit, default-off diagnostic export for the owned disposable
 emulator. It emits only the structured result, including process identities,
 as base64 chunks to Android's `SchemiiProbe` tag. Keep those logs private. Capture

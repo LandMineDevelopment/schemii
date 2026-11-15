@@ -28,7 +28,8 @@ def committed(checkout, head, names):
 
 
 def network(handoff, checkout, out, abis, contract):
-    record = json.loads(handoff.read_text())
+    handoff_bytes = handoff.read_bytes()
+    record = json.loads(handoff_bytes)
     sources = committed(checkout, record["source_head"], record["source_files"])
     hashes = {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
     if hashes != record["source_files"]:
@@ -49,10 +50,20 @@ def network(handoff, checkout, out, abis, contract):
             target.write_bytes(data)
             java.append(target)
     libraries = {}
+    receipts = {}
+    bridge = hashlib.sha256(
+        sources["platforms/android/native/network/bridge.c"]
+        + sources["platforms/android/native/network/bridge.h"]
+    ).hexdigest()
     for abi in abis:
         item = record["elf"][abi]
         library = Path(item["library"])
-        receipt = json.loads(Path(item["build_receipt"]).read_text())
+        receipt_path = Path(item["build_receipt"])
+        receipt_bytes = receipt_path.read_bytes()
+        receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
+        if receipt_sha != item["build_receipt_sha256"]:
+            raise ValueError("Network build receipt byte drift")
+        receipt = json.loads(receipt_bytes)
         if (
             digest(library) != item["sha256"]
             or receipt["library_sha256"] != item["sha256"]
@@ -60,19 +71,25 @@ def network(handoff, checkout, out, abis, contract):
             or receipt["exit"] != 0
             or not receipt["source_unchanged"]
             or receipt["dirty_inputs"]
+            or receipt["abi"] != abi
         ):
             raise ValueError("Network artifact/source receipt mismatch")
+        if item["bridge_sha256"] != bridge or receipt["bridge_sha256"] != bridge:
+            raise ValueError("Network compiled bridge/source identity mismatch")
         for name, sha in receipt["source_files"].items():
             if hashes.get(name) != sha:
                 raise ValueError("Network build input outside verified handoff")
         target = out / "lib" / abi / "libschemii_network.so"
         shutil.copyfile(library, target)
         libraries[str(target.relative_to(out))] = item["sha256"]
+        receipts[abi] = receipt_sha
     return (
         {
             "source_head": record["source_head"],
             "source_files": hashes,
-            "handoff_sha256": digest(handoff),
+            "handoff_sha256": hashlib.sha256(handoff_bytes).hexdigest(),
+            "bridge_sha256": bridge,
+            "build_receipts_sha256": receipts,
             "runtime_acceptance": "pending",
         },
         java,

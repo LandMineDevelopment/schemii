@@ -308,8 +308,14 @@ public final class ProbeActivity extends Activity {
                     JSONObject network = new JSONObject().put("name", "network-callbacks");
                     try {
                         Class<?> entry = Class.forName("development.landmine.schemii.android.network.NetworkProbe");
-                        network.put("report", (JSONObject)entry.getMethod("run", android.content.Context.class)
-                            .invoke(null, getApplicationContext()));
+                        JSONObject observed = (JSONObject)entry.getMethod("run", android.content.Context.class)
+                            .invoke(null, getApplicationContext());
+                        network.put("report", observed); // Preserve a mismatching report as failed evidence.
+                        String expected = components.getJSONObject("network").getString("bridge_sha256");
+                        if (!expected.equals(observed.getString("native_bridge_sha256"))) {
+                            throw new IOException("Network runtime bridge identity mismatch");
+                        }
+                        network.put("bridge_identity_verified", true);
                     } catch (Exception | LinkageError error) {
                         network.put("failed", true).put("error", error.toString())
                             .put("cause", error.getCause() == null ? "" : error.getCause().toString());
