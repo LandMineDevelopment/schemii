@@ -193,5 +193,25 @@
     "ai/prototype/package-lock.json": "fffb5de9f1469868dc611117161ad8dbdff10dad4713cb733ed16abbdc0a6ad9",
     "dev/android/tailnet-proxy/go.mod": "4b7c25a6c0f12c0096ab9188add8a87171682c77c234778583ba0c3ed750ed7d",
     "dev/android/tailnet-proxy/go.sum": "a08fa8d9e3c7db68151b1d7a168c316a66176ed23da8947414d2df72891becfb"
+  },
+  "postgresql_policy": {
+    "cluster_names": [
+      "metadata",
+      "target"
+    ],
+    "settings": {
+      "fsync": "on",
+      "synchronous_commit": "on",
+      "full_page_writes": "on",
+      "password_encryption": "'scram-sha-256'"
+    },
+    "application_role_flags": [
+      "LOGIN",
+      "NOSUPERUSER",
+      "NOCREATEDB",
+      "NOCREATEROLE",
+      "NOINHERIT",
+      "NOREPLICATION"
+    ]
   }
 }
