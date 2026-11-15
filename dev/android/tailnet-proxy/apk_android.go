@@ -218,8 +218,11 @@ func (p *apkPlatform) install() error {
 	installResolver(bridgeResolver(func(ctx context.Context, query []byte) ([]byte, error) {
 		return androidDNS(ctx, p.epoch.generation, query)
 	}), p.interfaces)
-	netns.SetAndroidProtectFunc(nil) // This app neither owns nor requests a VPN.
-	netns.SetAndroidBindToNetworkFunc(p.bindSocket)
+	// This mandatory hook binds and records the socket; it does not call
+	// VpnService.protect. The optional bind hook can be disabled by a netmap
+	// capability, which must not bypass our selected-network ownership.
+	netns.SetAndroidProtectFunc(p.bindSocket)
+	netns.SetAndroidBindToNetworkFunc(nil)
 	netns.SetEnabled(true)
 	installedAPK.Store(p)
 	current, err := androidSnapshot()

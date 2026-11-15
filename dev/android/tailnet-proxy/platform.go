@@ -38,6 +38,8 @@ func installResolver(resolver *net.Resolver, getter func() ([]netmon.Interface, 
 	net.DefaultResolver.StrictErrors = resolver.StrictErrors
 	net.DefaultResolver.Dial = resolver.Dial
 	dnscache.Get().Forward = net.DefaultResolver
+	// This installs the primary forwarder, not an Android-DNS-only policy.
+	// SDK control/log clients retain their standard HTTPS bootstrap fallback.
 	netmon.RegisterInterfaceGetter(getter)
 }
 

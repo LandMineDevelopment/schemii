@@ -112,15 +112,43 @@ falling back to Android-denied netlink enumeration. This supports IPv6-only
 *observation*; actual IPv6-only/NAT64 connectivity remains an acceptance case.
 
 [DnsResolver.rawQuery](https://developer.android.com/reference/android/net/DnsResolver)
-performs wire queries on that Network. Android netd owns resolver selection,
-transport and Private DNS policy. Go's resolver and tsnet forwarding cache share
-an in-memory DNS connection adapter; no OS resolver file, public DNS address,
-ambient resolver or listening DNS socket is introduced. Cancellation is registered
+performs primary wire queries on that Network. Android netd owns that resolver's
+selection, transport and Private DNS policy. Go's resolver and the SDK's primary
+forwarder share an in-memory DNS connection adapter; no OS resolver file, custom
+public DNS resolver or listening DNS socket is introduced. Cancellation is registered
 before execution, closes pending operations and is bounded by deadlines. Both
 request and response generation are checked; stale answers are discarded.
 
+The owner explicitly approved **standard SDK bootstrap** after review R273-01.
+The pinned Tailscale SDK retains its normal HTTPS bootstrap DNS when primary
+resolution fails/returns no addresses, and its connection-failure retry behavior.
+It contacts retained DERP bootstrap IPs over verified HTTPS on port443 using
+`/bootstrap-dns?q=hostname`. These answers do **not** come from Android netd or
+inherit Private DNS policy. The hostname is disclosed to the selected bootstrap
+service. This is normal SDK behavior, not an Android-DNS-only guarantee. No custom
+fallback resolver, SDK fork or dependency change is installed. This does not
+permit public/LAN Schemii ingress or bypass of an Android VPN/lockdown default.
+
+The actual pinned boundaries are `control/controlclient.NewDirect` and
+`control/controlhttp.Dialer.resolver`, which construct their own `dnscache.Resolver`
+with `dnsfallback.MakeLookupFunc`; replacing `dnscache.Get().Forward` alone never
+disabled this fallback. `dnscache` also considers bootstrap after a failed dial.
+`dnsfallback.bootstrapDNSMap` uses `netns.NewDialer` only with a non-nil NetMon;
+its nil-NetMon branch uses a plain, **unbound** `net.Dialer`. Similarly,
+controlhttp's absent Dialer selects `stdDialer`. Those branches are not safe
+adapter alternatives: this consumer's tsnet engine sets the dialer's monitor;
+NewDirect rejects a missing monitor and passes that dialer, DNSCache and monitor
+through ts2021 to controlhttp. The startup logger is created earlier with a nil
+monitor, but `logpolicy.TransportOptions.New`/`MakeDialFunc` replace nil with a
+static monitor before `netns.FromDialer` or bootstrap. DERP constructors reject a
+nil monitor; magicsock's UDP listener also uses netns. Host controls inspect these
+construction boundaries and execute the logger's nil-monitor and SystemDial
+paths. Future pin or consumer changes require rechecking these invariants. This
+adapter does not expose tsnet's Loopback/SOCKS or general UserDial APIs; their
+plain-dialer alternatives are not authorized network entrypoints.
+
 [Network.bindSocket](https://developer.android.com/reference/android/net/Network)
-is invoked before connecting each SDK socket via its pinned Android binding hook.
+is invoked before connecting each SDK socket via its mandatory Android hook.
 Java duplicates the descriptor for the call and closes only its duplicate. Go
 keeps the real socket. A kernel SO_COOKIE identity registry revokes owned socket
 I/O on change/stop without retaining duplicate descriptors. A temporary duplicate
@@ -128,9 +156,14 @@ is obtained and checked against its original cookie before shutdown, so reused
 FD numbers cannot revoke unrelated sockets. Missing kernel cookie support fails
 closed and must be tested by the actual Android probe. TCP control/bootstrap/DERP and UDP transport use the same
 binding boundary; loopback backend connections deliberately do not. Go leaves
-Android netns hooks enabled, unlike the Termux platform. No VPN protect callback
-is installed because this app owns no VPN. Bind failures are errors, not ambient
-route fallback.
+Android netns hooks enabled, unlike the Termux platform. It installs binding and
+cookie registration in `SetAndroidProtectFunc`, whose SDK control callback is
+non-skippable, and leaves the optional `SetAndroidBindToNetworkFunc` nil. Despite
+the SDK hook's name, this callback never invokes `VpnService.protect`: the app
+owns no VPN. The authenticated netmap's disable-Android-bind capability may skip
+the optional hook, but must never skip selected-network binding/registration.
+Bind failures are errors, not ambient route fallback. Revocation also rejects
+new bootstrap attempts; a cached/fallback address never authorizes a new epoch.
 
 SDK link-change notification uses `Server.Sys().NetMon.Get().InjectEvent()` only
 after completed SDK initialization. The pinned SDK exposes Sys but labels it
@@ -146,7 +179,10 @@ those bytes. Before node startup, the adapter writes the public bundle atomicall
 into its private status directory and supplies it to SDK system-root loading.
 That file contains public certificates only. Go and Java trust behavior are
 independently verified; Network Security Configuration alone is not treated as
-proof of native TLS policy. The retained loopback CA is a separate pool used only
+proof of native TLS policy. SDK `tlsdial` also retains its normal baked-in public
+root fallback and certificate verification; this is not a strict Java-only root
+allowlist. An empty `SSL_CERT_DIR` does not disable Go's default root directories.
+The retained loopback CA is a separate pool used only
 for the upstream hop. No insecure TLS or HTTP fallback is provided.
 
 A host can retain a NetworkBridge, then call `start(String configuration)` and
@@ -168,7 +204,8 @@ Port **18443** is the provisional ingress allocated by runtime264's
 `runtime-interface.json`, distinct from live Termux's 8001. No alternate port
 is chosen on a conflict. Changing the host allocation requires coordinated
 validation of this adapter; do not point it at PostgreSQL or Pi. Omit `dns_server`:
-APK DNS comes only from the bridge. Unknown JSON fields are rejected. No auth key,
+APK primary DNS comes from the bridge, with standard SDK bootstrap as above.
+Unknown JSON fields are rejected. No auth key,
 control-URL override, passwords or live node state is accepted as configuration.
 
 `started=true` means an asynchronous node operation was accepted, **not ready**.
@@ -232,6 +269,32 @@ IPv6-only snapshots, missing metadata, certificate expiry, hostname changes,
 stale network epochs and private public-root-file handling, alongside retained
 Termux configuration/security/proxy/streaming/path/startup tests. Unit fixtures
 make no Android/device or before-PIN acceptance claim.
+
+For the pinned SDK's actual Android socket-control and bootstrap paths, run:
+
+```bash
+python3 dev/android/tailnet-proxy/sdk_controls.py \
+  --go PINNED_GO/bin/go --go-cache PRIVATE_GO_CACHE \
+  --output-dir PRIVATE_NEW_CONTROL_OUTPUT
+```
+
+This host-only control verifies inspected SDK source against the retained module
+ZIP, extracts a private SDK source snapshot and uses an isolated test modfile/Go
+overlay. It compiles the unmodified Android `controlC` body on Linux by changing
+only its build constraint, excluding Linux SOCKS wrapping and upstream test files.
+It extracts the adapter's real hook-registration statements, uses the real
+socketEpoch implementation and sets the actual optional-binding atomic flag both
+ways (the exported setter itself checks Android GOOS). Only JNI's framework bind
+call is substituted. Real local TCP/UDP sockets must enter the cookie registry,
+lose I/O after revocation and reject later creation. Hook errors must propagate.
+Actual NewDirect/controlhttp resolver constructors and dnscache/dnsfallback calls
+must reach that hook after primary DNS failure; bootstrap attempts are stopped
+after registration, before connect. Logger nil-monitor/SystemDial controls and
+source guards cover the construction chain described above. These checks do not
+prove a successful public bootstrap HTTPS exchange or Android framework binding.
+The receipt records every overlay, source/tool hash, command and exit. No cached
+SDK or production dependency file is patched. `--registration-ref COMMIT` retains
+the old registration as a failing counterexample without checking out old files.
 
 Required later evidence: actual signed API36 APK callback execution; native Moto
 ARM64 execution/page size; independent control-plane/DNS/certificate issuance and
