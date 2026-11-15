@@ -330,8 +330,9 @@ Still required before runtime264 or host integration can be accepted:
   not native ARM64, abrupt-crash, owner-loss or complete SQL acceptance.
 - Package canonical Python/native dependency pins; actually import psycopg,
   pydantic-core, cryptography, pglast and the shared application on Moto. The
-  x86_64 guest now actually imports all20 canonical pins and exercises binary
-  psycopg/libpq, Fernet encryption, pglast parsing and pydantic-core JSON parsing.
+  x86_64 guest verifies all20 canonical distribution versions and performs
+  explicit native imports plus psycopg/libpq, Fernet encryption, pglast parsing
+  and pydantic-core JSON parsing operations.
   Shared app import correctly required explicit authenticated mode, app-owned
   metadata storage and first-account setup-token configuration; original denials
   remain in private evidence. No wheel listing substitutes for execution.
