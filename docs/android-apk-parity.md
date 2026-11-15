@@ -68,7 +68,9 @@ they do not evaluate a host's generated settings or installed dependency version
 The common contract now declares two cluster names, durability/password settings
 and application role flags. The source check executes the existing Termux
 cluster configuration generator into disposable temporary directories with process
-launch/wait suppressed. It inspects the complete generated configuration,
+launch/wait suppressed. It first validates the actual startup cluster and bootstrap
+call identities and ports, then exercises the generator with those cluster inputs.
+It inspects the complete generated configuration,
 rejects duplicate assignments, and verifies distinct ports, exact cluster launch
 commands, connection headroom, loopback listeners and durability. It checks the
 actual role-declaration expressions in the Termux bootstrap AST and the shared

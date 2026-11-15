@@ -230,6 +230,46 @@ def check(root: Path = ROOT) -> dict:
             f"Docker configuration drift: {path}",
         )
 
+    runtime_source = (root / "dev/android/runtime.py").read_text()
+    tree = ast.parse(runtime_source)
+    startup = [
+        method
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "Runtime"
+        for method in node.body
+        if isinstance(method, ast.FunctionDef) and method.name == "run"
+    ]
+    require(len(startup) == 1, "Android PostgreSQL startup cluster entrypoint drift")
+    cluster_endpoints = []
+    for method, arity in (("_cluster", 2), ("_bootstrap", 4)):
+        calls = [
+            node
+            for node in ast.walk(startup[0])
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "self"
+            and node.func.attr == method
+        ]
+        require(
+            all(
+                len(call.args) == arity
+                and not call.keywords
+                and isinstance(call.args[0], ast.Constant)
+                and type(call.args[0].value) is str
+                and isinstance(call.args[1], ast.Constant)
+                and type(call.args[1].value) is int
+                for call in calls
+            ),
+            f"Android PostgreSQL startup cluster arguments drift: {method}",
+        )
+        endpoints = [(call.args[0].value, call.args[1].value) for call in calls]
+        require(
+            endpoints == list(zip(policy["cluster_names"], (5433, 5434), strict=True)),
+            f"Android PostgreSQL startup cluster endpoints drift: {method}",
+        )
+        if method == "_cluster":
+            cluster_endpoints = endpoints
     android = source_module(root, "dev/android/runtime.py")
     require(
         set(android.BASE_SERVICES) == set(contract["services"]["android"]),
@@ -278,7 +318,7 @@ def check(root: Path = ROOT) -> dict:
                 else configured[parts[0]][parts[1]] == value,
                 f"Android configuration drift: {path}",
             )
-        for name, port in zip(policy["cluster_names"], (5433, 5434), strict=True):
+        for name, port in cluster_endpoints:
             directory = runtime.state / "postgres" / name
             (directory / "global").mkdir(parents=True)
             (directory / "PG_VERSION").write_text("17")
@@ -307,7 +347,6 @@ def check(root: Path = ROOT) -> dict:
                     pg.get(setting) == value,
                     f"Android durability/security drift: {setting}",
                 )
-    runtime_source = (root / "dev/android/runtime.py").read_text()
     for marker in (
         contract["readiness"],
         "schemii.main:app",
@@ -320,7 +359,6 @@ def check(root: Path = ROOT) -> dict:
             marker in runtime_source, f"Android shared startup source missing: {marker}"
         )
     # Detect overrides that would silently undo contract values, including duplicates.
-    tree = ast.parse(runtime_source)
     bootstrap = next(
         node
         for node in ast.walk(tree)

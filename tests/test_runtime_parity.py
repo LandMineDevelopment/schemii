@@ -170,6 +170,48 @@ def test_real_adapter_drift_fails(source, path, old, new, failure):
 
 
 @pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('self._cluster("target", 5434)', 'self._cluster("target", 5433)'),
+        ('self._cluster("metadata", 5433)', 'self._cluster("metadata", 5434)'),
+        ('self._cluster("target", 5434)', 'self._cluster("metadata", 5434)'),
+        ('self._cluster("target", 5434)', 'self._cluster("unexpected", 5434)'),
+        ('self._cluster("target", 5434)', "pass  # target startup omitted"),
+        (
+            'self._cluster("target", 5434)',
+            'self._cluster("target", 5434); self._cluster("target", 5434)',
+        ),
+    ],
+)
+def test_actual_cluster_startup_endpoints_cannot_drift(source, old, new):
+    change(source, "dev/android/runtime.py", old, new)
+    with pytest.raises(ParityError, match="PostgreSQL startup cluster"):
+        check(source)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('self._bootstrap("target", 5434,', 'self._bootstrap("target", 5433,'),
+        ('self._bootstrap("target", 5434,', 'self._bootstrap("metadata", 5434,'),
+        (
+            'self._bootstrap("target", 5434, "schemii_target", "target_password")',
+            "pass  # target bootstrap omitted",
+        ),
+        (
+            'self._bootstrap("target", 5434, "schemii_target", "target_password")',
+            'self._bootstrap("target", 5434, "schemii_target", "target_password"); '
+            'self._bootstrap("target", 5434, "schemii_target", "target_password")',
+        ),
+    ],
+)
+def test_bootstrap_startup_endpoints_cannot_drift(source, old, new):
+    change(source, "dev/android/runtime.py", old, new)
+    with pytest.raises(ParityError, match="PostgreSQL startup cluster"):
+        check(source)
+
+
+@pytest.mark.parametrize(
     ("section", "key", "value", "failure"),
     [
         ("android", "metadata_reserve", 0, "headroom"),
