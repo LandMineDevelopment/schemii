@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -9,6 +10,8 @@ import (
 	"sync"
 	"time"
 )
+
+var errInitializationIncomplete = errors.New("tailnet initialization incomplete; dedicated host process containment required")
 
 // The SDK forbids Close concurrently with Start. If a kernel observation blocks
 // initialization, return to main, which exits this helper process; do not wait

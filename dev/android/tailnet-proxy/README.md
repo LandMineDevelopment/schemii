@@ -134,3 +134,17 @@ Tailscale enrollment and automatic certificate support. It adds a binary/process
 and the corresponding pinned Go dependency graph. Update this module and compiler
 together with focused checks and a reviewed release; do not replace pins with
 floating downloads.
+
+## Experimental APK consumer
+
+The Android API36/min29 shared-library consumer uses the same node, TLS and
+proxy implementation through a separate framework network adapter. It does not
+use this command's Termux PREFIX, VPN resolver or port8001 defaults. See the
+[APK network adapter](../../../docs/android-apk-network.md) for the JNI contract,
+source-bound build helper, host18443 allocation and pending real-device gates.
+The APK bridge is experimental; compilation does not prove before-PIN networking.
+
+Both consumers now expire certificate readiness, verify certificates again on
+TLS handshakes and stop on authenticated hostname changes. APK readiness also
+requires a fresh, current framework network-generation proof. The launcher must
+still verify real application readiness through trusted HTTPS separately.

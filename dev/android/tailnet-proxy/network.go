@@ -1,16 +1,17 @@
+//go:build linux && !android
+
 package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"time"
 
-	"tailscale.com/net/dnscache"
-	"tailscale.com/net/netmon"
-	"tailscale.com/net/netns"
+	"tailscale.com/tsnet"
 )
 
 const androidDNSServer = "100.100.100.100:53"
@@ -41,17 +42,6 @@ func resolverTo(server string, dial func(context.Context, string, string) (net.C
 	}}
 }
 
-func installNetworkAdapters(resolver *net.Resolver, getter func() ([]netmon.Interface, error)) {
-	// Keep the existing resolver pointer for consumers that captured it at
-	// package initialization, then align the SDK's separately initialized cache.
-	net.DefaultResolver.PreferGo = resolver.PreferGo
-	net.DefaultResolver.StrictErrors = resolver.StrictErrors
-	net.DefaultResolver.Dial = resolver.Dial
-	dnscache.Get().Forward = net.DefaultResolver
-	netmon.RegisterInterfaceGetter(getter)
-	netns.SetEnabled(false)
-}
-
 func configureAndroidNetwork(server string) error {
 	if err := validateNativeTermux(os.Getenv("PREFIX"), os.Getuid(), os.Getenv("SSL_CERT_FILE")); err != nil {
 		return err
@@ -72,3 +62,28 @@ func configureAndroidNetwork(server string) error {
 	installNetworkAdapters(resolver, androidIPv4Interfaces)
 	return nil
 }
+
+func defaultPlatform() networkPlatform { return termuxPlatform{} }
+
+type termuxPlatform struct{}
+
+func (termuxPlatform) validate(c config) error {
+	if _, err := vpnResolver(c.DNSServer); err != nil {
+		return err
+	}
+	if c.Upstream != "https://127.0.0.1:8001" && c.Upstream != "https://127.0.0.1:8001/" {
+		return errors.New("upstream must be https://127.0.0.1:8001")
+	}
+	return nil
+}
+func (termuxPlatform) configure(*tsnet.Server) error {
+	return configureAndroidNetwork(androidDNSServer)
+}
+func (termuxPlatform) observation() string                         { return interfaceObservationMode }
+func (termuxPlatform) networkState(context.Context) (uint64, bool) { return 0, true }
+func (termuxPlatform) roots() *x509.CertPool                       { return nil }
+
+func (termuxPlatform) started(*tsnet.Server, *statusStore) {}
+func (termuxPlatform) stopped()                            {}
+
+func (termuxPlatform) ingressAvailable() bool { return true }
