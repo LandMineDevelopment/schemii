@@ -170,6 +170,48 @@ def test_real_adapter_drift_fails(source, path, old, new, failure):
 
 
 @pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('self._cluster("target", 5434)', 'self._cluster("target", 5433)'),
+        ('self._cluster("metadata", 5433)', 'self._cluster("metadata", 5434)'),
+        ('self._cluster("target", 5434)', 'self._cluster("metadata", 5434)'),
+        ('self._cluster("target", 5434)', 'self._cluster("unexpected", 5434)'),
+        ('self._cluster("target", 5434)', "pass  # target startup omitted"),
+        (
+            'self._cluster("target", 5434)',
+            'self._cluster("target", 5434); self._cluster("target", 5434)',
+        ),
+    ],
+)
+def test_actual_cluster_startup_endpoints_cannot_drift(source, old, new):
+    change(source, "dev/android/runtime.py", old, new)
+    with pytest.raises(ParityError, match="PostgreSQL startup cluster"):
+        check(source)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('self._bootstrap("target", 5434,', 'self._bootstrap("target", 5433,'),
+        ('self._bootstrap("target", 5434,', 'self._bootstrap("metadata", 5434,'),
+        (
+            'self._bootstrap("target", 5434, "schemii_target", "target_password")',
+            "pass  # target bootstrap omitted",
+        ),
+        (
+            'self._bootstrap("target", 5434, "schemii_target", "target_password")',
+            'self._bootstrap("target", 5434, "schemii_target", "target_password"); '
+            'self._bootstrap("target", 5434, "schemii_target", "target_password")',
+        ),
+    ],
+)
+def test_bootstrap_startup_endpoints_cannot_drift(source, old, new):
+    change(source, "dev/android/runtime.py", old, new)
+    with pytest.raises(ParityError, match="PostgreSQL startup cluster"):
+        check(source)
+
+
+@pytest.mark.parametrize(
     ("section", "key", "value", "failure"),
     [
         ("android", "metadata_reserve", 0, "headroom"),
@@ -381,3 +423,250 @@ def test_real_docker_context_cannot_lose_private_asset_exclusion(source, suffix)
     change(source, ".dockerignore", "**/*" + suffix + "\n", "")
     with pytest.raises(ParityError, match="private suffix exclusion missing"):
         check(source)
+
+
+@pytest.fixture
+def apk_package(source, tmp_path):
+    """An actual committed shared source export, never an APK acceptance fixture."""
+    import subprocess
+
+    from scripts.check_runtime_parity import apk_source_manifest
+
+    (source / "docs").mkdir()
+    shutil.copyfile(
+        ROOT / "docs/android-release.md", source / "docs/android-release.md"
+    )
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Parity Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "Committed parity fixture",
+        ],
+        check=True,
+    )
+    commit = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+    ).strip()
+    record = apk_source_manifest(source, commit)
+    payload = tmp_path / "payload"
+    for name in record["source_files"]:
+        path = payload / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / name, path)
+    return source, payload, record, commit
+
+
+def test_apk_shared_source_payload_compares_actual_bytes(apk_package):
+    from scripts.check_runtime_parity import check_apk_sources
+
+    root, payload, record, commit = apk_package
+    result = check_apk_sources(root, payload, record, commit)
+    assert result["status"] == "passed"
+    assert result["apk_runtime_acceptance"] == "pending"
+    assert result["shared_file_count"] == len(record["source_files"])
+    assert not any(
+        name.startswith("dev/android/runtime") for name in record["source_files"]
+    )
+
+
+@pytest.mark.parametrize(
+    "boundary", ["api", "auth", "web", "migration", "pi", "postgres", "dependency"]
+)
+def test_apk_cannot_drop_real_shared_payload_even_with_rewritten_manifest(
+    apk_package, boundary
+):
+    from scripts.check_runtime_parity import check_apk_sources
+
+    root, payload, record, commit = apk_package
+    selectors = {
+        "api": lambda n: n == "src/schemii/main.py",
+        "auth": lambda n: n == "src/schemii/common/auth/routes.py",
+        "web": lambda n: n.endswith("web/index.html"),
+        "migration": lambda n: "/migrations/" in n and n.endswith(".sql"),
+        "pi": lambda n: n == "ai/prototype/server.js",
+        "postgres": lambda n: n == "dev/postgres/metadata-bootstrap.sh",
+        "dependency": lambda n: n == "ai/prototype/package-lock.json",
+    }
+    name = next(n for n in record["source_files"] if selectors[boundary](n))
+    (payload / name).unlink()
+    with pytest.raises(ParityError, match="inventory/content"):
+        check_apk_sources(root, payload, record, commit)
+    del record["source_files"][name]
+    with pytest.raises(ParityError, match="manifest drift"):
+        check_apk_sources(root, payload, record, commit)
+
+
+def test_apk_rehashing_stale_payload_does_not_establish_parity(apk_package):
+    import hashlib
+
+    from scripts.check_runtime_parity import check_apk_sources
+
+    root, payload, record, commit = apk_package
+    name = "src/schemii/common/auth/routes.py"
+    (payload / name).write_text("# stale or forked authentication\n")
+    with pytest.raises(ParityError, match="inventory/content"):
+        check_apk_sources(root, payload, record, commit)
+    record["source_files"][name] = hashlib.sha256(
+        (payload / name).read_bytes()
+    ).hexdigest()
+    with pytest.raises(ParityError, match="manifest drift"):
+        check_apk_sources(root, payload, record, commit)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["secrets/password", "src/schemii/stale_api.py", "ai/prototype/server-copy.js"],
+)
+def test_apk_payload_cannot_add_private_or_forked_files(apk_package, path):
+    from scripts.check_runtime_parity import check_apk_sources
+
+    root, payload, record, commit = apk_package
+    extra = payload / path
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_text("fixture-only")
+    with pytest.raises(ParityError, match="unexpected payload"):
+        check_apk_sources(root, payload, record, commit)
+
+
+@pytest.mark.parametrize("directory", [False, True])
+def test_apk_payload_cannot_follow_symlinks(apk_package, tmp_path, directory):
+    from scripts.check_runtime_parity import check_apk_sources
+
+    root, payload, record, commit = apk_package
+    path = payload / ("src" if directory else "src/schemii/main.py")
+    outside = tmp_path / "outside"
+    path.rename(outside)
+    path.symlink_to(outside, target_is_directory=directory)
+    with pytest.raises(ParityError, match="links"):
+        check_apk_sources(root, payload, record, commit)
+
+
+def test_apk_source_identity_rejects_dirty_source_and_stale_commit(apk_package):
+    from scripts.check_runtime_parity import apk_source_manifest, check_apk_sources
+
+    root, payload, record, commit = apk_package
+    record["commit"] = "a" * 40
+    with pytest.raises(ParityError, match="manifest drift"):
+        check_apk_sources(root, payload, record, commit)
+    (root / "src/schemii/main.py").write_text("# uncommitted feature\n")
+    with pytest.raises(ParityError, match="Commit Android source"):
+        apk_source_manifest(root, commit)
+    with pytest.raises(ParityError, match="source commit required"):
+        apk_source_manifest(root, "unknown")
+
+
+def test_apk_missing_payload_and_partial_cli_are_failures(apk_package, tmp_path):
+    import subprocess
+    import sys
+
+    from scripts.check_runtime_parity import check_apk_sources
+
+    root, payload, record, commit = apk_package
+    with pytest.raises(ParityError, match="payload missing"):
+        check_apk_sources(root, tmp_path / "absent", record, commit)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/check_runtime_parity.py"),
+            "--apk-source-manifest",
+            str(tmp_path / "absent.json"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "requires manifest, shared payload and source commit" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("path", "old", "new", "failure"),
+    [
+        (
+            "dev/android/runtime.py",
+            "fsync = on\\n",
+            "fsync = on\\nfsync = off\\n",
+            "duplicate PostgreSQL setting",
+        ),
+        (
+            "dev/android/runtime.py",
+            "listen_addresses = '127.0.0.1'",
+            "listen_addresses = '*'",
+            "durability/security",
+        ),
+        (
+            "dev/android/runtime.py",
+            'f"port = {port}\\n"',
+            'f"port = {5433}\\n"',
+            "PostgreSQL endpoint",
+        ),
+        (
+            "dev/android/runtime.py",
+            'str(PG_BIN / "postgres"), "-D", str(directory)',
+            'str(PG_BIN / "postgres"), "-D", str(directory), "-F"',
+            "cluster launch",
+        ),
+        (
+            "dev/android/runtime.py",
+            "LOGIN NOSUPERUSER NOCREATEDB",
+            "LOGIN SUPERUSER NOCREATEDB",
+            "role policy",
+        ),
+        (
+            "dev/postgres/metadata-bootstrap.sh",
+            "LOGIN NOSUPERUSER NOCREATEDB",
+            "LOGIN SUPERUSER NOCREATEDB",
+            "role policy",
+        ),
+        (
+            "dev/postgres/demo-bootstrap.sh",
+            "NOINHERIT NOREPLICATION",
+            "INHERIT REPLICATION",
+            "role policy",
+        ),
+    ],
+)
+def test_generated_cluster_and_bootstrap_policy_cannot_drift(
+    source, path, old, new, failure
+):
+    change(source, path, old, new)
+    with pytest.raises(ParityError, match=failure):
+        check(source)
+
+
+def test_contract_cannot_hide_weakened_postgres_policy(source):
+    path = source / "dev/runtime-contract.json"
+    contract = json.loads(path.read_text())
+    contract["postgresql_policy"]["settings"]["fsync"] = "off"
+    path.write_text(json.dumps(contract))
+    with pytest.raises(ParityError, match="safety policy"):
+        check(source)
+
+
+def test_apk_payload_rejects_linked_ancestor(apk_package, tmp_path):
+    from scripts.check_runtime_parity import check_apk_sources
+
+    root, payload, record, commit = apk_package
+    alias = tmp_path / "linked-parent"
+    alias.symlink_to(payload.parent, target_is_directory=True)
+    with pytest.raises(ParityError, match="payload missing or linked"):
+        check_apk_sources(root, alias / payload.name, record, commit)
+
+
+def test_apk_record_cannot_add_unreviewed_exception(apk_package):
+    from scripts.check_runtime_parity import check_apk_sources
+
+    root, payload, record, commit = apk_package
+    record["exceptions"] = {"omitted_services": "temporary"}
+    with pytest.raises(ParityError, match="manifest drift"):
+        check_apk_sources(root, payload, record, commit)

@@ -182,6 +182,14 @@ class Host:
                 raise RuntimeFailure(
                     f"Guest {action} failed; inspect schemii logs native-control"
                 )
+            if action == "status" and (
+                not isinstance(value, dict)
+                or not isinstance(value.get("ready"), bool)
+                or not isinstance(value.get("services"), dict)
+            ):
+                raise RuntimeFailure(
+                    "Guest status response is incomplete; inspect private logs"
+                )
             return value
         finally:
             if process.poll() is None and owns_group(identity):
