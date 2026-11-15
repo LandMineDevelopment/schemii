@@ -35,6 +35,30 @@ def elf(machine=183, alignment=16384, flags=5):
 
 
 class BuildControls(unittest.TestCase):
+    def test_native_reuse_recipe_binds_flags_and_abi_mapping(self):
+        source = "ABI_TRIPLES = {'x': 'triple'}\ndef native(cache, out, abi):\n return ['-fPIE']\n"
+        self.assertEqual(
+            build.native_recipe(source),
+            build.native_recipe(source + "\n# unrelated comment\n"),
+        )
+        self.assertNotEqual(
+            build.native_recipe(source),
+            build.native_recipe(source.replace("-fPIE", "-fPIC")),
+        )
+        self.assertNotEqual(
+            build.native_recipe(source),
+            build.native_recipe(source.replace("triple", "other")),
+        )
+
+    def test_native_reuse_requires_unambiguous_recipe(self):
+        for source in [
+            "ABI_TRIPLES = {}",
+            "def native(): pass",
+            "ABI_TRIPLES={}\ndef native(): pass\ndef native(): pass",
+        ]:
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                build.native_recipe(source)
+
     def test_sdk_unix_link_preserved(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

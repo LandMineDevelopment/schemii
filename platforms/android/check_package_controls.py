@@ -10,13 +10,25 @@ import zipfile
 from verify_apk import verify_package
 
 
-def check(apk, root, helper, expected_commit, guest_only=False):
+def check(apk, root, helper, expected_commit, guest_only=False, source_only=False):
     positive = verify_package(apk, root, helper, expected_commit)
     with zipfile.ZipFile(apk) as package:
         entries = {info.filename: package.read(info) for info in package.infolist()}
     chosen = "assets/shared/src/schemii/main.py"
     outcomes = {}
     mutations = {
+        "missing-shared-record": lambda files: files.pop(
+            "assets/runtime/shared-source.json"
+        ),
+        "wrong-source-record": lambda files: files.__setitem__(
+            "assets/runtime/shared-source.json",
+            json.dumps(
+                {
+                    **json.loads(files["assets/runtime/shared-source.json"]),
+                    "commit": "0" * 40,
+                }
+            ).encode(),
+        ),
         "missing-shared-source": lambda files: files.pop(chosen),
         "stale-shared-source": lambda files: files.__setitem__(
             chosen, files[chosen] + b"\n# stale bytes\n"
@@ -54,6 +66,12 @@ def check(apk, root, helper, expected_commit, guest_only=False):
             for name, mutate in mutations.items()
             if "guest" in name or name == "stale-runtime-interface"
         }
+    if source_only:
+        mutations = {
+            name: mutate
+            for name, mutate in mutations.items()
+            if "shared" in name or name == "wrong-source-record"
+        }
     with tempfile.TemporaryDirectory(prefix="apk-counterexamples-") as temporary:
         for case, mutate in mutations.items():
             changed = entries.copy()
@@ -65,10 +83,25 @@ def check(apk, root, helper, expected_commit, guest_only=False):
                     package.writestr(name, data)
             try:
                 verify_package(path, root, helper, expected_commit)
-            except (ValueError, KeyError) as error:
-                outcomes[case] = {"rejected": True, "reason": str(error)}
+            except Exception as error:
+                outcomes[case] = {
+                    "rejected": True,
+                    "error_type": type(error).__name__,
+                    "reason": str(error),
+                }
             else:
                 raise AssertionError("Accepted counterexample: " + case)
+    if source_only:
+        try:
+            verify_package(apk, root, helper, "0" * 40)
+        except Exception as error:
+            outcomes["wrong-independent-expected-source"] = {
+                "rejected": True,
+                "error_type": type(error).__name__,
+                "reason": str(error),
+            }
+        else:
+            raise AssertionError("Accepted independent wrong-source expectation")
     return {
         "apk_sha256": hashlib.sha256(apk.read_bytes()).hexdigest(),
         "positive": positive,
@@ -83,6 +116,11 @@ def main():
     parser.add_argument(
         "--root", type=Path, default=Path(__file__).resolve().parents[2]
     )
+    parser.add_argument(
+        "--source-only",
+        action="store_true",
+        help="Run shared-record/source controls, without unrelated native/guest mutations",
+    )
     parser.add_argument("--parity-helper", type=Path)
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument(
@@ -91,6 +129,8 @@ def main():
         help="Run only the new guest/probe/interface byte controls",
     )
     args = parser.parse_args()
+    if args.source_only and args.guest_only:
+        parser.error("Choose one control scope")
     print(
         json.dumps(
             check(
@@ -99,6 +139,7 @@ def main():
                 args.parity_helper or args.root / "scripts/check_runtime_parity.py",
                 args.expected_commit,
                 args.guest_only,
+                args.source_only,
             ),
             indent=2,
         )

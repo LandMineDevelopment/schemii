@@ -139,6 +139,35 @@ Both CLIs accept the same temporary `--parity-helper` bridge when needed.
 
 ## Real guest payload build and diagnostics
 
+Current canonical consumer builds use the default in-checkout
+`scripts/check_runtime_parity.py` and its committed `build-android-release.py`
+selector, integrated from accepted main8fa3. The independently selected checkout
+HEAD is passed to both committed staging and actual signed-APK extraction checks.
+Both helper/selector digests and checkout revision are bound before/after build;
+`staging-readback.json`, `package-readback.json` and
+`apk-extracted-readback.json` retain their separate results. Earlier8f snapshot
+packages and runs keep their original identities and are not current-source proof.
+
+`--native-donor /private/prior-build/receipt.json` can reuse only the three base
+bionic executable bytes per ABI. It verifies the donor APK/provenance/file hashes,
+committed clean source, native recipe/ABI mapping, native source files and unchanged
+toolchain lock. Peer libraries and runtime acceptance are not inherited. Current
+canonical static packages omit old guest archives: their recorded full contract
+digest differs from the integrated contract. Those archives/manifests remain
+preserved and are not relabeled or re-resolved merely for source packaging proof.
+
+```bash
+python3 platforms/android/build.py build --build-id canonical-UNIQUE \
+  --abi arm64-v8a --abi x86_64 --non-debuggable \
+  --native-donor /private/prior-build/receipt.json
+python3 platforms/android/check_package_controls.py /private/canonical-UNIQUE/schemii-runtime-probe.apk \
+  --expected-commit INDEPENDENT_FULL_GIT_SHA --source-only
+```
+
+No `--parity-helper` override is used for this canonical gate. Its counterexamples
+remove/change actual shared bytes or the source record, and also provide an
+independently wrong expected source. Any validation exception fails closed.
+
 The native guest is APK data, shipped at build time and verified before use. It
 has no runtime executable-download path and does not use a writable Termux
 installation. `runtime/payload.lock.json` binds exact per-ABI Debian packages,

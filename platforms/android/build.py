@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 import argparse
+import ast
 import hashlib
 import importlib.util
 import json
@@ -220,6 +221,100 @@ def native(cache, out, abi):
     return {str(p.relative_to(out)): digest(p) for p in sorted(dst.iterdir())}
 
 
+def native_recipe(source):
+    """The base executable recipe and ABI mapping, independent of unrelated edits."""
+    tree = ast.parse(source)
+    selected = [
+        node
+        for node in tree.body
+        if (isinstance(node, ast.FunctionDef) and node.name == "native")
+        or (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(t, ast.Name) and t.id == "ABI_TRIPLES" for t in node.targets
+            )
+        )
+    ]
+    if len(selected) != 2:
+        raise ValueError("Native build recipe is missing or ambiguous")
+    return hashlib.sha256(
+        "\n".join(
+            ast.dump(node, include_attributes=False) for node in selected
+        ).encode()
+    ).hexdigest()
+
+
+def reuse_native(donor_path, out, abis):
+    """Reuse only exact base executables; no peer component or acceptance inheritance."""
+    from verify_apk import elf_identity
+
+    raw = donor_path.read_bytes()
+    receipt = json.loads(raw)
+    apk = Path(receipt["apk"])
+    if digest(apk) != receipt["apk_sha256"]:
+        raise ValueError("Native donor APK byte drift")
+    with zipfile.ZipFile(apk) as package:
+        encoded = package.read("assets/runtime/native-provenance.json")
+        donor = json.loads(encoded)
+        if (
+            hashlib.sha256(encoded).hexdigest() != receipt["native_provenance_sha256"]
+            or donor != receipt["native"]
+        ):
+            raise ValueError("Native donor provenance drift")
+        if donor["adapter_dirty"] or (
+            donor["compile_sdk"],
+            donor["target_sdk"],
+            donor["min_sdk"],
+        ) != (36, 36, 29):
+            raise ValueError("Native donor is not a committed modern-target build")
+        if donor["toolchain_lock_sha256"] != digest(HERE / "toolchain.lock.json"):
+            raise ValueError("Native donor toolchain input drift")
+        head = donor["source_commit"]
+        old_builder = subprocess.check_output(
+            ["git", "-C", str(ROOT), "show", head + ":platforms/android/build.py"]
+        )
+        if (
+            hashlib.sha256(old_builder).hexdigest()
+            != donor["adapter_sources"]["platforms/android/build.py"]
+        ):
+            raise ValueError("Native donor recipe is not its committed source")
+        recipe = native_recipe((HERE / "build.py").read_bytes())
+        if native_recipe(old_builder) != recipe:
+            raise ValueError("Native donor compiler recipe drift")
+        for name in [
+            "native/runtime_probe.c",
+            "native/replace.h",
+            "native/proot-string-header.patch",
+        ]:
+            if donor["adapter_sources"]["platforms/android/" + name] != digest(
+                HERE / name
+            ):
+                raise ValueError("Native donor source input drift: " + name)
+        artifacts = {}
+        for abi in abis:
+            if abi not in donor["abis"]:
+                raise ValueError("Native donor ABI missing")
+            for name in ["libproot.so", "libproot_loader.so", "libruntime_probe.so"]:
+                relative = "lib/" + abi + "/" + name
+                data = package.read(relative)
+                sha = hashlib.sha256(data).hexdigest()
+                if sha != donor["native_files"][relative]:
+                    raise ValueError("Native donor executable byte drift")
+                elf_identity(data, abi)
+                target = out / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                artifacts[relative] = sha
+    return artifacts, {
+        "source_commit": head,
+        "apk_sha256": receipt["apk_sha256"],
+        "native_provenance_sha256": receipt["native_provenance_sha256"],
+        "receipt_sha256": hashlib.sha256(raw).hexdigest(),
+        "recipe_sha256": recipe,
+        "scope": "base bionic executable bytes only; no shared-source/runtime acceptance reuse",
+    }
+
+
 def helper_identity(helper):
     root = helper.resolve().parents[1]
     hashes = {
@@ -266,7 +361,8 @@ def stage_shared(out, helper, commit):
                 ["git", "-C", str(ROOT), "show", f"{commit}:{name}"]
             )
         )
-    module.check_apk_sources(ROOT, shared, record, commit)
+    staging = module.check_apk_sources(ROOT, shared, record, commit)
+    (out / "staging-readback.json").write_text(json.dumps(staging, indent=2) + "\n")
     metadata = out / "assets/runtime"
     metadata.mkdir(parents=True)
     (metadata / "shared-source.json").write_text(json.dumps(record, indent=2) + "\n")
@@ -322,8 +418,12 @@ def build(args, cache):
                 raise ValueError("Talloc source drift")
     abis = args.abi or ["arm64-v8a"]
     artifacts = {}
-    for abi in abis:
-        artifacts.update(native(cache, out, abi))
+    native_donor = None
+    if args.native_donor:
+        artifacts, native_donor = reuse_native(args.native_donor, out, abis)
+    else:
+        for abi in abis:
+            artifacts.update(native(cache, out, abi))
     peer_components = {}
     peer_java = []
     if args.network_handoff:
@@ -373,6 +473,7 @@ def build(args, cache):
         "debuggable": not args.non_debuggable,
         "diagnostic_log_export": args.log_report,
         "native_files": artifacts,
+        "native_donor": native_donor,
         "toolchain_lock_sha256": digest(HERE / "toolchain.lock.json"),
         "adapter_sources": adapter_before,
         "parity_helper": helper_identity(args.parity_helper),
@@ -592,7 +693,12 @@ def build(args, cache):
     packaged_record = json.loads(
         (extracted / "assets/runtime/shared-source.json").read_text()
     )
-    module.check_apk_sources(ROOT, extracted / "assets/shared", packaged_record, commit)
+    extracted_readback = module.check_apk_sources(
+        ROOT, extracted / "assets/shared", packaged_record, commit
+    )
+    (out / "apk-extracted-readback.json").write_text(
+        json.dumps(extracted_readback, indent=2) + "\n"
+    )
     if adapter_sources() != adapter_before:
         raise ValueError("Adapter sources changed during build; receipt refused")
     if helper_identity(args.parity_helper) != helper_before:
@@ -644,6 +750,11 @@ def main():
     b.add_argument("--build-id", required=True)
     b.add_argument("--abi", action="append", choices=ABI_TRIPLES)
     b.add_argument("--guest-payload", type=Path, action="append")
+    b.add_argument(
+        "--native-donor",
+        type=Path,
+        help="Reuse exact committed base native binaries from this receipt",
+    )
     b.add_argument("--network-handoff", type=Path)
     b.add_argument("--network-checkout", type=Path)
     b.add_argument("--process-head")
