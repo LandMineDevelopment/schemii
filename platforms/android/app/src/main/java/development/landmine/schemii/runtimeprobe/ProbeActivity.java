@@ -78,6 +78,21 @@ public final class ProbeActivity extends Activity {
         }
     }
 
+    private void exportReport(JSONObject report) throws Exception {
+        if (!assetJson("runtime/native-provenance.json").optBoolean("diagnostic_log_export", false)) {
+            throw new IOException("Diagnostic export is disabled in this build");
+        }
+        String encoded = android.util.Base64.encodeToString(report.toString().getBytes("UTF-8"), android.util.Base64.NO_WRAP);
+        int count = (encoded.length() + 1999) / 2000;
+        for (int index = 0; index < count; ++index) {
+            android.util.Log.i("SchemiiProbe", report.getString("run_id") + ":" + index + "/" + count + ":"
+                + encoded.substring(index * 2000, Math.min(encoded.length(), (index + 1) * 2000)));
+            // liblog's nonblocking socket drops a burst larger than its send buffer.
+            // This explicit emulator diagnostic export is bounded and never retries services.
+            Thread.sleep(50);
+        }
+    }
+
     private void extractGuest(File root, String abi, JSONObject identity) throws Exception {
         if (!root.mkdir()) throw new IOException("Guest root must be a fresh disposable directory");
         JSONObject manifest = assetJson("runtime/guest-" + abi + "-manifest.json");
@@ -209,6 +224,25 @@ public final class ProbeActivity extends Activity {
         view.setPadding(24, 40, 24, 24);
         view.setText("Running disposable native execution controls…");
         setContentView(view);
+        if (getIntent().getBooleanExtra("export_report_only", false)) {
+            new Thread(() -> {
+                try {
+                    File saved = new File(getFilesDir(), "probe-v1/report.json");
+                    if (!saved.isFile() || saved.length() > 262144) throw new IOException("Stored report absent/oversized");
+                    JSONObject report = new JSONObject(new String(Files.readAllBytes(saved.toPath()), "UTF-8"));
+                    String expected = getIntent().getStringExtra("expected_native_provenance");
+                    if (expected == null || !expected.matches("[0-9a-f]{64}") ||
+                        !expected.equals(report.getString("native_provenance_sha256"))) {
+                        throw new IOException("Stored report identity mismatch");
+                    }
+                    exportReport(report);
+                    runOnUiThread(() -> view.setText("Exported retained report " + report.optString("run_id")));
+                } catch (Exception error) {
+                    runOnUiThread(() -> view.setText("Retained report export failed: " + error.toString()));
+                }
+            }, "retained-report-export").start();
+            return; // No probes, state writes or process lifecycle actions in this mode.
+        }
         new Thread(() -> {
             JSONObject report = new JSONObject();
             File dir = new File(getFilesDir(), "probe-v1");
@@ -311,12 +345,7 @@ public final class ProbeActivity extends Activity {
             }
             try {
                 if (assetJson("runtime/native-provenance.json").optBoolean("diagnostic_log_export", false)) {
-                    String encoded = android.util.Base64.encodeToString(report.toString().getBytes("UTF-8"), android.util.Base64.NO_WRAP);
-                    int count = (encoded.length() + 1999) / 2000;
-                    for (int index = 0; index < count; ++index) {
-                        android.util.Log.i("SchemiiProbe", report.optString("run_id") + ":" + index + "/" + count + ":"
-                            + encoded.substring(index * 2000, Math.min(encoded.length(), (index + 1) * 2000)));
-                    }
+                    exportReport(report);
                 }
             } catch (Exception error) { /* Private report remains authoritative; absent log chunks are incomplete evidence. */ }
             runOnUiThread(() -> view.setText(report.toString()));

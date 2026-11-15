@@ -249,9 +249,22 @@ as base64 chunks to Android's `SchemiiProbe` tag. Keep those logs private. Captu
 decode JSON, and verify source commit and native-provenance SHA256 against the
 exact signed APK. Missing/truncated/stale chunks are incomplete evidence. This
 requires neither root, `run-as`, instrumentation nor an exported data provider.
+Chunks are paced because liblog can drop a large nonblocking-socket burst. Android
+accessibility also truncates this large TextView at100000 characters; a UI dump
+does not repair a missing report tail. Both original transport failures remain.
+To re-export an existing atomic report without rerunning any probe, launch the
+diagnostic build with `--ez export_report_only true --es expected_native_provenance
+ORIGINAL_SHA256`. This mode requires explicit log export in the build, checks the
+saved identity, reads only that report and never starts/stops services or rewrites
+state. Collect fresh log lines, validate against the **original** signed APK and
+retain its original run/source identity; re-export does not retest a newer head.
 It is not a release logging policy. Installation/replacement is permitted only
-after the prior run reports no retained runtime/children and its owned services
-are quiescent; never force-stop a retained PostgreSQL runtime to obtain a pass.
+after the owned runtime is quiescent; use its no-retained-runtime/children report
+plus live process witnesses. When report transport fails, retain the failure and
+record an independent same-UID process inventory before replacing the diagnostic
+APK; refuse any live guest/service or unknown ownership. This is an emulator
+operation safeguard, not production descendant-completeness acceptance. Never
+force-stop a retained PostgreSQL runtime to obtain a pass.
 
 The real guest runs Pi's canonical handler and Python PiClient. Its HTTP probe
 starts `python -m uvicorn schemii.main:app` on descriptor port18000 with lifespan
