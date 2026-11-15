@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
+#include <sys/syscall.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,7 +92,34 @@ static int owner_control(void) {
     return graceful && boot[0] && exe_ok && cwd_ok && cmd_ok && children_ok ? 0 : 1;
 }
 
+static int filesystem_syscalls(void) {
+    int legacy_errno = -1, at_errno = -1, at2_errno = -1;
+    int fd = open("rename-source", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return 2;
+    close(fd);
+#ifdef __NR_rename
+    errno = 0;
+    if (syscall(__NR_rename, "rename-source", "rename-target") < 0) legacy_errno = errno;
+    else { legacy_errno = 0; rename("rename-target", "rename-source"); }
+#endif
+#ifdef __NR_renameat
+    errno = 0;
+    if (syscall(__NR_renameat, AT_FDCWD, "rename-source", AT_FDCWD, "rename-target") < 0) at_errno = errno;
+    else { at_errno = 0; rename("rename-target", "rename-source"); }
+#endif
+#ifdef __NR_renameat2
+    errno = 0;
+    if (syscall(__NR_renameat2, AT_FDCWD, "rename-source", AT_FDCWD, "rename-target", 0) < 0) at2_errno = errno;
+    else at2_errno = 0;
+#endif
+    unlink("rename-source"); unlink("rename-target");
+    printf("{\"probe\":\"filesystem-syscalls\",\"rename_errno\":%d,\"renameat_errno\":%d,\"renameat2_errno\":%d}\n",
+           legacy_errno, at_errno, at2_errno);
+    return at_errno == 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "filesystem-syscalls")) return filesystem_syscalls();
     if (argc == 2 && !strcmp(argv[1], "owner-control")) return owner_control();
     if (argc == 2 && !strcmp(argv[1], "identity")) {
 #if defined(__aarch64__)

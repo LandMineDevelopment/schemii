@@ -14,7 +14,7 @@
     "proot": "libproot.so",
     "loader": "libproot_loader.so",
     "syscall_probe": "libruntime_probe.so",
-    "guest_root": "not-yet-packaged",
+    "guest_root": "verified assets/runtime/guest-ABI.zip and manifest; separate disposable CE state",
     "shared_source": "assets/shared/",
     "shared_identity": "assets/runtime/shared-source.json",
     "native_identity": "assets/runtime/native-provenance.json",
@@ -30,7 +30,7 @@
     "state_and_control_roots": "host supplies selected roots; no fallback or reset"
   },
   "endpoints": {
-    "status": "proposed-not-consumed-by-supervisor",
+    "status": "consumed-by-disposable-guest-probe; shared-supervisor-pending",
     "host": "127.0.0.1",
     "metadata_postgres": 15433,
     "target_postgres": 15434,
@@ -42,7 +42,11 @@
   },
   "control": {
     "supervisor": "reuse canonical Python lifecycle; adapter parameterization pending ownership",
-    "operations": ["run-attached", "stop", "status"],
+    "operations": [
+      "run-attached",
+      "stop",
+      "status"
+    ],
     "owner_identity": "pid + start_ticks + boot_id; never pid alone",
     "descendant_identity": "blocked: task/children unavailable in API36 emulator app",
     "shutdown": "bounded graceful stop; no forced PostgreSQL cleanup",
