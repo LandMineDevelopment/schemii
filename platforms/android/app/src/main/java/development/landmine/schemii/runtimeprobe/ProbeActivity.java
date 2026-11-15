@@ -112,9 +112,11 @@ public final class ProbeActivity extends Activity {
         File journal = new File(reports, name + ".json");
         if (!output.createNewFile() || journal.exists()) throw new IOException("Invocation report already exists");
         List<String> command = factory.in(cwd);
+        android.system.StructStat cwdStat = android.system.Os.stat(cwd.getAbsolutePath());
         JSONObject result = new JSONObject().put("name", name).put("mode", mode)
             .put("invocation_id", UUID.randomUUID().toString()).put("run_identity", runIdentity)
             .put("cwd", cwd.getAbsolutePath()).put("cwd_fresh_empty", Objects.requireNonNull(cwd.list()).length == 0)
+            .put("cwd_device", cwdStat.st_dev).put("cwd_inode", cwdStat.st_ino)
             .put("output_file", output.getAbsolutePath()).put("deadline_ms", deadlineMs)
             .put("started_at_ms", System.currentTimeMillis()).put("phase", "before-launch")
             .put("command", new JSONArray(command)).put("stack_acceptance", false)
@@ -393,7 +395,8 @@ public final class ProbeActivity extends Activity {
             checks.put(value);
             JSONObject observed = singleObject(value.getString("output"));
             boolean ok = value.getBoolean("cwd_fresh_empty") && observed.getBoolean("empty_before_launch")
-                && value.getString("cwd").equals(observed.getString("cwd")) && cwds.add(observed.getString("cwd"))
+                && value.getLong("cwd_device") == observed.getLong("cwd_device")
+                && value.getLong("cwd_inode") == observed.getLong("cwd_inode") && cwds.add(observed.getString("cwd"))
                 && observed.getString("source_id").equals(runIdentity.getString("fixture_source_sha256"));
             String installed = fileSha(new File(fixture));
             ok &= installed.equals(build.getJSONObject("native_files").getString("lib/" + observed.getString("abi") + "/libcollector_fixture.so"));
@@ -409,7 +412,8 @@ public final class ProbeActivity extends Activity {
         checks.put(proot);
         JSONObject observed = singleObject(proot.getString("output"));
         boolean fresh = proot.getBoolean("cwd_fresh_empty") && observed.getBoolean("empty_before_launch")
-            && proot.getString("cwd").equals(observed.getString("cwd")) && cwds.add(observed.getString("cwd"));
+            && proot.getLong("cwd_device") == observed.getLong("cwd_device")
+            && proot.getLong("cwd_inode") == observed.getLong("cwd_inode") && cwds.add(observed.getString("cwd"));
         proot.put("fixture_control_pass", fresh);
         if (!fresh) throw new IOException("PRoot cwd control failed");
         JSONObject exact = execute("wrapper-exact-64k", Arrays.asList(fixture, "bytes", "65536"), Collections.emptyMap(), attempt);

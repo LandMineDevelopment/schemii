@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -61,8 +62,9 @@ int main(int argc, char **argv) {
         while ((entry = readdir(d))) if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) ++count;
         closedir(d);
         char cwd[PATH_MAX];
-        if (!getcwd(cwd, sizeof(cwd)) || count || marker("fixture-created", "fresh\n")) return 3;
-        printf("{\"fixture\":\"cwd\",\"source_id\":\"%s\",\"abi\":\"%s\",\"cwd\":\"%s\",\"empty_before_launch\":true,\"pid\":%ld,\"start_ticks\":%llu}\n", COLLECTOR_FIXTURE_SOURCE_ID, ABI, cwd, (long)getpid(), birth(getpid()));
+        struct stat cwd_stat;
+        if (!getcwd(cwd, sizeof(cwd)) || stat(".", &cwd_stat) || count || marker("fixture-created", "fresh\n")) return 3;
+        printf("{\"fixture\":\"cwd\",\"source_id\":\"%s\",\"abi\":\"%s\",\"cwd\":\"%s\",\"cwd_device\":%llu,\"cwd_inode\":%llu,\"empty_before_launch\":true,\"pid\":%ld,\"start_ticks\":%llu}\n", COLLECTOR_FIXTURE_SOURCE_ID, ABI, cwd, (unsigned long long)cwd_stat.st_dev, (unsigned long long)cwd_stat.st_ino, (long)getpid(), birth(getpid()));
         fflush(stdout); delay_ms(100); return 0;
     }
     if (!strcmp(argv[1], "bytes") && argc == 3) {

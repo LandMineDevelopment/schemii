@@ -324,6 +324,10 @@ root; its original output and atomic journal are separate siblings under
 packaged argv0 stays intact. The journal binds run/source/native provenance,
 installed APK and signing-certificate hashes, API/debug/SELinux/build labels,
 wrapper owner birth/boot identity, command, deadline and monotonic elapsed time.
+Cwd witnesses compare filesystem device/inode identity: Android can expose the
+same directory as `/data/user/0/...` to Java and `/data/data/...` to native code.
+Both path labels remain in the report; no string-prefix alias assumption admits
+a different directory. The first literal-path oracle failure is preserved.
 
 The collector reads complete UTF-8 output through65536 bytes. Overflow, invalid
 or incomplete JSON, or trailing data is explicit failure with no accepted prefix;

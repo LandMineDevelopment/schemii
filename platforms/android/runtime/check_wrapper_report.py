@@ -139,7 +139,8 @@ def validate(report, apk, expected_commit, signer_sha256):
         require(
             c["output_accepted"] is True
             and output["empty_before_launch"] is True
-            and output["cwd"] == c["cwd"],
+            and output["cwd_device"] == c["cwd_device"]
+            and output["cwd_inode"] == c["cwd_inode"],
             "Fixture cwd witness mismatch",
         )
         require(
