@@ -81,6 +81,18 @@ def verify_package(apk: Path, root: Path, helper: Path, expected_commit: str) ->
                 for abi in native["abis"]
                 for name in ["libproot.so", "libproot_loader.so", "libruntime_probe.so"]
             }
+            if native.get("wrapper_controls_only"):
+                if (
+                    native.get("guest_payloads")
+                    or native.get("peer_components")
+                    or not native.get("wrapper_fixture")
+                ):
+                    raise ValueError(
+                        "Wrapper-only package contains unrelated runtime components"
+                    )
+                expected_native.update(
+                    "lib/" + abi + "/libcollector_fixture.so" for abi in native["abis"]
+                )
             components = native.get("peer_components", {})
             if set(components) - {"network", "process"}:
                 raise ValueError("Unknown native peer component")

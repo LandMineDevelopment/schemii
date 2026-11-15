@@ -88,9 +88,10 @@ private per-build copy. No core application source is patched.
 
 ## Shared-source consumer and provenance
 
-The normal build loads the canonical `scripts/check_runtime_parity.py` APIs from
-#265. Until its separate branch is integrated, `--parity-helper /absolute/path`
-can identify that exact helper for a diagnostic build. Native provenance records
+The normal build loads the integrated canonical `scripts/check_runtime_parity.py`
+APIs from accepted #271. Earlier diagnostic builds used
+`--parity-helper /absolute/path` to identify an external immutable snapshot.
+That option remains for reproducing their original labels. Native provenance records
 the helper head, helper SHA256 and its committed-file-selector SHA256.
 An immutable coordinator snapshot with adjacent `provenance.json` is supported;
 changed snapshot bytes or dirty helper/selector checkouts are refused, and both
@@ -314,6 +315,45 @@ The pinned Uvicorn0.52.4 intentionally re-raises its captured SIGTERM after
 shutdown; signal exit alone cannot pass. The probe records the actual status,
 requires startup/shutdown-complete markers and listener closure. The original
 non-debuggable failure from an incorrect exit-zero-only oracle is retained.
+
+## Diagnostic collector contract
+
+Each invocation now has a fresh private cwd beneath an attempt/mode/debug/run
+root; its original output and atomic journal are separate siblings under
+`reports/`. Packaged PRoot receives that same fresh cwd through `-w`; its absolute
+packaged argv0 stays intact. The journal binds run/source/native provenance,
+installed APK and signing-certificate hashes, API/debug/SELinux/build labels,
+wrapper owner birth/boot identity, command, deadline and monotonic elapsed time.
+
+The collector reads complete UTF-8 output through65536 bytes. Overflow, invalid
+or incomplete JSON, or trailing data is explicit failure with no accepted prefix;
+the original output file is retained. Direct-child exit does not establish
+descendant cleanup. Android's public `java.lang.Process` API exposes no PID; the
+collector retains its actual Process object and never adopts a numeric PID,
+same-UID process, name or group as ownership.
+
+Deadline/cancellation sends no automatic signal and never discards an uncertain
+owner. It retains the Process reference, cwd/output/journal and uncertainty,
+fences later launches and records a concrete reconciliation action. Activity
+destruction interrupts collection rather than killing owners. This is fail-closed
+diagnostic behavior, not a production owner-loss solution. If cleanup cannot be
+proved, stop and preserve the owned state for coordinator review.
+
+The opt-in `--wrapper-controls-only --log-report` build mode excludes guests,
+network and peer process campaigns. Its new source-bound finite native fixture
+checks two native fresh cwds and one PRoot cwd, exact64KiB,65537-byte overflow,
+partial/trailing JSON refusal, deadline and interruption. The last two retain
+ownership at collection failure and refuse another launch. A separately labeled
+fixture oracle then waits for its known one-child finite program to finish itself
+and specifically reap that child; only this source-bound fixture reference can be
+released by that oracle. It sends no signals. Original timeout/cancellation
+failure labels and generic descendant uncertainty remain unchanged. This does
+not prove arbitrary descendants, owner death, PostgreSQL cleanup or13e behavior.
+
+`runtime/check_wrapper_report.py` validates the original Android report against
+independently selected signed APK/source/signing-certificate inputs. Fixture
+success remains `stack_acceptance=false`. The original68 polling reports retain
+their old shared-cwd/32KiB/deadline limitations and original source labels.
 
 ## Host/runtime interface and coexistence
 

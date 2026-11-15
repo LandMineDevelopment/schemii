@@ -227,7 +227,10 @@ def native_recipe(source):
     selected = [
         node
         for node in tree.body
-        if (isinstance(node, ast.FunctionDef) and node.name == "native")
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name in {"native", "run", "digest"}
+        )
         or (
             isinstance(node, ast.Assign)
             and any(
@@ -235,7 +238,7 @@ def native_recipe(source):
             )
         )
     ]
-    if len(selected) != 2:
+    if len(selected) != 4:
         raise ValueError("Native build recipe is missing or ambiguous")
     return hashlib.sha256(
         "\n".join(
@@ -383,6 +386,12 @@ def build(args, cache):
         for c in args.build_id
     ):
         raise ValueError("Build ID must be a single safe name")
+    if args.wrapper_controls_only and (
+        args.guest_payload or args.network_handoff or args.process_head
+    ):
+        raise ValueError(
+            "Wrapper fixture mode cannot include guest, network or peer process campaigns"
+        )
     adapter_before = adapter_sources()
     out = cache / "builds" / args.build_id
     out.mkdir(parents=True)  # Never overwrite a prior success or failure.
@@ -424,6 +433,34 @@ def build(args, cache):
     else:
         for abi in abis:
             artifacts.update(native(cache, out, abi))
+    fixture = None
+    if args.wrapper_controls_only:
+        source = HERE / "native/runtime/collector_fixture.c"
+        fixture = {
+            "source_sha256": digest(source),
+            "scope": "finite collector controls only; no backend or ownership acceptance",
+        }
+        tc = cache / "sdk/android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        for abi in abis:
+            target = out / "lib" / abi / "libcollector_fixture.so"
+            run(
+                tc / (ABI_TRIPLES[abi] + "-clang"),
+                "-std=c11",
+                "-O2",
+                "-g",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-fPIE",
+                "-pie",
+                "-Wl,-z,max-page-size=16384",
+                "-Wl,-z,noexecstack",
+                '-DCOLLECTOR_FIXTURE_SOURCE_ID="' + fixture["source_sha256"] + '"',
+                source,
+                "-o",
+                target,
+            )
+            artifacts[str(target.relative_to(out))] = digest(target)
     peer_components = {}
     peer_java = []
     if args.network_handoff:
@@ -472,6 +509,8 @@ def build(args, cache):
         "peer_components": peer_components,
         "debuggable": not args.non_debuggable,
         "diagnostic_log_export": args.log_report,
+        "wrapper_controls_only": args.wrapper_controls_only,
+        "wrapper_fixture": fixture,
         "native_files": artifacts,
         "native_donor": native_donor,
         "toolchain_lock_sha256": digest(HERE / "toolchain.lock.json"),
@@ -761,6 +800,11 @@ def main():
     b.add_argument("--process-checkout", type=Path)
     b.add_argument("--non-debuggable", action="store_true")
     b.add_argument("--log-report", action="store_true")
+    b.add_argument(
+        "--wrapper-controls-only",
+        action="store_true",
+        help="Run only finite collector fixtures; excludes backend/network/peer campaigns",
+    )
     b.add_argument(
         "--parity-helper", type=Path, default=ROOT / "scripts/check_runtime_parity.py"
     )

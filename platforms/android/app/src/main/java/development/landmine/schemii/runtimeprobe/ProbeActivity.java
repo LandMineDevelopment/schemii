@@ -12,36 +12,162 @@ import java.util.concurrent.TimeUnit;
 
 /** Disposable feasibility entrypoint, deliberately no server/boot service. */
 public final class ProbeActivity extends Activity {
-    private final List<Process> children = Collections.synchronizedList(new ArrayList<>());
+    private static final List<OwnedInvocation> owned = new ArrayList<>();
+    private static final List<Process> retainedGuests = new ArrayList<>();
     private volatile boolean closing;
+    private volatile Thread probeWorker;
+    private File attempt;
+    private JSONObject runIdentity;
+
+    private static final class OwnedInvocation {
+        final Process process;
+        final File journal;
+        final File cwd;
+        final File output;
+        final JSONObject result;
+        OwnedInvocation(Process process, File journal, File cwd, File output, JSONObject result) {
+            this.process = process; this.journal = journal; this.cwd = cwd; this.output = output; this.result = result;
+        }
+    }
+
+    private interface Command { List<String> in(File cwd); }
+
+    private static void writeJson(File target, JSONObject value) throws Exception {
+        File temporary = new File(target.getParentFile(), target.getName() + ".tmp");
+        try (FileOutputStream stream = new FileOutputStream(temporary)) {
+            stream.write((value.toString(2) + "\n").getBytes("UTF-8"));
+            stream.getFD().sync();
+        }
+        Files.move(temporary.toPath(), target.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    private static String completeOutput(File output) throws IOException {
+        try (FileInputStream input = new FileInputStream(output); ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            for (int n; (n = input.read(buffer, 0, Math.min(buffer.length, 65537 - bytes.size()))) != -1;) {
+                bytes.write(buffer, 0, n);
+                if (bytes.size() > 65536) throw new IOException("Output exceeds 65536 bytes; original file retained");
+            }
+            return java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(bytes.toByteArray())).toString();
+        }
+    }
+
+    private static JSONObject singleObject(String text) throws org.json.JSONException {
+        org.json.JSONTokener tokens = new org.json.JSONTokener(text);
+        Object value = tokens.nextValue();
+        if (!(value instanceof JSONObject)) throw new org.json.JSONException("Expected one JSON object");
+        while (tokens.more()) {
+            char c = tokens.next();
+            if (c != ' ' && c != '\n' && c != '\r' && c != '\t') throw new org.json.JSONException("Trailing output after JSON object");
+        }
+        return (JSONObject)value;
+    }
+
+    private void requireNoRetainedOwner() throws IOException {
+        synchronized (owned) {
+            if (closing || Thread.currentThread().isInterrupted() || !owned.isEmpty() || !retainedGuests.isEmpty()) {
+                throw new IOException("Owned process/uncertainty retained or Activity closing; refuse another launch");
+            }
+        }
+    }
+
+    private static String fileSha(File path) throws Exception {
+        java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+        try (FileInputStream input = new FileInputStream(path)) {
+            byte[] buffer = new byte[65536];
+            for (int n; (n = input.read(buffer)) != -1;) digest.update(buffer, 0, n);
+        }
+        return hex(digest.digest());
+    }
 
     private JSONObject execute(String name, List<String> command, Map<String, String> env,
                                File dir) throws Exception {
-        File output = new File(dir, name + ".txt");
-        ProcessBuilder pb = new ProcessBuilder(command).directory(dir).redirectErrorStream(true)
+        return collect(name, cwd -> command, env, "native", 45000);
+    }
+
+    private JSONObject executeProot(String name, List<String> guest, Map<String, String> env,
+                                    String lib) throws Exception {
+        return collect(name, cwd -> {
+            List<String> command = new ArrayList<>(Arrays.asList(lib + "/libproot.so", "-v", "0",
+                "-r", "/", "-w", cwd.getAbsolutePath()));
+            command.addAll(guest);
+            return command;
+        }, env, "proot", 45000);
+    }
+
+    private JSONObject collect(String name, Command factory, Map<String, String> env,
+                               String mode, long deadlineMs) throws Exception {
+        long started = System.nanoTime();
+        requireNoRetainedOwner();
+        if (!name.matches("[a-zA-Z0-9_-]+")) throw new IOException("Unsafe invocation name");
+        File cwd = new File(new File(attempt, "work"), name);
+        File reports = new File(attempt, "reports");
+        if (!cwd.mkdir()) throw new IOException("Invocation cwd must be fresh and empty; preserving prior attempt");
+        android.system.Os.chmod(cwd.getAbsolutePath(), 0700);
+        File output = new File(reports, name + ".txt");
+        File journal = new File(reports, name + ".json");
+        if (!output.createNewFile() || journal.exists()) throw new IOException("Invocation report already exists");
+        List<String> command = factory.in(cwd);
+        JSONObject result = new JSONObject().put("name", name).put("mode", mode)
+            .put("invocation_id", UUID.randomUUID().toString()).put("run_identity", runIdentity)
+            .put("cwd", cwd.getAbsolutePath()).put("cwd_fresh_empty", Objects.requireNonNull(cwd.list()).length == 0)
+            .put("output_file", output.getAbsolutePath()).put("deadline_ms", deadlineMs)
+            .put("started_at_ms", System.currentTimeMillis()).put("phase", "before-launch")
+            .put("command", new JSONArray(command)).put("stack_acceptance", false)
+            .put("descendant_cleanup", "unproved by this collector")
+            .put("child_identity_authority", "captured Java Process object; Android public API exposes no PID; no PID/UID/group admission");
+        writeJson(journal, result);
+        ProcessBuilder pb = new ProcessBuilder(command).directory(cwd).redirectErrorStream(true)
             .redirectOutput(output);
         pb.environment().clear();
         pb.environment().put("PATH", "/system/bin");
-        pb.environment().put("HOME", dir.getAbsolutePath());
-        pb.environment().put("TMPDIR", dir.getAbsolutePath());
+        pb.environment().put("HOME", cwd.getAbsolutePath());
+        pb.environment().put("TMPDIR", cwd.getAbsolutePath());
         pb.environment().putAll(env);
         Process p;
-        synchronized (children) {
-            if (closing) throw new IOException("Activity closing");
+        OwnedInvocation entry;
+        synchronized (owned) {
+            if (closing || Thread.currentThread().isInterrupted()) throw new IOException("Activity closing or collector cancelled before launch");
+            if (!owned.isEmpty() || !retainedGuests.isEmpty()) throw new IOException("Prior owned process/uncertainty retained; refuse another launch");
             p = pb.start();
-            children.add(p);
+            entry = new OwnedInvocation(p, journal, cwd, output, result);
+            owned.add(entry);
         }
-        boolean done = p.waitFor(45, TimeUnit.SECONDS);
-        if (!done) { p.destroyForcibly(); p.waitFor(5, TimeUnit.SECONDS); }
-        children.remove(p);
-        JSONObject result = new JSONObject();
-        result.put("name", name).put("exit", done ? p.exitValue() : -1).put("timeout", !done)
-            .put("output_truncated", output.length() > 32768);
-        try (FileInputStream stream = new FileInputStream(output)) {
-            byte[] bytes = new byte[32768];
-            int length = stream.read(bytes);
-            result.put("output", new String(bytes, 0, Math.max(length, 0), "UTF-8"));
+        result.put("phase", "waiting").put("retained_ownership", true);
+        writeJson(journal, result);
+        boolean done = false, cancelled = false;
+        long remaining = Math.max(0, deadlineMs - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+        try { done = p.waitFor(remaining, TimeUnit.MILLISECONDS); }
+        catch (InterruptedException error) { cancelled = true; Thread.currentThread().interrupt(); }
+        cancelled = cancelled || closing;
+        result.put("exit", done ? p.exitValue() : -1).put("timeout", !done && !cancelled)
+            .put("cancelled", cancelled).put("direct_child_exit_observed", done)
+            .put("process_alive_after_wait", p.isAlive())
+            .put("termination_attempted", false).put("output_accepted", false)
+            .put("output_truncated", false).put("output_overflow", false)
+            .put("output_bytes_observed", output.length()).put("phase", done && !cancelled ? "direct-child-exited" : "retained-uncertain");
+        if (done && !cancelled) {
+            try {
+                String text = completeOutput(output);
+                singleObject(text); // Partial JSON or a valid prefix followed by more data cannot pass.
+                result.put("output", text).put("output_accepted", true)
+                    .put("output_sha256", hex(java.security.MessageDigest.getInstance("SHA-256").digest(text.getBytes("UTF-8"))));
+            } catch (IOException | org.json.JSONException error) {
+                boolean overflow = output.length() > 65536;
+                result.put("output_error", error.toString()).put("output_overflow", overflow).put("output_truncated", overflow);
+            }
+            result.put("retained_ownership", false);
+        } else {
+            result.put("output_error", "Unfinished/cancelled owner: output not accepted; process reference, files and uncertainty retained")
+                .put("next_action", "Stop launching; independently reconcile retained owner and descendants. No automatic signal, restart or cleanup.");
         }
+        result.put("elapsed_ms", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+        writeJson(journal, result);
+        if (done && !cancelled) synchronized (owned) { owned.remove(entry); }
         return result;
     }
 
@@ -199,10 +325,14 @@ public final class ProbeActivity extends Activity {
         env.put("APK_PROBE_RUN_ID", report.getString("run_id"));
         env.put("APK_SOURCE_COMMIT", report.getString("source_commit"));
         env.put("APK_NATIVE_PROVENANCE_SHA256", report.getString("native_provenance_sha256"));
+        requireNoRetainedOwner();
         Process process = pb.start();
         // Never SIGKILL PRoot/PG on a diagnostic deadline. Preserve retained runtime for inspection.
         // This short diagnostic is not a foreground service or owner-loss acceptance.
-        boolean done = process.waitFor(300, TimeUnit.SECONDS);
+        boolean done = false;
+        try { done = process.waitFor(300, TimeUnit.SECONDS); }
+        catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        if (!done) synchronized (owned) { retainedGuests.add(process); }
         JSONObject result = new JSONObject().put("name", "real-guest-runtime").put("timeout", !done)
             .put("exit", done ? process.exitValue() : -1).put("state_relative", "g-" + report.getString("run_id").substring(0, 8) + "/s")
             .put("retained_runtime", !done).put("stack_acceptance", false);
@@ -216,6 +346,123 @@ public final class ProbeActivity extends Activity {
             result.put("report", guest);
         }
         return result;
+    }
+
+    private void finiteFixtureOracle(JSONObject result) throws Exception {
+        OwnedInvocation entry = null;
+        synchronized (owned) {
+            for (OwnedInvocation candidate : owned) {
+                if (candidate.result == result) entry = candidate;
+            }
+        }
+        if (entry == null) throw new IOException("Finite fixture owner reference missing");
+        // Only this test harness clears its deliberately injected interruption.
+        // The collector's cancelled/deadline result is never relabeled successful.
+        boolean interrupted = Thread.interrupted();
+        JSONObject oracle = new JSONObject().put("scope", "known finite one-child fixture only")
+            .put("cancel_flag_observed", interrupted).put("signals_sent", false);
+        result.put("fixture_oracle", oracle);
+        boolean done = entry.process.waitFor(5, TimeUnit.SECONDS);
+        oracle.put("direct_owner_exit_observed", done);
+        if (!done) {
+            writeJson(entry.journal, result);
+            throw new IOException("Finite fixture did not finish; owner/uncertainty retained, stop controls");
+        }
+        JSONObject parent = singleObject(completeOutput(entry.output));
+        JSONObject child = singleObject(completeOutput(new File(entry.cwd, "child.done")));
+        boolean matched = entry.process.exitValue() == 0 && parent.getString("fixture").equals("family")
+            && parent.getInt("owned_children") == 1 && parent.getBoolean("specific_child_reaped")
+            && parent.getInt("child_status") == 0 && child.getBoolean("finite_child_done")
+            && parent.getString("source_id").equals(runIdentity.getString("fixture_source_sha256"))
+            && parent.getLong("child_pid") == child.getLong("pid")
+            && parent.getLong("child_start_ticks") == child.getLong("start_ticks")
+            && child.getLong("start_ticks") > 0;
+        oracle.put("parent", parent).put("child", child).put("exact_finite_fixture_cleanup", matched)
+            .put("general_descendant_completeness", false);
+        result.put("fixture_reference_released_after_oracle", matched);
+        writeJson(entry.journal, result);
+        if (!matched) throw new IOException("Finite fixture cleanup mismatch; retain owner/uncertainty");
+        synchronized (owned) { owned.remove(entry); }
+    }
+
+    private void wrapperControls(JSONArray checks, JSONObject report, String lib, JSONObject build) throws Exception {
+        String fixture = lib + "/libcollector_fixture.so";
+        Set<String> cwds = new HashSet<>();
+        for (String name : Arrays.asList("wrapper-cwd-one", "wrapper-cwd-two")) {
+            JSONObject value = execute(name, Arrays.asList(fixture, "cwd"), Collections.emptyMap(), attempt);
+            checks.put(value);
+            JSONObject observed = singleObject(value.getString("output"));
+            boolean ok = value.getBoolean("cwd_fresh_empty") && observed.getBoolean("empty_before_launch")
+                && value.getString("cwd").equals(observed.getString("cwd")) && cwds.add(observed.getString("cwd"))
+                && observed.getString("source_id").equals(runIdentity.getString("fixture_source_sha256"));
+            String installed = fileSha(new File(fixture));
+            ok &= installed.equals(build.getJSONObject("native_files").getString("lib/" + observed.getString("abi") + "/libcollector_fixture.so"));
+            report.put("fixture_executable_sha256", installed);
+            value.put("fixture_control_pass", ok);
+            if (!ok) throw new IOException("Fresh cwd control failed");
+        }
+        Map<String, String> env = new HashMap<>();
+        env.put("PROOT_LOADER", lib + "/libproot_loader.so");
+        env.put("PROOT_TMP_DIR", new File(attempt, "proot-tmp").getAbsolutePath());
+        env.put("PROOT_NO_SECCOMP", "1"); env.put("PROOT_DONT_SHARE_LIBANDROID_SHMEM", "1");
+        JSONObject proot = executeProot("wrapper-proot-cwd", Arrays.asList(fixture, "cwd"), env, lib);
+        checks.put(proot);
+        JSONObject observed = singleObject(proot.getString("output"));
+        boolean fresh = proot.getBoolean("cwd_fresh_empty") && observed.getBoolean("empty_before_launch")
+            && proot.getString("cwd").equals(observed.getString("cwd")) && cwds.add(observed.getString("cwd"));
+        proot.put("fixture_control_pass", fresh);
+        if (!fresh) throw new IOException("PRoot cwd control failed");
+        JSONObject exact = execute("wrapper-exact-64k", Arrays.asList(fixture, "bytes", "65536"), Collections.emptyMap(), attempt);
+        checks.put(exact);
+        exact.put("fixture_control_pass", exact.getBoolean("output_accepted") && exact.getLong("output_bytes_observed") == 65536
+            && exact.getString("output").getBytes("UTF-8").length == 65536);
+        for (String kind : Arrays.asList("overflow", "partial", "trailing")) {
+            List<String> args = kind.equals("overflow") ? Arrays.asList(fixture, "bytes", "65537") : Arrays.asList(fixture, kind);
+            JSONObject value = execute("wrapper-" + kind, args, Collections.emptyMap(), attempt);
+            checks.put(value);
+            value.put("fixture_control_pass", !value.getBoolean("output_accepted") && !value.has("output")
+                && (kind.equals("overflow") == value.getBoolean("output_overflow")));
+        }
+        JSONObject deadline = collect("wrapper-deadline", cwd -> Arrays.asList(fixture, "family"), Collections.emptyMap(), "native-fixture", 250);
+        checks.put(deadline);
+        boolean timed = deadline.getBoolean("timeout") && deadline.getBoolean("retained_ownership")
+            && !deadline.getBoolean("output_accepted") && !deadline.getBoolean("termination_attempted")
+            && deadline.getLong("elapsed_ms") >= 250;
+        boolean blocked = false;
+        try { execute("wrapper-must-not-launch", Arrays.asList(fixture, "cwd"), Collections.emptyMap(), attempt); }
+        catch (IOException expected) { blocked = true; }
+        deadline.put("new_launch_refused_while_retained", blocked);
+        timed &= blocked;
+        finiteFixtureOracle(deadline);
+        deadline.put("fixture_control_pass", timed);
+        Thread collector = Thread.currentThread();
+        Thread cancellation = new Thread(() -> {
+            try { Thread.sleep(250); collector.interrupt(); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        }, "finite-fixture-cancel");
+        cancellation.start();
+        JSONObject cancelled;
+        try {
+            cancelled = collect("wrapper-cancel", cwd -> Arrays.asList(fixture, "family"), Collections.emptyMap(), "native-fixture", 45000);
+            checks.put(cancelled);
+        } finally {
+            boolean interrupted = Thread.interrupted();
+            cancellation.join();
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+        boolean stopped = cancelled.getBoolean("cancelled") && cancelled.getBoolean("retained_ownership")
+            && !cancelled.getBoolean("output_accepted") && !cancelled.getBoolean("termination_attempted");
+        boolean cancelBlocked = false;
+        try { execute("wrapper-must-not-launch-cancel", Arrays.asList(fixture, "cwd"), Collections.emptyMap(), attempt); }
+        catch (IOException expected) { cancelBlocked = true; }
+        cancelled.put("new_launch_refused_while_retained", cancelBlocked);
+        stopped &= cancelBlocked;
+        finiteFixtureOracle(cancelled);
+        cancelled.put("fixture_control_pass", stopped);
+        boolean all = true;
+        for (int i = 0; i < checks.length(); ++i) all &= checks.getJSONObject(i).getBoolean("fixture_control_pass");
+        report.put("wrapper_fixture_controls_pass", all).put("production_ownership", false)
+            .put("owner_death_solution", false);
     }
 
     @Override public void onCreate(Bundle state) {
@@ -243,7 +490,7 @@ public final class ProbeActivity extends Activity {
             }, "retained-report-export").start();
             return; // No probes, state writes or process lifecycle actions in this mode.
         }
-        new Thread(() -> {
+        probeWorker = new Thread(() -> {
             JSONObject report = new JSONObject();
             File dir = new File(getFilesDir(), "probe-v1");
             try {
@@ -260,10 +507,58 @@ public final class ProbeActivity extends Activity {
                         .put("packaged_abis", build.getJSONArray("abis"));
                 }
                 if (!dir.isDirectory() && !dir.mkdir()) throw new IOException("Cannot create probe state");
-                Files.deleteIfExists(new File(dir, "report.json").toPath());
+                File previous = new File(dir, "report.json");
+                if (previous.isFile()) {
+                    JSONObject saved = singleObject(new String(Files.readAllBytes(previous.toPath()), "UTF-8"));
+                    String id = saved.getString("run_id");
+                    if (!id.matches("[0-9a-f-]{36}")) throw new IOException("Prior report identity invalid; preserving it");
+                    File history = new File(dir, "history");
+                    if (!history.isDirectory() && !history.mkdir()) throw new IOException("Cannot preserve prior report");
+                    File target = new File(history, id + ".json");
+                    if (!target.exists()) Files.copy(previous.toPath(), target.toPath());
+                }
+                report.put("debuggable", (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0)
+                    .put("build_fingerprint", android.os.Build.FINGERPRINT).put("schema", 1)
+                    .put("target_sdk", getApplicationInfo().targetSdkVersion).put("device_api", android.os.Build.VERSION.SDK_INT)
+                    .put("abis", new JSONArray(Arrays.asList(android.os.Build.SUPPORTED_ABIS)));
+                try { report.put("selinux_domain", new String(Files.readAllBytes(java.nio.file.Paths.get("/proc/self/attr/current")), "UTF-8").trim()); }
+                catch (IOException error) { report.put("selinux_domain", "unknown: " + error.getClass().getSimpleName()); }
+                JSONArray signatures = new JSONArray();
+                android.content.pm.PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES);
+                for (android.content.pm.Signature signature : packageInfo.signingInfo.getApkContentsSigners()) {
+                    signatures.put(hex(java.security.MessageDigest.getInstance("SHA-256").digest(signature.toByteArray())));
+                }
+                report.put("package_signer_sha256", signatures);
+                report.put("installed_apk_sha256", fileSha(new File(getApplicationInfo().sourceDir)));
+                runIdentity = new JSONObject().put("run_id", report.getString("run_id"))
+                    .put("source_commit", report.getString("source_commit"))
+                    .put("native_provenance_sha256", report.getString("native_provenance_sha256"))
+                    .put("debuggable", report.getBoolean("debuggable")).put("target_sdk", getApplicationInfo().targetSdkVersion)
+                    .put("device_api", android.os.Build.VERSION.SDK_INT).put("java_owner_pid", android.os.Process.myPid())
+                    .put("java_owner_uid", android.os.Process.myUid()).put("package_signer_sha256", signatures)
+                    .put("installed_apk_sha256", report.getString("installed_apk_sha256"))
+                    .put("build_fingerprint", report.getString("build_fingerprint")).put("selinux_domain", report.getString("selinux_domain"));
+                String selfStat = new String(Files.readAllBytes(java.nio.file.Paths.get("/proc/self/stat")), "UTF-8");
+                String[] selfFields = selfStat.substring(selfStat.lastIndexOf(')') + 2).trim().split("\\s+");
+                runIdentity.put("java_owner_start_ticks", Long.parseLong(selfFields[19]))
+                    .put("boot_id", new String(Files.readAllBytes(java.nio.file.Paths.get("/proc/sys/kernel/random/boot_id")), "UTF-8").trim());
+                attempt = new File(dir, "attempt-" + (report.getBoolean("debuggable") ? "debug-" : "nondebug-") + report.getString("run_id"));
+                if (!attempt.mkdir()) throw new IOException("Attempt must be fresh; preserving prior state");
+                android.system.Os.chmod(attempt.getAbsolutePath(), 0700);
+                for (String name : Arrays.asList("work", "reports", "proot-tmp")) {
+                    File child = new File(attempt, name);
+                    if (!child.mkdir()) throw new IOException("Cannot create attempt root");
+                    android.system.Os.chmod(child.getAbsolutePath(), 0700);
+                }
+                report.put("attempt", attempt.getAbsolutePath());
                 String lib = getApplicationInfo().nativeLibraryDir;
                 String probe = lib + "/libruntime_probe.so";
                 JSONArray checks = new JSONArray();
+                report.put("checks", checks);
+                if (build.optBoolean("wrapper_controls_only", false)) {
+                    runIdentity.put("fixture_source_sha256", build.getJSONObject("wrapper_fixture").getString("source_sha256"));
+                    wrapperControls(checks, report, lib, build);
+                } else {
                 checks.put(execute("packaged-native", Arrays.asList(probe, "identity"),
                                    Collections.emptyMap(), dir));
                 checks.put(execute("filesystem-syscalls", Arrays.asList(probe, "filesystem-syscalls"),
@@ -281,13 +576,10 @@ public final class ProbeActivity extends Activity {
                 env.put("PROOT_TMP_DIR", dir.getAbsolutePath());
                 env.put("PROOT_NO_SECCOMP", "1");
                 env.put("PROOT_DONT_SHARE_LIBANDROID_SHMEM", "1");
-                checks.put(execute("packaged-proot", Arrays.asList(lib + "/libproot.so", "-v", "0",
-                    "-r", "/", "-w", dir.getAbsolutePath(), probe, "identity"), env, dir));
-                checks.put(execute("proot-owner-control", Arrays.asList(lib + "/libproot.so", "-v", "0",
-                    "-r", "/", "-w", dir.getAbsolutePath(), probe, "owner-control"), env, dir));
+                checks.put(executeProot("packaged-proot", Arrays.asList(probe, "identity"), env, lib));
+                checks.put(executeProot("proot-owner-control", Arrays.asList(probe, "owner-control"), env, lib));
                 // A PRoot-loaded writable ELF is a separate control from direct execve.
-                checks.put(execute("proot-writable-guest", Arrays.asList(lib + "/libproot.so", "-v", "0",
-                    "-r", "/", "-w", dir.getAbsolutePath(), writable.getPath(), "identity"), env, dir));
+                checks.put(executeProot("proot-writable-guest", Arrays.asList(writable.getPath(), "identity"), env, lib));
                 JSONObject components = build.optJSONObject("peer_components");
                 if (components != null && components.has("process")) {
                     JSONArray cases = components.getJSONObject("process").getJSONArray("cases");
@@ -296,11 +588,11 @@ public final class ProbeActivity extends Activity {
                         String executable = lib + "/libschemii_proc_discovery.so";
                         checks.put(execute("process-native-" + candidate,
                             Arrays.asList(executable, "proc-discovery-control", "--case", candidate), Collections.emptyMap(), dir));
-                        checks.put(execute("process-proot-" + candidate,
-                            Arrays.asList(lib + "/libproot.so", "-v", "0", "-r", "/", "-w", dir.getAbsolutePath(),
-                                executable, "proc-discovery-control", "--case", candidate), env, dir));
+                        checks.put(executeProot("process-proot-" + candidate,
+                            Arrays.asList(executable, "proc-discovery-control", "--case", candidate), env, lib));
                     }
                 }
+                requireNoRetainedOwner();
                 String executedAbi = new JSONObject(checks.getJSONObject(0).getString("output").trim()).getString("abi");
                 JSONObject guest = runGuest(dir, lib, executedAbi, build, report);
                 if (guest != null) checks.put(guest);
@@ -322,6 +614,7 @@ public final class ProbeActivity extends Activity {
                     }
                     checks.put(network);
                 }
+                }
                 report.put("debuggable", (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0)
                     .put("build_fingerprint", android.os.Build.FINGERPRINT);
                 try {
@@ -337,14 +630,14 @@ public final class ProbeActivity extends Activity {
                 catch (Exception ignored) { /* JSONObject keys above are constants. */ }
             }
             try {
-                File temporary = new File(dir, "report.tmp");
-                try (FileOutputStream out = new FileOutputStream(temporary)) {
-                    out.write((report.toString(2) + "\n").getBytes("UTF-8"));
-                    out.getFD().sync();
+                JSONArray retained = new JSONArray();
+                synchronized (owned) {
+                    for (OwnedInvocation entry : owned) retained.put(entry.result);
+                    report.put("retained_guest_owners", retainedGuests.size());
                 }
-                Files.move(temporary.toPath(), new File(dir, "report.json").toPath(),
-                           java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                           java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                report.put("retained_invocations", retained);
+                if (attempt != null) writeJson(new File(attempt, "report.json"), report);
+                writeJson(new File(dir, "report.json"), report);
             } catch (Exception error) {
                 try { report.put("report_write_error", error.toString()); }
                 catch (Exception ignored) { /* Fixed JSON key. */ }
@@ -355,12 +648,15 @@ public final class ProbeActivity extends Activity {
                 }
             } catch (Exception error) { /* Private report remains authoritative; absent log chunks are incomplete evidence. */ }
             runOnUiThread(() -> view.setText(report.toString()));
-        }, "runtime-probes").start();
+        }, "runtime-probes");
+        probeWorker.start();
     }
 
     @Override protected void onDestroy() {
         closing = true;
-        synchronized (children) { for (Process p : children) p.destroyForcibly(); }
+        // Interrupt collection, never kill an owner or discard its descendants.
+        Thread worker = probeWorker;
+        if (worker != null) worker.interrupt();
         super.onDestroy();
     }
 }

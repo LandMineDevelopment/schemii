@@ -36,7 +36,7 @@ def elf(machine=183, alignment=16384, flags=5):
 
 class BuildControls(unittest.TestCase):
     def test_native_reuse_recipe_binds_flags_and_abi_mapping(self):
-        source = "ABI_TRIPLES = {'x': 'triple'}\ndef native(cache, out, abi):\n return ['-fPIE']\n"
+        source = "ABI_TRIPLES = {'x': 'triple'}\ndef run(): pass\ndef digest(): pass\ndef native(cache, out, abi):\n return ['-fPIE']\n"
         self.assertEqual(
             build.native_recipe(source),
             build.native_recipe(source + "\n# unrelated comment\n"),
@@ -48,6 +48,12 @@ class BuildControls(unittest.TestCase):
         self.assertNotEqual(
             build.native_recipe(source),
             build.native_recipe(source.replace("triple", "other")),
+        )
+        self.assertNotEqual(
+            build.native_recipe(source),
+            build.native_recipe(
+                source.replace("def run(): pass", "def run(): return 1")
+            ),
         )
 
     def test_native_reuse_requires_unambiguous_recipe(self):
