@@ -526,6 +526,15 @@ __PRODUCTION__
         emit("report_write_failed", io);
         Journal ioRestored = new Journal(io.directory, "p1b-01", COMMIT, SOURCE, PROVENANCE);
         ioRestored.recover(validator); emit("report_lost", ioRestored);
+        // Remove only this fixture's empty obstructing directory. Recovery now
+        // sees an absent report despite the retained report-persist failure.
+        byte[] ioStart = Files.readAllBytes(io.file("started").toPath());
+        byte[] ioTerminal = Files.readAllBytes(io.file("terminal.record").toPath());
+        Files.delete(io.file("report.json").toPath());
+        Journal ioAbsent = new Journal(io.directory, "p1b-01", COMMIT, SOURCE, PROVENANCE);
+        ioAbsent.recover(validator); emit("report_absent_recovered", ioAbsent);
+        require(Arrays.equals(ioStart, Files.readAllBytes(ioAbsent.file("started").toPath())));
+        require(Arrays.equals(ioTerminal, Files.readAllBytes(ioAbsent.file("terminal.record").toPath())));
         Journal end = create(root, "terminal_io");
         end.run(j -> { j.phase("report-build"); require(j.file("terminal.record").mkdir()); return report; }, validator);
         emit("terminal_write_failed", end);
@@ -583,7 +592,7 @@ __PRODUCTION__
                 line.split(" ", 1) for line in result.stdout.splitlines()
             )
         }
-        self.assertEqual(len(bundles), 13)
+        self.assertEqual(len(bundles), 14)
         for label, bundle in bundles.items():
             with self.subTest(label=label):
                 validated = validate_diagnostics(bundle, p, identity)
@@ -593,6 +602,16 @@ __PRODUCTION__
                 )
                 self.assertFalse(validated["owner_authority"])
                 self.assertFalse(validated["recovery_acceptance"])
+                complete = label in (
+                    "load",
+                    "load_recovered",
+                    "success",
+                    "export_recovered",
+                    "java_error",
+                    "interrupted",
+                )
+                self.assertEqual(validated["diagnostic_complete"], complete)
+                self.assertEqual(validated["evidence_loss"], not complete)
                 self.assertNotIn(
                     "must-never-export-original-exception-text", json.dumps(bundle)
                 )
@@ -605,6 +624,18 @@ __PRODUCTION__
             self.assertEqual(terminal["run_id"], "p1b-01")
             self.assertEqual(terminal["source_sha256"], identity["source_sha256"])
             self.assertIsNone(bundles[label]["report"]["json"])
+        absent = bundles["report_absent_recovered"]
+        self.assertEqual(absent["report"]["storage"], "absent")
+        self.assertEqual(absent["terminal"]["storage"], "readback-valid")
+        self.assertEqual(absent["terminal"]["event"]["phase"], "report-persist")
+        for phase in ("report-persist", "terminal-persist"):
+            late = copy.deepcopy(absent)
+            late["terminal"]["event"]["phase"] = phase
+            validated = validate_diagnostics(late, p, identity)
+            with self.subTest(missing_report_phase=phase):
+                self.assertFalse(validated["diagnostic_complete"])
+                self.assertTrue(validated["evidence_loss"])
+                self.assertFalse(validated["observation_complete"])
         self.assertTrue(
             validate_diagnostics(bundles["export_recovered"], p, identity)[
                 "prior_export_failure"

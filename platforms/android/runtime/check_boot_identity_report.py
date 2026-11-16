@@ -715,7 +715,11 @@ def check_diagnostics(bundle, p, identity, **expected):
         and bundle["export_loss"]["storage"] in valid_storage | {"absent"}
         and payload["storage"] in valid_storage | {"absent"}
     )
-    if succeeded:
+    report_required = succeeded or (
+        terminal is not None
+        and terminal["phase"] in ("report-persist", "terminal-persist")
+    )
+    if report_required:
         complete = complete and has_report
     observation = complete and succeeded and measured is not None
     return {
