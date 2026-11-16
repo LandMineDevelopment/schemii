@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "status": "provisional-feasibility-only",
+  "status": "connected-source-refusal; execution-not-admitted",
   "application_id": "development.landmine.schemii.runtimeprobe",
   "compile_sdk": 36,
   "target_sdk": 36,
@@ -21,16 +21,17 @@
     "environment": {
       "PROOT_NO_SECCOMP": "1",
       "PROOT_DONT_SHARE_LIBANDROID_SHMEM": "1"
-    }
+    },
+    "composed_source": "verified assets/shared + assets/runtime-source; compiled independent inventories"
   },
   "storage": {
     "default": "credential-protected",
     "probe_relative_root": "probe-v1",
     "device_protected": "not-implemented; opt-in owner267",
-    "state_and_control_roots": "host supplies selected roots; no fallback or reset"
+    "state_and_control_roots": "selected CE default; explicit source API DE selection, no receiver or pre-PIN acceptance"
   },
   "endpoints": {
-    "status": "consumed-by-disposable-guest-probe; shared-supervisor-pending",
+    "status": "shared-Runtime-and-Pi-listener-profile; execution-not-admitted",
     "host": "127.0.0.1",
     "metadata_postgres": 15433,
     "target_postgres": 15434,
@@ -41,16 +42,17 @@
     "conflicts": "refuse before init; no automatic alternate port"
   },
   "control": {
-    "supervisor": "reuse canonical Python lifecycle; adapter parameterization pending ownership",
+    "supervisor": "canonical dev/android/runtime.py; production APK admission refused before initialization",
     "operations": [
       "run-attached",
       "stop",
       "status"
     ],
     "owner_identity": "pid + start_ticks + boot_id; never pid alone",
-    "descendant_identity": "blocked: task/children unavailable in API36 emulator app",
+    "descendant_identity": "UNKNOWN; pinned PRoot birth/export race and native helpers not closed",
     "shutdown": "bounded graceful stop; no forced PostgreSQL cleanup",
-    "ready": false
+    "ready": false,
+    "native_owner": "FGS + private native AF_UNIX lease; R-only observation; C/A UNKNOWN; no birth or journal grant"
   },
   "runtime_acceptance": "pending"
 }

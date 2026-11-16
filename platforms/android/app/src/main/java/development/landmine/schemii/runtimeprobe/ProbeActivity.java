@@ -664,6 +664,25 @@ public final class ProbeActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        if (development.landmine.schemii.android.host.HostService.available()) {
+            android.widget.LinearLayout panel = new android.widget.LinearLayout(this);
+            panel.setOrientation(android.widget.LinearLayout.VERTICAL); panel.setPadding(24,48,24,24);
+            TextView status = new TextView(this);
+            status.setText(development.landmine.schemii.android.host.HostService.statusText);
+            status.setAccessibilityLiveRegion(android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE);
+            panel.addView(status);
+            for (String action : new String[]{"start","stop","status"}) {
+                android.widget.Button button = new android.widget.Button(this);
+                button.setText(action.substring(0,1).toUpperCase(java.util.Locale.ROOT)+action.substring(1));
+                button.setOnClickListener(v -> {
+                    if (!action.equals("status")) startForegroundService(new Intent(this,
+                        development.landmine.schemii.android.host.HostService.class).setAction(action));
+                    status.postDelayed(() -> status.setText(development.landmine.schemii.android.host.HostService.statusText),300);
+                });
+                panel.addView(button);
+            }
+            setContentView(panel); return;
+        }
         TextView view = new TextView(this);
         view.setPadding(24, 40, 24, 24);
         view.setText("Running disposable native execution controls…");

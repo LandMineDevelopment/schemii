@@ -44,6 +44,20 @@ def source(tmp_path):
 def change(root, name, old, new):
     path = root / name
     text = path.read_text()
+    if old not in text and old.startswith(("self._bootstrap(", "self._cluster(")):
+        # Locate the same actual call/prefix through formatter whitespace and
+        # its optional trailing comma; retain all original mutation semantics.
+        indexed = [(i, c) for i, c in enumerate(text) if not c.isspace()]
+        indexed = [
+            (i, c)
+            for j, (i, c) in enumerate(indexed)
+            if not (c == "," and j + 1 < len(indexed) and indexed[j + 1][1] == ")")
+        ]
+        compact = "".join(c for _, c in indexed)
+        wanted = "".join(old.split()).replace(",)", ")")
+        start = compact.find(wanted)
+        if start >= 0:
+            old = text[indexed[start][0] : indexed[start + len(wanted) - 1][0] + 1]
     assert old in text
     path.write_text(text.replace(old, new))
 
@@ -94,8 +108,8 @@ def test_current_adapters_have_one_runtime_contract():
         ("dev/android/runtime.py", "fsync = on", "fsync = off", "durability/security"),
         (
             "dev/android/runtime.py",
-            "port=5433 dbname=schemii",
-            "port=5434 dbname=schemii",
+            "port={self.endpoints.metadata} dbname=schemii",
+            "port={self.endpoints.target} dbname=schemii",
             "metadata endpoint",
         ),
         ("dev/android/runtime.py", '"localhost,127.0.0.1,::1"', '""', "fence alias"),
@@ -172,14 +186,29 @@ def test_real_adapter_drift_fails(source, path, old, new, failure):
 @pytest.mark.parametrize(
     ("old", "new"),
     [
-        ('self._cluster("target", 5434)', 'self._cluster("target", 5433)'),
-        ('self._cluster("metadata", 5433)', 'self._cluster("metadata", 5434)'),
-        ('self._cluster("target", 5434)', 'self._cluster("metadata", 5434)'),
-        ('self._cluster("target", 5434)', 'self._cluster("unexpected", 5434)'),
-        ('self._cluster("target", 5434)', "pass  # target startup omitted"),
         (
-            'self._cluster("target", 5434)',
-            'self._cluster("target", 5434); self._cluster("target", 5434)',
+            'self._cluster("target", self.endpoints.target)',
+            'self._cluster("target", self.endpoints.metadata)',
+        ),
+        (
+            'self._cluster("metadata", self.endpoints.metadata)',
+            'self._cluster("metadata", self.endpoints.target)',
+        ),
+        (
+            'self._cluster("target", self.endpoints.target)',
+            'self._cluster("metadata", self.endpoints.target)',
+        ),
+        (
+            'self._cluster("target", self.endpoints.target)',
+            'self._cluster("unexpected", self.endpoints.target)',
+        ),
+        (
+            'self._cluster("target", self.endpoints.target)',
+            "pass  # target startup omitted",
+        ),
+        (
+            'self._cluster("target", self.endpoints.target)',
+            'self._cluster("target", self.endpoints.target); self._cluster("target", self.endpoints.target)',
         ),
     ],
 )
@@ -192,16 +221,22 @@ def test_actual_cluster_startup_endpoints_cannot_drift(source, old, new):
 @pytest.mark.parametrize(
     ("old", "new"),
     [
-        ('self._bootstrap("target", 5434,', 'self._bootstrap("target", 5433,'),
-        ('self._bootstrap("target", 5434,', 'self._bootstrap("metadata", 5434,'),
         (
-            'self._bootstrap("target", 5434, "schemii_target", "target_password")',
+            'self._bootstrap("target", self.endpoints.target,',
+            'self._bootstrap("target", self.endpoints.metadata,',
+        ),
+        (
+            'self._bootstrap("target", self.endpoints.target,',
+            'self._bootstrap("metadata", self.endpoints.target,',
+        ),
+        (
+            'self._bootstrap("target", self.endpoints.target, "schemii_target", "target_password")',
             "pass  # target bootstrap omitted",
         ),
         (
-            'self._bootstrap("target", 5434, "schemii_target", "target_password")',
-            'self._bootstrap("target", 5434, "schemii_target", "target_password"); '
-            'self._bootstrap("target", 5434, "schemii_target", "target_password")',
+            'self._bootstrap("target", self.endpoints.target, "schemii_target", "target_password")',
+            'self._bootstrap("target", self.endpoints.target, "schemii_target", "target_password"); '
+            'self._bootstrap("target", self.endpoints.target, "schemii_target", "target_password")',
         ),
     ],
 )
@@ -702,7 +737,7 @@ def test_packaged_runtime_is_exact_separate_composition(apk_runtime_package):
     )
     result = check_apk_runtime_sources(root, shared, adapters, record, commit)
     assert result["status"] == "passed"
-    assert result["adapter_file_count"] == 4
+    assert result["adapter_file_count"] == 5
     assert result["execution"] == "NOT_RUN"
     assert result["readiness"] == "PENDING"
 
@@ -768,3 +803,38 @@ def test_packaged_runtime_refuses_changed_symlinked_and_wrong_source(
         check_apk_runtime_sources(root, shared, adapters, record, commit)
     with pytest.raises(ParityError):
         check_apk_runtime_sources(root, shared, adapters, record, "0" * 40)
+
+
+@pytest.mark.parametrize(
+    ("path", "old", "new", "message"),
+    [
+        (
+            "ai/prototype/server.js",
+            "server.listen(listenerPort(), listenerHost())",
+            "server.listen(4097, listenerHost())",
+            "Pi listener",
+        ),
+        (
+            "dev/android/nginx.conf.in",
+            "127.0.0.1:@APP_PORT@",
+            "127.0.0.1:8000",
+            "ingress endpoint",
+        ),
+        (
+            "dev/android/runtime.py",
+            '"apk": cls(15433, 15434, 14097, 18000, 18443)',
+            '"apk": cls(15433, 15434, 4097, 18000, 18443)',
+            "endpoint profile",
+        ),
+        (
+            "dev/android/runtime.py",
+            '"port": self.endpoints.target',
+            '"port": 5434',
+            "fixed endpoint",
+        ),
+    ],
+)
+def test_composed_endpoint_consumers_cannot_drift(source, path, old, new, message):
+    change(source, path, old, new)
+    with pytest.raises(ParityError, match=message):
+        check(source)

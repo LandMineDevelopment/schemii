@@ -78,6 +78,22 @@
       "sql_locale": "Debian/glibc PostgreSQL 17 (observed 17.12); package patch version recorded at install. Explicit COLLATE \"C\" matched comparison outputs; do not normalize product SQL.",
       "proot_environment": {
         "PROOT_DONT_SHARE_LIBANDROID_SHMEM": "1"
+      },
+      "endpoint_profiles": {
+        "termux": {
+          "metadata": 5433,
+          "target": 5434,
+          "pi": 4097,
+          "app": 8000,
+          "ingress": 8001
+        },
+        "apk": {
+          "metadata": 15433,
+          "target": 15434,
+          "pi": 14097,
+          "app": 18000,
+          "ingress": 18443
+        }
       }
     }
   },
