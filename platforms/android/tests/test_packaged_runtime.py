@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import stat
 import struct
+import subprocess
 from types import SimpleNamespace
 import zipfile
 
@@ -179,8 +180,8 @@ def test_byte_mode_inventory_and_link_escape_refusals(tmp_path):
 
 
 def test_independent_anchor_and_source_dependency_binding(tmp_path):
-    lock, record = payload.payload_record("x86_64")
-    data = {}
+    lock, record = payload.payload_record("x86_64", True)
+    data = {"usr/sbin/nginx": elf()}
     for pin in record["wheels"]:
         data["opt/python-packages/" + pin["package"] + ".dist-info/METADATA"] = (
             "Name: " + pin["package"] + "\nVersion: " + pin["version"] + "\n"
@@ -205,8 +206,16 @@ def test_independent_anchor_and_source_dependency_binding(tmp_path):
         "kind": "symlink",
         "target": "/opt/python-packages",
     }
-    shared = {"commit": "synthetic-static-control"}
+    import sys
+
+    sys.path.insert(0, str(payload.ROOT / "scripts"))
+    from check_runtime_parity import apk_source_manifest, apk_runtime_source_manifest
+
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    shared = apk_source_manifest(payload.ROOT, commit)
     manifest = {
+        "profile": "packaged-shared-runtime",
+        "runtime_source": apk_runtime_source_manifest(payload.ROOT, commit),
         "abi": "x86_64",
         "producer_sha256": payload.sha(Path(payload.__file__)),
         "producer_inputs": payload.producer_inputs(),
@@ -248,6 +257,7 @@ def test_independent_anchor_and_source_dependency_binding(tmp_path):
         "contract_sha256",
         "dependencies",
         "shared_source",
+        "runtime_source",
         "elf_inventory",
         "installed_dependencies",
     ):
@@ -334,3 +344,51 @@ def test_unrelated_rpath_cannot_repair_broken_launch_root(tmp_path):
     )
     with pytest.raises(ValueError, match="Missing guest native dependency"):
         payload.inspect_guest(archive, files, "x86_64")
+
+
+def test_frozen_nginx_closure_keeps_existing_diagnostic_pins():
+    lock, diagnostic = payload.payload_record("x86_64")
+    _, packaged = payload.payload_record("x86_64", True)
+    original = lock["abi"]["x86_64"]["packages"]
+    assert diagnostic["packages"] == original
+    assert packaged["packages"][: len(original)] == original
+    extras = packaged["packages"][len(original) :]
+    assert {p["package"] for p in extras} == {
+        "nginx",
+        "nginx-common",
+        "iproute2",
+        "libbpf1",
+        "libelf1t64",
+        "libmnl0",
+        "libtirpc3t64",
+        "libtirpc-common",
+        "libxtables12",
+        "libcap2-bin",
+    }
+    assert (
+        next(p for p in extras if p["package"] == "nginx")["version"]
+        == "1.26.3-3+deb13u10"
+    )
+
+
+@pytest.mark.parametrize("mutation", ["nginx", "origin", "release", "abi"])
+def test_frozen_nginx_dependency_provenance_is_required(
+    tmp_path, monkeypatch, mutation
+):
+    lock = json.loads((payload.HERE / "payload.lock.json").read_text())
+    extra = lock["abi"]["x86_64"]["packaged_runtime_packages"]
+    if mutation == "nginx":
+        lock["abi"]["x86_64"]["packaged_runtime_packages"] = [
+            p for p in extra if p["package"] != "nginx"
+        ]
+    elif mutation == "origin":
+        extra[0]["url"] = "https://unreviewed.invalid/package.deb"
+    elif mutation == "release":
+        for index in lock["packaged_runtime_indexes"]:
+            index["release_sha256"] = "0" * 64
+    else:
+        extra[0]["arch"] = "arm64"
+    (tmp_path / "payload.lock.json").write_text(json.dumps(lock))
+    monkeypatch.setattr(payload, "HERE", tmp_path)
+    with pytest.raises(ValueError, match="nginx closure|provenance drift|ABI drift"):
+        payload.payload_record("x86_64", True)

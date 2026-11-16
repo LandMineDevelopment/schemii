@@ -1087,7 +1087,159 @@
         "version": "22.22.2",
         "checksums_source": "https://nodejs.org/dist/v22.22.2/SHASUMS256.txt",
         "checksums_sha256": "62a55cf160c9005f0e0f0067f30b74ba8081320117c6fee6ce2938604e669d10"
-      }
+      },
+      "packaged_runtime_packages": [
+        {
+          "package": "iproute2",
+          "version": "6.15.0-1",
+          "arch": "arm64",
+          "url": "https://deb.debian.org/debian/pool/main/i/iproute2/iproute2_6.15.0-1_arm64.deb",
+          "filename": "iproute2_6.15.0-1_arm64.deb",
+          "sha256": "6750637e683afeef92690c7a136bace6c277066d644aa0da0adc08e2d6785af6",
+          "source": "iproute2",
+          "frozen_metadata": {
+            "index_sha256": "f97011263173eaccb1a215a28a6ec7ba1f6e5cebd8bb68e8fa0475b1d4021161",
+            "stanza_sha256": "7498aa13e8f24a627db48e81eecba4783b7161f253e2cc8a839dc727410fb29b",
+            "depends": "debconf (>= 0.5) | debconf-2.0, libbpf1 (>= 1:0.6.0), libc6 (>= 2.38), libcap2 (>= 1:2.10), libdb5.3t64, libelf1t64 (>= 0.131), libmnl0 (>= 1.0.3-4~), libselinux1 (>= 3.1~), libtirpc3t64 (>= 1.0.2), libxtables12 (>= 1.6.0+snapshot20161117), libcap2-bin",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libbpf1",
+          "version": "1:1.5.0-3",
+          "arch": "arm64",
+          "url": "https://deb.debian.org/debian/pool/main/libb/libbpf/libbpf1_1.5.0-3_arm64.deb",
+          "filename": "libbpf1_1.5.0-3_arm64.deb",
+          "sha256": "1ca7f600fb8e723a41d6b8220370a6e441f91a1ac513cd59cfeaf4eb2f5136ec",
+          "source": "libbpf (1.5.0-3)",
+          "frozen_metadata": {
+            "index_sha256": "f97011263173eaccb1a215a28a6ec7ba1f6e5cebd8bb68e8fa0475b1d4021161",
+            "stanza_sha256": "c19c7b7c859d2db413b27857550b21370402d4c636f9876173072c5647ba248f",
+            "depends": "libc6 (>= 2.38), libelf1t64 (>= 0.144), zlib1g (>= 1:1.2.3.3)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libcap2-bin",
+          "version": "1:2.75-10+deb13u1+b3",
+          "arch": "arm64",
+          "url": "https://deb.debian.org/debian/pool/main/libc/libcap2/libcap2-bin_2.75-10+deb13u1+b3_arm64.deb",
+          "filename": "libcap2-bin_2.75-10+deb13u1+b3_arm64.deb",
+          "sha256": "13f824b9d3dd08aabfd3374c04b80da79f6be2cc94329d4fca3c098799662bcd",
+          "source": "libcap2 (1:2.75-10+deb13u1)",
+          "frozen_metadata": {
+            "index_sha256": "f97011263173eaccb1a215a28a6ec7ba1f6e5cebd8bb68e8fa0475b1d4021161",
+            "stanza_sha256": "599aadf625a46680f83a1953bd8a049fc54da2d237ef0404ef9a0a98cf6938fb",
+            "depends": "libc6 (>= 2.38), libcap2 (>= 1:2.63)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libelf1t64",
+          "version": "0.192-4",
+          "arch": "arm64",
+          "url": "https://deb.debian.org/debian/pool/main/e/elfutils/libelf1t64_0.192-4_arm64.deb",
+          "filename": "libelf1t64_0.192-4_arm64.deb",
+          "sha256": "815b4265c7d6c89c5bbad456bdeed7af893da6912c9d16cf4c581001927c0e37",
+          "source": "elfutils",
+          "frozen_metadata": {
+            "index_sha256": "f97011263173eaccb1a215a28a6ec7ba1f6e5cebd8bb68e8fa0475b1d4021161",
+            "stanza_sha256": "be4b2f86bcf29f426c4bdb8c61fc91ea06f575946ef8fc68ac063f15023f2089",
+            "depends": "libc6 (>= 2.38), libzstd1 (>= 1.5.5), zlib1g (>= 1:1.1.4)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libmnl0",
+          "version": "1.0.5-3",
+          "arch": "arm64",
+          "url": "https://deb.debian.org/debian/pool/main/libm/libmnl/libmnl0_1.0.5-3_arm64.deb",
+          "filename": "libmnl0_1.0.5-3_arm64.deb",
+          "sha256": "f21bb29056e9ede0031cc411ffa3b1272858fa4b950e1cd9e50756c5c2ece97f",
+          "source": "libmnl",
+          "frozen_metadata": {
+            "index_sha256": "f97011263173eaccb1a215a28a6ec7ba1f6e5cebd8bb68e8fa0475b1d4021161",
+            "stanza_sha256": "a1542bfb62b67cf21a5467be8ff84ed6c73b3b66b5dd3d62424c5aded6b07d87",
+            "depends": "libc6 (>= 2.17)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libtirpc-common",
+          "version": "1.3.6+ds-1",
+          "arch": "all",
+          "url": "https://deb.debian.org/debian/pool/main/libt/libtirpc/libtirpc-common_1.3.6+ds-1_all.deb",
+          "filename": "libtirpc-common_1.3.6+ds-1_all.deb",
+          "sha256": "300f582e2c9151a8d329568c705cadc76252c417147312fe331c4560d2c7a6c3",
+          "source": "libtirpc",
+          "frozen_metadata": {
+            "index_sha256": "f97011263173eaccb1a215a28a6ec7ba1f6e5cebd8bb68e8fa0475b1d4021161",
+            "stanza_sha256": "c3b195e7bcc6371c7c78bee5e426ca1e76c11387726b527deec2992262bca09b",
+            "depends": "",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libtirpc3t64",
+          "version": "1.3.6+ds-1",
+          "arch": "arm64",
+          "url": "https://deb.debian.org/debian/pool/main/libt/libtirpc/libtirpc3t64_1.3.6+ds-1_arm64.deb",
+          "filename": "libtirpc3t64_1.3.6+ds-1_arm64.deb",
+          "sha256": "ae390ce96435829f0d5252305fb9b22001f5bcc85477e452373ddb2a4fa4dbc1",
+          "source": "libtirpc",
+          "frozen_metadata": {
+            "index_sha256": "f97011263173eaccb1a215a28a6ec7ba1f6e5cebd8bb68e8fa0475b1d4021161",
+            "stanza_sha256": "6b313ff9ce36ec222eb968dd1962f2a59de2ccd5fc056042685cb15fcda96d1f",
+            "depends": "libc6 (>= 2.38), libgssapi-krb5-2 (>= 1.17), libtirpc-common (>= 1.3.6+ds-1)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libxtables12",
+          "version": "1.8.11-2",
+          "arch": "arm64",
+          "url": "https://deb.debian.org/debian/pool/main/i/iptables/libxtables12_1.8.11-2_arm64.deb",
+          "filename": "libxtables12_1.8.11-2_arm64.deb",
+          "sha256": "b200a559a4ae1b4ebcee4fb0fcaef6a16ef01abbe3da8887de15e800b1a6440d",
+          "source": "iptables",
+          "frozen_metadata": {
+            "index_sha256": "f97011263173eaccb1a215a28a6ec7ba1f6e5cebd8bb68e8fa0475b1d4021161",
+            "stanza_sha256": "51d4673a1e96f3bed4c12111b516f75f73b77e5381e41e2b4012e27b41767180",
+            "depends": "libc6 (>= 2.34)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "nginx",
+          "version": "1.26.3-3+deb13u10",
+          "arch": "arm64",
+          "url": "https://deb.debian.org/debian-security/pool/updates/main/n/nginx/nginx_1.26.3-3+deb13u10_arm64.deb",
+          "filename": "nginx_1.26.3-3+deb13u10_arm64.deb",
+          "sha256": "3c437f0c988bd93a5222d4ecd52e4de2c0af1a2fcba2453a619a73908dbcf04e",
+          "source": "nginx",
+          "frozen_metadata": {
+            "index_sha256": "24332b4ca630ed49022d79a6ad4101b0a4894e92d34ef9cb5a22015a0fe59bf6",
+            "stanza_sha256": "ecf1536c8681998bf5afb17037ffc391b604e172c0404762749cd0d663a38f31",
+            "depends": "libc6 (>= 2.34), libcrypt1 (>= 1:4.1.0), libpcre2-8-0 (>= 10.22), libssl3t64 (>= 3.0.0), zlib1g (>= 1:1.1.4), iproute2, nginx-common (= 1.26.3-3+deb13u10)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "nginx-common",
+          "version": "1.26.3-3+deb13u10",
+          "arch": "all",
+          "url": "https://deb.debian.org/debian-security/pool/updates/main/n/nginx/nginx-common_1.26.3-3+deb13u10_all.deb",
+          "filename": "nginx-common_1.26.3-3+deb13u10_all.deb",
+          "sha256": "410d048889786394e5706a73f22ee1405b65114eec798881c4a7cfb119026153",
+          "source": "nginx",
+          "frozen_metadata": {
+            "index_sha256": "24332b4ca630ed49022d79a6ad4101b0a4894e92d34ef9cb5a22015a0fe59bf6",
+            "stanza_sha256": "e5b755853f4d5475069940ad929667b91c0bfdf8e8e9dd6220bc632f0948dff8",
+            "depends": "debconf (>= 0.5) | debconf-2.0",
+            "pre_depends": ""
+          }
+        }
+      ]
     },
     "x86_64": {
       "base": {
@@ -2174,7 +2326,159 @@
         "version": "22.22.2",
         "checksums_source": "https://nodejs.org/dist/v22.22.2/SHASUMS256.txt",
         "checksums_sha256": "62a55cf160c9005f0e0f0067f30b74ba8081320117c6fee6ce2938604e669d10"
-      }
+      },
+      "packaged_runtime_packages": [
+        {
+          "package": "iproute2",
+          "version": "6.15.0-1",
+          "arch": "amd64",
+          "url": "https://deb.debian.org/debian/pool/main/i/iproute2/iproute2_6.15.0-1_amd64.deb",
+          "filename": "iproute2_6.15.0-1_amd64.deb",
+          "sha256": "7b2dcade4a83ded723fcab21c5a53c47f29352c9c5e1661a089a1e481b3fb48a",
+          "source": "iproute2",
+          "frozen_metadata": {
+            "index_sha256": "4f2c68d67001d595fbd343f6dbad44468953a51c4d9dec3a4803249f6e295940",
+            "stanza_sha256": "32df2437f67d58ad7ae113ca2bf9aabede3add9e66b7d59b8847077951e9a145",
+            "depends": "debconf (>= 0.5) | debconf-2.0, libbpf1 (>= 1:0.6.0), libc6 (>= 2.38), libcap2 (>= 1:2.10), libdb5.3t64, libelf1t64 (>= 0.131), libmnl0 (>= 1.0.3-4~), libselinux1 (>= 3.1~), libtirpc3t64 (>= 1.0.2), libxtables12 (>= 1.6.0+snapshot20161117), libcap2-bin",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libbpf1",
+          "version": "1:1.5.0-3",
+          "arch": "amd64",
+          "url": "https://deb.debian.org/debian/pool/main/libb/libbpf/libbpf1_1.5.0-3_amd64.deb",
+          "filename": "libbpf1_1.5.0-3_amd64.deb",
+          "sha256": "04c96ead3024888d80d08c8d08cc8cf4589f4614627acc69519f87ffb5adc1c2",
+          "source": "libbpf (1.5.0-3)",
+          "frozen_metadata": {
+            "index_sha256": "4f2c68d67001d595fbd343f6dbad44468953a51c4d9dec3a4803249f6e295940",
+            "stanza_sha256": "a2e181686ebad6669b915e800b30475faa8f53d09f50ec84a67b3102985d1294",
+            "depends": "libc6 (>= 2.38), libelf1t64 (>= 0.144), zlib1g (>= 1:1.2.3.3)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libcap2-bin",
+          "version": "1:2.75-10+deb13u1+b3",
+          "arch": "amd64",
+          "url": "https://deb.debian.org/debian/pool/main/libc/libcap2/libcap2-bin_2.75-10+deb13u1+b3_amd64.deb",
+          "filename": "libcap2-bin_2.75-10+deb13u1+b3_amd64.deb",
+          "sha256": "6404b8ee315ce3eb8e273981650e419ff0e91aed5213d4975a6895f98944ea80",
+          "source": "libcap2 (1:2.75-10+deb13u1)",
+          "frozen_metadata": {
+            "index_sha256": "4f2c68d67001d595fbd343f6dbad44468953a51c4d9dec3a4803249f6e295940",
+            "stanza_sha256": "3d6b2f3dcf136a436001f70a35ce44438589dde5210af3cd2cdac6bf55d13119",
+            "depends": "libc6 (>= 2.38), libcap2 (>= 1:2.63)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libelf1t64",
+          "version": "0.192-4",
+          "arch": "amd64",
+          "url": "https://deb.debian.org/debian/pool/main/e/elfutils/libelf1t64_0.192-4_amd64.deb",
+          "filename": "libelf1t64_0.192-4_amd64.deb",
+          "sha256": "94497b7e17b6f574a0605b380d454e20d3f01a9c63b70c2a2263f679d30053e1",
+          "source": "elfutils",
+          "frozen_metadata": {
+            "index_sha256": "4f2c68d67001d595fbd343f6dbad44468953a51c4d9dec3a4803249f6e295940",
+            "stanza_sha256": "c4fc3ce83c9e14d235f162309ea81611ae32a5b75b9aea5aeb6e521c86b9ce37",
+            "depends": "libc6 (>= 2.38), libzstd1 (>= 1.5.5), zlib1g (>= 1:1.1.4)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libmnl0",
+          "version": "1.0.5-3",
+          "arch": "amd64",
+          "url": "https://deb.debian.org/debian/pool/main/libm/libmnl/libmnl0_1.0.5-3_amd64.deb",
+          "filename": "libmnl0_1.0.5-3_amd64.deb",
+          "sha256": "4ec9c1096e0b954e3bdb03a62314ee7f49999045d3d55be3e4ded520ffc9baf5",
+          "source": "libmnl",
+          "frozen_metadata": {
+            "index_sha256": "4f2c68d67001d595fbd343f6dbad44468953a51c4d9dec3a4803249f6e295940",
+            "stanza_sha256": "6fef32d827f44063c3ca95fb962d6611e9d23070fe3e4128bcfdffca18d96ccd",
+            "depends": "libc6 (>= 2.14)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libtirpc-common",
+          "version": "1.3.6+ds-1",
+          "arch": "all",
+          "url": "https://deb.debian.org/debian/pool/main/libt/libtirpc/libtirpc-common_1.3.6+ds-1_all.deb",
+          "filename": "libtirpc-common_1.3.6+ds-1_all.deb",
+          "sha256": "300f582e2c9151a8d329568c705cadc76252c417147312fe331c4560d2c7a6c3",
+          "source": "libtirpc",
+          "frozen_metadata": {
+            "index_sha256": "4f2c68d67001d595fbd343f6dbad44468953a51c4d9dec3a4803249f6e295940",
+            "stanza_sha256": "c3b195e7bcc6371c7c78bee5e426ca1e76c11387726b527deec2992262bca09b",
+            "depends": "",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libtirpc3t64",
+          "version": "1.3.6+ds-1",
+          "arch": "amd64",
+          "url": "https://deb.debian.org/debian/pool/main/libt/libtirpc/libtirpc3t64_1.3.6+ds-1_amd64.deb",
+          "filename": "libtirpc3t64_1.3.6+ds-1_amd64.deb",
+          "sha256": "ef4536c09bf5063554310e22d586ae90990100ba66d2fe7c35660e9e658913b6",
+          "source": "libtirpc",
+          "frozen_metadata": {
+            "index_sha256": "4f2c68d67001d595fbd343f6dbad44468953a51c4d9dec3a4803249f6e295940",
+            "stanza_sha256": "407b4b3feb414fb6aaaaf5d5f46b3177cb99ef9b58a84d72fef6742cbcb23396",
+            "depends": "libc6 (>= 2.38), libgssapi-krb5-2 (>= 1.17), libtirpc-common (>= 1.3.6+ds-1)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "libxtables12",
+          "version": "1.8.11-2",
+          "arch": "amd64",
+          "url": "https://deb.debian.org/debian/pool/main/i/iptables/libxtables12_1.8.11-2_amd64.deb",
+          "filename": "libxtables12_1.8.11-2_amd64.deb",
+          "sha256": "4de5aa59faef5e98d6ba9f5f521a915be5641f224f597862f8d29e8319e8db16",
+          "source": "iptables",
+          "frozen_metadata": {
+            "index_sha256": "4f2c68d67001d595fbd343f6dbad44468953a51c4d9dec3a4803249f6e295940",
+            "stanza_sha256": "255010560487393571c3f40611d6ab247b6d9718fa173f3db36752f439eae39f",
+            "depends": "libc6 (>= 2.34)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "nginx",
+          "version": "1.26.3-3+deb13u10",
+          "arch": "amd64",
+          "url": "https://deb.debian.org/debian-security/pool/updates/main/n/nginx/nginx_1.26.3-3+deb13u10_amd64.deb",
+          "filename": "nginx_1.26.3-3+deb13u10_amd64.deb",
+          "sha256": "222f1f296cb91a67323fdca0e37c4f34a7be78d14de043f15b2f76acdd8750a9",
+          "source": "nginx",
+          "frozen_metadata": {
+            "index_sha256": "f0276ce9d4f173bb6279d7946708f14ce739941f113917ba6637ed4df38b05d4",
+            "stanza_sha256": "5ff786abed2a5ccd47ccf3ace37112fe04fd12397966f450c2a47060df81b375",
+            "depends": "libc6 (>= 2.34), libcrypt1 (>= 1:4.1.0), libpcre2-8-0 (>= 10.22), libssl3t64 (>= 3.0.0), zlib1g (>= 1:1.1.4), iproute2, nginx-common (= 1.26.3-3+deb13u10)",
+            "pre_depends": ""
+          }
+        },
+        {
+          "package": "nginx-common",
+          "version": "1.26.3-3+deb13u10",
+          "arch": "all",
+          "url": "https://deb.debian.org/debian-security/pool/updates/main/n/nginx/nginx-common_1.26.3-3+deb13u10_all.deb",
+          "filename": "nginx-common_1.26.3-3+deb13u10_all.deb",
+          "sha256": "410d048889786394e5706a73f22ee1405b65114eec798881c4a7cfb119026153",
+          "source": "nginx",
+          "frozen_metadata": {
+            "index_sha256": "f0276ce9d4f173bb6279d7946708f14ce739941f113917ba6637ed4df38b05d4",
+            "stanza_sha256": "e5b755853f4d5475069940ad929667b91c0bfdf8e8e9dd6220bc632f0948dff8",
+            "depends": "debconf (>= 0.5) | debconf-2.0",
+            "pre_depends": ""
+          }
+        }
+      ]
     }
   },
   "apt_releases": [
@@ -2191,5 +2495,35 @@
       "sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675"
     }
   ],
-  "debian_keyring_sha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017"
+  "debian_keyring_sha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017",
+  "packaged_runtime_indexes": [
+    {
+      "release_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
+      "path": "main/binary-amd64/Packages",
+      "sha256": "4f2c68d67001d595fbd343f6dbad44468953a51c4d9dec3a4803249f6e295940",
+      "size": 56620099,
+      "origin": "https://deb.debian.org/debian/"
+    },
+    {
+      "release_sha256": "2cd3748b137484f546b252aff64d21b756cb7067460e3bb565766ad2a147cb17",
+      "path": "main/binary-amd64/Packages",
+      "sha256": "f0276ce9d4f173bb6279d7946708f14ce739941f113917ba6637ed4df38b05d4",
+      "size": 2211359,
+      "origin": "https://deb.debian.org/debian-security/"
+    },
+    {
+      "release_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
+      "path": "main/binary-arm64/Packages",
+      "sha256": "f97011263173eaccb1a215a28a6ec7ba1f6e5cebd8bb68e8fa0475b1d4021161",
+      "size": 56162922,
+      "origin": "https://deb.debian.org/debian/"
+    },
+    {
+      "release_sha256": "2cd3748b137484f546b252aff64d21b756cb7067460e3bb565766ad2a147cb17",
+      "path": "main/binary-arm64/Packages",
+      "sha256": "24332b4ca630ed49022d79a6ad4101b0a4894e92d34ef9cb5a22015a0fe59bf6",
+      "size": 2246083,
+      "origin": "https://deb.debian.org/debian-security/"
+    }
+  ]
 }

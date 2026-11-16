@@ -405,14 +405,33 @@ def producer_inputs():
     return {name: sha(ROOT / name) for name in names}
 
 
-def payload_record(abi):
+def payload_record(abi, packaged=False):
     lock = json.loads((HERE / "payload.lock.json").read_text())
     contract = json.loads((ROOT / "dev/runtime-contract.json").read_text())
     if lock["contract_sha256"] != sha(ROOT / "dev/runtime-contract.json"):
         raise ValueError(
             "Runtime contract changed; explicitly resolve/review new payload pins"
         )
-    record = lock["abi"][abi]
+    record = dict(lock["abi"][abi])
+    if packaged:
+        extras = record.get("packaged_runtime_packages", [])
+        if not extras or "nginx" not in {p["package"] for p in extras}:
+            raise ValueError("Missing pinned packaged Runtime nginx closure")
+        indexes = {i["sha256"]: i for i in lock["packaged_runtime_indexes"]}
+        releases = {r["sha256"] for r in lock["apt_releases"]}
+        for p in extras:
+            index = indexes[p["frozen_metadata"]["index_sha256"]]
+            if (
+                index["release_sha256"] not in releases
+                or index["path"]
+                != "main/binary-" + record["base"]["arch"] + "/Packages"
+                or not p["url"].startswith(index["origin"] + "pool/")
+                or not re.fullmatch(r"[0-9a-f]{64}", p["sha256"])
+            ):
+                raise ValueError("Packaged Runtime frozen dependency provenance drift")
+        record["packages"] = record["packages"] + extras
+        if len({p["package"] for p in record["packages"]}) != len(record["packages"]):
+            raise ValueError("Duplicate packaged Runtime Debian package")
     if record["base"] != BASES[abi]:
         raise ValueError("Guest base provenance/ABI drift")
     if {p["package"]: p["version"] for p in record["wheels"]} != contract[
@@ -733,7 +752,7 @@ def verify_payload(payload, abi, shared_record, expected_manifest_sha256):
     ):
         raise ValueError("Independent guest manifest anchor mismatch")
     manifest = json.loads(manifest_path.read_text())
-    lock, record = payload_record(abi)
+    lock, record = payload_record(abi, True)
     expected_dependencies = {
         "base": record["base"],
         "packages": record["packages"],
@@ -749,12 +768,21 @@ def verify_payload(payload, abi, shared_record, expected_manifest_sha256):
         or manifest.get("dependencies") != expected_dependencies
     ):
         raise ValueError("Guest source/ABI/dependency provenance drift")
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from check_runtime_parity import apk_runtime_source_manifest
+
+    if manifest.get("profile") != "packaged-shared-runtime" or manifest.get(
+        "runtime_source"
+    ) != apk_runtime_source_manifest(ROOT, shared_record["commit"]):
+        raise ValueError("Guest packaged Runtime source projection drift")
     if manifest.get("shared_source") != shared_record:
         raise ValueError("Guest shared source drift")
     archive = payload / "guest.zip"
     if sha(archive) != manifest["archive_sha256"]:
         raise ValueError("Guest archive drift")
     inventory = inspect_guest(archive, manifest["files"], abi)
+    if "usr/sbin/nginx" not in inventory:
+        raise ValueError("Missing actual packaged Runtime nginx executable")
     if inventory != manifest.get("elf_inventory"):
         raise ValueError("Guest native inventory drift")
     if inspect_dependencies(archive, manifest["files"], record) != manifest.get(
@@ -764,11 +792,11 @@ def verify_payload(payload, abi, shared_record, expected_manifest_sha256):
     return manifest
 
 
-def assemble(cache, abi, build_id):
+def assemble(cache, abi, build_id, packaged=False):
     producer_before = sha(Path(__file__))
     inputs_before = producer_inputs()
     sys.path.insert(0, str(ROOT / "scripts"))
-    from check_runtime_parity import apk_source_manifest
+    from check_runtime_parity import apk_source_manifest, apk_runtime_source_manifest
 
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
@@ -787,7 +815,7 @@ def assemble(cache, abi, build_id):
         }
     )
     lock_path = HERE / "payload.lock.json"
-    lock, record = payload_record(abi)
+    lock, record = payload_record(abi, packaged)
     destination = cache / "payloads" / build_id
     destination.mkdir(parents=True)
     root = destination / "rootfs"
@@ -985,6 +1013,11 @@ def assemble(cache, abi, build_id):
         "pi_lock_sha256": sha(ROOT / "ai/prototype/package-lock.json"),
         "runtime_acceptance": "pending",
     }
+    if packaged:
+        manifest["profile"] = "packaged-shared-runtime"
+        manifest["runtime_source"] = apk_runtime_source_manifest(ROOT, commit)
+        if "usr/sbin/nginx" not in manifest["elf_inventory"]:
+            raise ValueError("Missing actual packaged Runtime nginx executable")
     if sha(Path(__file__)) != producer_before:
         raise ValueError("Payload producer changed during assembly; manifest refused")
     if inputs_before != producer_inputs():
@@ -1021,6 +1054,7 @@ def main():
     b = sub.add_parser("assemble")
     b.add_argument("--abi", choices=BASES, required=True)
     b.add_argument("--build-id", required=True)
+    b.add_argument("--packaged-shared-runtime", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
     sys.path.insert(0, str(HERE.parent))
@@ -1042,7 +1076,7 @@ def main():
         else:
             if not re.fullmatch(r"[A-Za-z0-9_-]+", args.build_id):
                 raise ValueError("Unsafe build ID")
-            assemble(args.cache, args.abi, args.build_id)
+            assemble(args.cache, args.abi, args.build_id, args.packaged_shared_runtime)
 
 
 if __name__ == "__main__":

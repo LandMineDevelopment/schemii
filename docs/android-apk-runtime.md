@@ -327,7 +327,10 @@ non-debuggable failure from an incorrect exit-zero-only oracle is retained.
 `build_payload.py assemble` assembles real pinned Debian PG17/Python3.13,
 all canonical wheels (including native extensions), Node22 and locked Pi modules.
 It does not launch PostgreSQL, Python guest code, Pi, PRoot or an application.
-Only the pinned host Node/npm installer and build tools run. Downloads and
+Only the pinned host Node/npm installer and build tools run. The explicit
+`assemble --packaged-shared-runtime` mode additionally includes the frozen
+nginx1.26.3-3+deb13u10 closure (ten extra packages per ABI); default diagnostic
+assembly retains its original Debian package selection. Downloads and
 assembly use a fresh private cache; no Termux state, credentials, database,
 whole-checkout copy or previous guest archive is admitted.
 
@@ -357,7 +360,7 @@ with a substituted archive cannot satisfy its original independent anchor.
 ```bash
 CACHE="$HOME/.cache/schemii-apk264-packaged-runtime"
 python3 platforms/android/runtime/build_payload.py --cache "$CACHE" assemble \
-  --abi x86_64 --build-id shared-x86-UNIQUE
+  --abi x86_64 --build-id shared-x86-UNIQUE --packaged-shared-runtime
 # Select the manifest digest independently from the retained assembly handoff.
 python3 platforms/android/build.py --cache "$CACHE" build \
   --build-id shared-x86-APK_UNIQUE --abi x86_64 --non-debuggable \
@@ -378,16 +381,32 @@ Every new payload and packaged readback says `execution=NOT_RUN`,
 The following exact launch interfaces still require their owners before this
 package can become a safely hosted shared server:
 
-- The canonical `scripts/check_runtime_parity.py:apk_source_manifest` shared
-  selection omits `dev/android/runtime.py`, `recovery.py` and `nginx.conf.in`.
-  Extend the shared selector/manifest with a reviewed explicit allowlist; do not
-  copy these through an unvalidated packaging side channel.
-- `dev/android/runtime.py:Runtime` expects `/usr/sbin/nginx`; the current immutable
-  payload lock declares no nginx package/closure. A reviewed pinned dependency
-  input is needed. Packaging does not invent or download an unpinned replacement.
+- `apk_source_manifest` and `assets/shared/` keep their shared-only semantics.
+  The separate `apk_runtime_source_manifest` composes that exact record with
+  four committed support leaves: `dev/android/runtime.py`, `recovery.py`,
+  `nginx.conf.in` and `dev/schemii.toml`. Their additional bytes live at
+  `assets/runtime-source/` with repository-relative paths;
+  `assets/runtime/packaged-source.json` records the complete union. Staging and
+  signed extraction call `check_apk_runtime_sources` against the independent
+  commit. Missing, extra, changed, linked or rebound inputs fail. The future
+  host must verify and combine the two projections into the single `/shared`
+  source mount; the existing diagnostic Activity does not extract support files.
+- `/usr/sbin/nginx` now comes from frozen authenticated Debian metadata in
+  `payload.lock.json:abi.*.packaged_runtime_packages`. Its ten-package extension
+  includes the declared iproute2 closure, without executing maintainer scripts.
+  Every new package binds its signed-release/index/stanza and archive SHA256.
+  Original package/wheel/Node pins and the runtime contract remain unchanged.
+  The retained original InRelease files were independently verified using the
+  keyring from the pinned base; decompressed package indexes match their signed
+  SHA256 and size. All32 selected dependency constraints per ABI were checked.
+  This is package provenance and ELF/loader evidence, not an nginx runtime pass.
 - The same Runtime hardcodes Termux endpoints5433/5434/4097/8000/8001. Its shared
   parameterization must consume the existing APK interface's loopback-only
   15433/15434/14097/18000/18443 with unchanged service identities and safety rules.
+- `dev/android/recovery.py:_runtime_fingerprint` requires the ARM64-specific
+  `/opt/schemii-runtime.json` installed-runtime identity. This x86 diagnostic
+  build deliberately does not forge that identity. Physical backup/restore
+  remains unavailable pending the reviewed installation/recovery adapter.
 - Host266 must supply selected CE/DE source/state/control roots and the reviewed
   owner/FD/journal/boot bridge. Runtime's `captured_group_members` and
   `direct_children` depend on `/proc/PID/task/PID/children`, unavailable in prior

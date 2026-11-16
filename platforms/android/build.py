@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sys
 import stat
 import tempfile
 import subprocess
@@ -382,6 +383,30 @@ def stage_shared(out, helper, commit):
     return module, record
 
 
+def stage_runtime_sources(out, module, commit):
+    record = module.apk_runtime_source_manifest(ROOT, commit)
+    adapters = out / "assets/runtime-source"
+    adapters.mkdir(parents=True)
+    for name in record["adapter_files"]:
+        target = adapters / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(
+            subprocess.check_output(
+                ["git", "-C", str(ROOT), "show", f"{commit}:{name}"]
+            )
+        )
+    result = module.check_apk_runtime_sources(
+        ROOT, out / "assets/shared", adapters, record, commit
+    )
+    (out / "assets/runtime/packaged-source.json").write_text(
+        json.dumps(record, indent=2) + "\n"
+    )
+    (out / "runtime-source-staging-readback.json").write_text(
+        json.dumps(result, indent=2) + "\n"
+    )
+    return record
+
+
 def adapter_sources():
     return {
         str(p.relative_to(ROOT)): digest(p)
@@ -528,6 +553,26 @@ def packaged_admission(args):
 def packaged_readback(extracted, provenance, shared_record):
     from runtime.build_payload import verify_payload
 
+    actual = json.loads(
+        (extracted / "assets/runtime/native-provenance.json").read_text()
+    )
+    if actual != provenance:
+        raise ValueError("Signed packaged native provenance drift")
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from check_runtime_parity import check_apk_runtime_sources
+
+    runtime_source = json.loads(
+        (extracted / "assets/runtime/packaged-source.json").read_text()
+    )
+    if runtime_source != provenance["packaged_shared_runtime"]["runtime_source"]:
+        raise ValueError("Signed packaged Runtime projection drift")
+    check_apk_runtime_sources(
+        ROOT,
+        extracted / "assets/shared",
+        extracted / "assets/runtime-source",
+        runtime_source,
+        shared_record["commit"],
+    )
     result = {}
     for abi, anchor in provenance["packaged_shared_runtime"][
         "manifest_anchors"
@@ -777,9 +822,10 @@ def build(args, cache):
     if getattr(args, "packaged_shared_runtime", False):
         provenance["packaged_shared_runtime"] = {
             "manifest_anchors": {},
+            "runtime_source": stage_runtime_sources(out, module, commit),
             "execution": "NOT_RUN",
             "readiness": "PENDING",
-            "launch_gate": "shared endpoint/source-selector/owner-FD-journal adapter and pinned ingress pending",
+            "launch_gate": "shared endpoint/owner-FD-journal adapter and reviewed runtime campaign pending",
         }
     if args.guest_payload:
         provenance["guest_payloads"] = {}
