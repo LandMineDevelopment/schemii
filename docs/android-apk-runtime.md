@@ -157,8 +157,8 @@ closed before any executable is copied. The expected and observed receipt digest
 are recorded in the new APK provenance. This anchors the immutable product; it
 is not compiler attestation. It verifies the donor APK/provenance/file hashes,
 committed clean source, native recipe/ABI mapping, native source files and unchanged
-toolchain lock. Peer libraries and runtime acceptance are not inherited. Current
-canonical static packages omit old guest archives: their recorded full contract
+toolchain lock. Peer libraries and runtime acceptance are not inherited. Earlier
+canonical static packages omitted old guest archives: their recorded full contract
 digest differs from the integrated contract. Those archives/manifests remain
 preserved and are not relabeled or re-resolved merely for source packaging proof.
 
@@ -321,6 +321,89 @@ The pinned Uvicorn0.52.4 intentionally re-raises its captured SIGTERM after
 shutdown; signal exit alone cannot pass. The probe records the actual status,
 requires startup/shutdown-complete markers and listener closure. The original
 non-debuggable failure from an incorrect exit-zero-only oracle is retained.
+
+## Source-bound packaged shared runtime (264 continuation)
+
+`build_payload.py assemble` assembles real pinned Debian PG17/Python3.13,
+all canonical wheels (including native extensions), Node22 and locked Pi modules.
+It does not launch PostgreSQL, Python guest code, Pi, PRoot or an application.
+Only the pinned host Node/npm installer and build tools run. Downloads and
+assembly use a fresh private cache; no Termux state, credentials, database,
+whole-checkout copy or previous guest archive is admitted.
+
+Assembly now records the canonical helper's exact committed shared-source
+manifest, helper/selector hashes, package/wheel/Node provenance, installed
+Python/npm inventories and every ELF's machine, interpreter, LOAD layout,
+DT_NEEDED and resolved library paths. Resolution honors guest symlinks and
+inherited DT_RPATH versus direct-only DT_RUNPATH. Missing interpreters, native
+libraries, required PG tools, wheels, Pi modules or runtime Python paths fail.
+The immutable `/opt/schemii-venv/bin/python` path uses the pinned interpreter,
+verified wheels and `/shared/src` through a `.pth` file; it does not fork or
+install a second copy of the application. The existing `/opt/python-packages`
+diagnostic path is preserved. Assembly and APK packaging reject changed producer,
+dependency, contract, shared-source or ABI identities.
+
+The explicit `--packaged-shared-runtime` build profile requires a clean exact
+adapter commit, nondebug manifest, independently anchored native donor and one
+independently anchored guest manifest **for every selected APK ABI**. Payload
+arguments and their manifest anchors have matching order. It excludes boot,
+wrapper, process and network diagnostic component combinations. Ordinary existing
+profiles retain their separate behavior. The new profile checks complete guest
+ZIP bytes/inventory/modes and native/dependency contracts at admission and again
+from the actual signed APK extraction, alongside the canonical shared helper
+and existing bionic ABI/16KiB/signature checks. A manifest rewritten together
+with a substituted archive cannot satisfy its original independent anchor.
+
+```bash
+CACHE="$HOME/.cache/schemii-apk264-packaged-runtime"
+python3 platforms/android/runtime/build_payload.py --cache "$CACHE" assemble \
+  --abi x86_64 --build-id shared-x86-UNIQUE
+# Select the manifest digest independently from the retained assembly handoff.
+python3 platforms/android/build.py --cache "$CACHE" build \
+  --build-id shared-x86-APK_UNIQUE --abi x86_64 --non-debuggable \
+  --packaged-shared-runtime --expected-adapter-commit FULL_COMMITTED_HEAD \
+  --guest-payload "$CACHE/payloads/shared-x86-UNIQUE" \
+  --guest-manifest-sha256 INDEPENDENT_ASSEMBLY_MANIFEST_SHA256 \
+  --native-donor /private/original-build/receipt.json \
+  --native-donor-receipt-sha256 INDEPENDENT_ORIGINAL_RECEIPT_SHA256
+```
+
+The continuation's actual build is explicitly x86_64/4KiB diagnostic packaging.
+It makes **no dual-ABI complete-guest claim**. ARM64 assembly additionally enforces
+16KiB-compatible guest LOAD layout; bionic APK native libraries always retain
+16KiB gates. Neither static layout nor a signed artifact proves device execution.
+Every new payload and packaged readback says `execution=NOT_RUN`,
+`readiness=PENDING`; `stack_acceptance=false` remains authoritative.
+
+The following exact launch interfaces still require their owners before this
+package can become a safely hosted shared server:
+
+- The canonical `scripts/check_runtime_parity.py:apk_source_manifest` shared
+  selection omits `dev/android/runtime.py`, `recovery.py` and `nginx.conf.in`.
+  Extend the shared selector/manifest with a reviewed explicit allowlist; do not
+  copy these through an unvalidated packaging side channel.
+- `dev/android/runtime.py:Runtime` expects `/usr/sbin/nginx`; the current immutable
+  payload lock declares no nginx package/closure. A reviewed pinned dependency
+  input is needed. Packaging does not invent or download an unpinned replacement.
+- The same Runtime hardcodes Termux endpoints5433/5434/4097/8000/8001. Its shared
+  parameterization must consume the existing APK interface's loopback-only
+  15433/15434/14097/18000/18443 with unchanged service identities and safety rules.
+- Host266 must supply selected CE/DE source/state/control roots and the reviewed
+  owner/FD/journal/boot bridge. Runtime's `captured_group_members` and
+  `direct_children` depend on `/proc/PID/task/PID/children`, unavailable in prior
+  API36 diagnostics. No PID-only ownership, guessed host, readiness stub or
+  Java service ordering is supplied here.
+- Later operator entrypoints are the **shared** runtime's attached `run`, `stop`
+  and `status` through the authorized launcher/host boundary, after those adapters
+  are reviewed. The existing APK Activity still launches its disposable guest
+  diagnostic if operated; this packaging profile does not turn it into a server
+  or grant installation/execution authority. Do not install/run it as acceptance.
+
+Private source snapshots, command logs, original failures, donor-input inventory,
+assembly manifests and signed readbacks are retained in the assignment's private
+artifact directory and new cache. Full local CI, actual two-cluster/native/Pi/API
+execution, general owner-loss/recovery, FGS, networking, ARM64/Moto/16KiB devices,
+signing/update and release acceptance remain coordinator-owned and pending.
 
 ## Diagnostic collector contract
 

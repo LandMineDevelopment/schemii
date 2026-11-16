@@ -393,13 +393,19 @@ def adapter_sources():
 def boot_admission(args):
     """Fail before any cache/native/legacy operation for this closed profile."""
     if not getattr(args, "boot_identity_only", False):
-        if getattr(args, "expected_adapter_commit", None):
-            raise ValueError("Expected adapter commit is boot-only")
+        if getattr(args, "expected_adapter_commit", None) and not getattr(
+            args, "packaged_shared_runtime", False
+        ):
+            raise ValueError(
+                "Expected adapter commit requires boot-only or packaged runtime"
+            )
         return None
     from runtime.check_boot_identity_report import source_identity
 
     forbidden = (
         "guest_payload",
+        "packaged_shared_runtime",
+        "guest_manifest_sha256",
         "network_handoff",
         "network_checkout",
         "process_head",
@@ -469,11 +475,91 @@ def boot_native(cache, out, abis, identity):
     return artifacts, compilers
 
 
+def packaged_admission(args):
+    """Closed static packaging profile; never imply that a host adapter is ready."""
+    enabled = getattr(args, "packaged_shared_runtime", False)
+    anchors = getattr(args, "guest_manifest_sha256", None) or []
+    if not enabled:
+        if anchors:
+            raise ValueError(
+                "Guest manifest anchors require packaged shared runtime profile"
+            )
+        return
+    payloads = args.guest_payload or []
+    abis = args.abi or ["arm64-v8a"]
+    if (
+        not payloads
+        or len(payloads) != len(anchors)
+        or len(payloads) != len(abis)
+        or len(set(abis)) != len(abis)
+        or not args.non_debuggable
+        or not args.expected_adapter_commit
+        or not args.native_donor
+    ):
+        raise ValueError(
+            "Packaged runtime requires nondebug exact source, anchored native donor and one anchored payload per ABI"
+        )
+    if any(
+        getattr(args, name, None)
+        for name in (
+            "boot_identity_only",
+            "wrapper_controls_only",
+            "integration_probes",
+            "network_handoff",
+            "network_checkout",
+            "process_head",
+            "process_checkout",
+            "subreaper_handoff",
+            "subreaper_checkout",
+        )
+    ):
+        raise ValueError(
+            "Packaged runtime excludes diagnostic peer/boot/wrapper campaigns"
+        )
+    actual = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
+    ).strip()
+    if args.expected_adapter_commit != actual or subprocess.check_output(
+        ["git", "-C", str(ROOT), "status", "--porcelain"]
+    ):
+        raise ValueError("Packaged runtime requires exact committed clean source")
+
+
+def packaged_readback(extracted, provenance, shared_record):
+    from runtime.build_payload import verify_payload
+
+    result = {}
+    for abi, anchor in provenance["packaged_shared_runtime"][
+        "manifest_anchors"
+    ].items():
+        # Read the actual signed/extracted payload using the same admission, with
+        # its independently selected manifest digest, not a new self-description.
+        with tempfile.TemporaryDirectory(
+            prefix="guest-readback-", dir=extracted.parent
+        ) as directory:
+            payload = Path(directory)
+            for source, target in [
+                ("guest-" + abi + ".zip", "guest.zip"),
+                ("guest-" + abi + "-manifest.json", "guest-manifest.json"),
+            ]:
+                shutil.copyfile(extracted / "assets/runtime" / source, payload / target)
+            manifest = verify_payload(payload, abi, shared_record, anchor)
+            result[abi] = {
+                "archive_sha256": manifest["archive_sha256"],
+                "manifest_sha256": anchor,
+                "elf_count": len(manifest["elf_inventory"]),
+                "execution": "NOT_RUN",
+                "readiness": "PENDING",
+            }
+    return result
+
+
 def build(args, cache):
     if bool(args.native_donor) != bool(args.native_donor_receipt_sha256):
         raise ValueError(
             "Native donor and independent receipt SHA256 must be supplied together"
         )
+    packaged_admission(args)
     boot_identity = boot_admission(args)
     if not args.build_id or any(
         c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
@@ -688,6 +774,13 @@ def build(args, cache):
         from runtime.check_boot_identity_report import check_provenance
 
         check_provenance(provenance, boot_identity)
+    if getattr(args, "packaged_shared_runtime", False):
+        provenance["packaged_shared_runtime"] = {
+            "manifest_anchors": {},
+            "execution": "NOT_RUN",
+            "readiness": "PENDING",
+            "launch_gate": "shared endpoint/source-selector/owner-FD-journal adapter and pinned ingress pending",
+        }
     if args.guest_payload:
         provenance["guest_payloads"] = {}
         provenance["guest_probe_sha256"] = digest(HERE / "runtime/guest_probe.py")
@@ -709,18 +802,14 @@ def build(args, cache):
                 raise ValueError(
                     "Guest producer source drift; preserve old payload and assemble a new one"
                 )
-            expected_inputs = [
-                "platforms/android/runtime/build_payload.py",
-                "platforms/android/runtime/payload.lock.json",
-                "platforms/android/native/runtime/guest_compat.c",
-                "dev/runtime-contract.json",
-                "ai/prototype/package.json",
-                "ai/prototype/package-lock.json",
-            ]
-            if manifest.get("producer_inputs") != {
-                name: digest(ROOT / name) for name in expected_inputs
-            }:
+            from runtime.build_payload import producer_inputs, verify_payload
+
+            if manifest.get("producer_inputs") != producer_inputs():
                 raise ValueError("Guest producer/dependency input drift")
+            if getattr(args, "packaged_shared_runtime", False):
+                anchor = args.guest_manifest_sha256[len(provenance["guest_payloads"])]
+                manifest = verify_payload(payload, abi, record, anchor)
+                provenance["packaged_shared_runtime"]["manifest_anchors"][abi] = anchor
             if abi not in abis or abi in provenance["guest_payloads"]:
                 raise ValueError("Guest/native ABI mismatch or duplicate")
             if manifest["payload_lock_sha256"] != digest(
@@ -744,6 +833,10 @@ def build(args, cache):
                 "manifest_sha256": digest(manifest_path),
                 "payload_lock_sha256": manifest["payload_lock_sha256"],
             }
+    if getattr(args, "packaged_shared_runtime", False) and set(
+        provenance["guest_payloads"]
+    ) != set(abis):
+        raise ValueError("Packaged guest/native ABI coverage mismatch")
     if args.integration_probes:
         from runtime.peer_inputs import integration_components
 
@@ -909,6 +1002,9 @@ def build(args, cache):
     (out / "package-readback.json").write_text(
         json.dumps(package_readback, indent=2) + "\n"
     )
+    if getattr(args, "packaged_shared_runtime", False):
+        if "application-debuggable" in badging:
+            raise ValueError("Packaged runtime actual manifest is debuggable")
     # The validator checks the actual packaged bytes, not merely the staging tree.
     extracted = out / "apk-readback"
     with zipfile.ZipFile(signed) as apk:
@@ -922,6 +1018,12 @@ def build(args, cache):
     (out / "apk-extracted-readback.json").write_text(
         json.dumps(extracted_readback, indent=2) + "\n"
     )
+    guest_readback = None
+    if getattr(args, "packaged_shared_runtime", False):
+        guest_readback = packaged_readback(extracted, provenance, packaged_record)
+        (out / "packaged-runtime-readback.json").write_text(
+            json.dumps(guest_readback, indent=2) + "\n"
+        )
     if adapter_sources() != adapter_before:
         raise ValueError("Adapter sources changed during build; receipt refused")
     if helper_identity(args.parity_helper) != helper_before:
@@ -932,6 +1034,7 @@ def build(args, cache):
         "signer_sha256": signer[0],
         "source_commit": commit,
         "shared_readback": "passed",
+        "packaged_runtime_readback": guest_readback,
         "stack_acceptance": False,
         "native": provenance,
         "native_provenance_sha256": digest(
@@ -975,6 +1078,16 @@ def main():
     b.add_argument("--build-id", required=True)
     b.add_argument("--abi", action="append", choices=ABI_TRIPLES)
     b.add_argument("--guest-payload", type=Path, action="append")
+    b.add_argument(
+        "--packaged-shared-runtime",
+        action="store_true",
+        help="Anchored complete-per-selected-ABI static package; execution remains NOT_RUN",
+    )
+    b.add_argument(
+        "--guest-manifest-sha256",
+        action="append",
+        help="Independent manifest anchor, in guest-payload argument order",
+    )
     b.add_argument(
         "--native-donor",
         type=Path,
