@@ -18,6 +18,18 @@ public final class HostService extends Service {
     private final ExecutorService work = Executors.newSingleThreadExecutor();
     private final AtomicBoolean pending = new AtomicBoolean(), stop = new AtomicBoolean();
     private volatile boolean opened;
+    private static volatile HostService active;
+    @Override public void onCreate() { super.onCreate(); active = this; }
+    public static String status() {
+        HostService service = active;
+        if (service == null || !service.opened) return statusText;
+        long[] observed = NativeOwner.status();
+        if (observed == null || observed.length != 12) return "Native status unavailable — ownership UNKNOWN";
+        if (observed[2] == 1) return "Checking native admission — operation pending; lease retained";
+        if (observed[2] == 2 && observed[3] == 5) return "Stop request observed — no birth admitted; ownership closure UNKNOWN";
+        if (observed[2] == 2) return "Launch refused — boot caller/custody and PRoot helper closure remain unproved. Data preserved.";
+        return "Native owner idle — no launch grant; ownership UNKNOWN";
+    }
     public static volatile String statusText = "Stopped — connected runtime acceptance pending";
     private static Object anchor(String field) throws Exception {
         return Class.forName("development.landmine.schemii.android.host.HostAnchors").getField(field).get(null);
@@ -50,7 +62,7 @@ public final class HostService extends Service {
         }
         int result = NativeOwner.request(1);
         diagnostics.event(1,result,NativeOwner.status());
-        statusText = "Launch refused — boot caller/custody and PRoot helper closure remain unproved. Data preserved.";
+        statusText = status();
         // No Ready, CLEAN_STOPPED, reboot/recovery permission or grant inferred
         // from a parsed journal, direct wait, live export or private directory.
     }
@@ -64,7 +76,7 @@ public final class HostService extends Service {
         if ("stop".equals(action)) {
             stop.set(true);
             if (opened) NativeOwner.request(2);
-            statusText = pending.get() ? "Stopping — source admission pending; no competing launch" : "Stopped — no managed birth admitted";
+            statusText = opened ? status() : (pending.get() ? "Stopping — source admission pending; no competing launch" : "Stopped before native admission");
         } else if ("start".equals(action) && pending.compareAndSet(false,true)) {
             stop.set(false); statusText = "Checking installed source and private storage";
             work.execute(() -> {
@@ -81,6 +93,7 @@ public final class HostService extends Service {
             int result = NativeOwner.close();
             if (result != 0) statusText = "Owner operation pending — lease retained; restart refused";
         }
+        if (active == this) active = null;
         work.shutdown(); super.onDestroy();
     }
     @Override public IBinder onBind(Intent intent) { return null; }

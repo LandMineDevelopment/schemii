@@ -1951,3 +1951,10 @@ def test_endpoint_conflict_preserves_uninitialized_state(tmp_path):
         with pytest.raises(android.RuntimeFailure, match="Cannot bind"):
             instance._check_endpoints({})
     assert not instance.state.exists()
+
+
+@pytest.mark.parametrize("profile", ["", "APK", "termux:15433", "other"])
+def test_endpoint_profile_has_no_unknown_or_empty_fallback(tmp_path, profile):
+    with pytest.raises(android.RuntimeFailure, match="endpoint profile"):
+        android.Runtime(tmp_path / "state", profile=profile)
+    assert not (tmp_path / "state").exists()

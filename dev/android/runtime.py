@@ -322,7 +322,11 @@ class Runtime:
         *,
         profile: str | None = None,
     ):
-        self.profile = profile or os.environ.get("SCHEMII_ANDROID_PROFILE", "termux")
+        self.profile = (
+            profile
+            if profile is not None
+            else os.environ.get("SCHEMII_ANDROID_PROFILE", "termux")
+        )
         self.endpoints = EndpointProfile.selected(self.profile)
         self.state = Path(
             state or os.environ.get("SCHEMII_ANDROID_STATE") or DEFAULT_STATE

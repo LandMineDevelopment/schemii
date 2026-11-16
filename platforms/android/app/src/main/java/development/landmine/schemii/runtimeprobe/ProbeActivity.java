@@ -668,7 +668,7 @@ public final class ProbeActivity extends Activity {
             android.widget.LinearLayout panel = new android.widget.LinearLayout(this);
             panel.setOrientation(android.widget.LinearLayout.VERTICAL); panel.setPadding(24,48,24,24);
             TextView status = new TextView(this);
-            status.setText(development.landmine.schemii.android.host.HostService.statusText);
+            status.setText(development.landmine.schemii.android.host.HostService.status());
             status.setAccessibilityLiveRegion(android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE);
             panel.addView(status);
             for (String action : new String[]{"start","stop","status"}) {
@@ -677,7 +677,7 @@ public final class ProbeActivity extends Activity {
                 button.setOnClickListener(v -> {
                     if (!action.equals("status")) startForegroundService(new Intent(this,
                         development.landmine.schemii.android.host.HostService.class).setAction(action));
-                    status.postDelayed(() -> status.setText(development.landmine.schemii.android.host.HostService.statusText),300);
+                    status.postDelayed(() -> status.setText(development.landmine.schemii.android.host.HostService.status()),300);
                 });
                 panel.addView(button);
             }
