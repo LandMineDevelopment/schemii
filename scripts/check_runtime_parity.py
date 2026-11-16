@@ -657,20 +657,51 @@ def apk_source_manifest(root: Path, commit: str) -> dict:
     }
 
 
-def check_apk_sources(
-    root: Path, payload: Path, record: dict, expected_commit: str
-) -> dict:
-    """Verify an extracted *shared source* payload, including unexpected files.
+# Only support files actually read/imported by the shared Runtime. Termux install,
+# host lifecycle and tailnet binary production retain their own owner boundaries.
+APK_RUNTIME_SUPPORT = frozenset(
+    {
+        "dev/android/runtime.py",
+        "dev/android/recovery.py",
+        "dev/android/nginx.conf.in",
+        "dev/schemii.toml",
+    }
+)
 
-    Native libraries and toolchain artifacts belong to the APK build manifest,
-    outside this directory. Never follow links into runtime/private state.
-    """
-    require(isinstance(record, dict), "APK source manifest must be an object")
-    expected = apk_source_manifest(root, expected_commit)
+
+def apk_runtime_source_manifest(root: Path, commit: str) -> dict:
+    """A separate complete source composition; never relabel the shared-only API."""
+    shared = apk_source_manifest(root, commit)
+    builder = source_module(ROOT, "scripts/build-android-release.py")
+    try:
+        resolved, files = builder.source_files(root, commit)
+    except (builder.BuildError, OSError) as error:
+        raise ParityError(f"APK committed runtime source: {error}") from error
     require(
-        json.dumps(record, sort_keys=True) == json.dumps(expected, sort_keys=True),
-        "APK source manifest drift",
+        resolved == commit and APK_RUNTIME_SUPPORT <= files.keys(),
+        "APK runtime support missing",
     )
+    adapters = {
+        name: hashlib.sha256(files[name][0]).hexdigest()
+        for name in sorted(APK_RUNTIME_SUPPORT)
+    }
+    require(
+        not adapters.keys() & shared["source_files"].keys(),
+        "APK runtime projection overlap",
+    )
+    return {
+        "schema": 1,
+        "platform": "android-apk-packaged-runtime",
+        "commit": commit,
+        "shared_source": shared,
+        "adapter_files": adapters,
+        "source_files": {**shared["source_files"], **adapters},
+        "execution": "NOT_RUN",
+        "readiness": "PENDING",
+    }
+
+
+def _check_apk_files(payload: Path, expected_files: dict) -> None:
     require(
         payload.is_dir()
         and not any(path.is_symlink() for path in (payload, *payload.parents)),
@@ -691,16 +722,51 @@ def check_apk_sources(
                 continue
             require(path.is_file(), "APK payload must contain regular files")
             relative = path.relative_to(payload).as_posix()
-            require(relative in expected["source_files"], "APK unexpected payload file")
+            require(relative in expected_files, "APK unexpected payload file")
             with path.open("rb") as stream:
                 actual[relative] = hashlib.file_digest(stream, "sha256").hexdigest()
-    require(actual == expected["source_files"], "APK payload inventory/content drift")
+    require(actual == expected_files, "APK payload inventory/content drift")
+
+
+def check_apk_runtime_sources(
+    root: Path, shared: Path, adapters: Path, record: dict, expected_commit: str
+) -> dict:
+    expected = apk_runtime_source_manifest(root, expected_commit)
+    require(record == expected, "APK runtime source manifest drift")
+    check_apk_sources(root, shared, record["shared_source"], expected_commit)
+    _check_apk_files(adapters, expected["adapter_files"])
+    return {
+        "schema": 1,
+        "status": "passed",
+        "commit": expected_commit,
+        "runtime_source_file_count": len(expected["source_files"]),
+        "adapter_file_count": len(expected["adapter_files"]),
+        "execution": "NOT_RUN",
+        "readiness": "PENDING",
+    }
+
+
+def check_apk_sources(
+    root: Path, payload: Path, record: dict, expected_commit: str
+) -> dict:
+    """Verify an extracted *shared source* payload, including unexpected files.
+
+    Native libraries and toolchain artifacts belong to the APK build manifest,
+    outside this directory. Never follow links into runtime/private state.
+    """
+    require(isinstance(record, dict), "APK source manifest must be an object")
+    expected = apk_source_manifest(root, expected_commit)
+    require(
+        json.dumps(record, sort_keys=True) == json.dumps(expected, sort_keys=True),
+        "APK source manifest drift",
+    )
+    _check_apk_files(payload, expected["source_files"])
     return {
         "schema": 1,
         "status": "passed",
         "commit": expected_commit,
         "contract_sha256": expected["source_files"]["dev/runtime-contract.json"],
-        "shared_file_count": len(actual),
+        "shared_file_count": len(expected["source_files"]),
         "apk_runtime_acceptance": "pending",
     }
 

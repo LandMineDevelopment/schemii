@@ -134,7 +134,7 @@ def prepare_resolver(cache):
     subprocess.run(
         [
             "make",
-            "-j4",
+            "-j2",
             "proot",
             "CC=clang -fuse-ld=" + str(linker),
             "PROOT_UNBUNDLE_LOADER=/nonexistent",
@@ -391,17 +391,417 @@ def host_node(cache, lock):
     return destination
 
 
-def assemble(cache, abi, build_id):
-    producer_before = sha(Path(__file__))
-    input_names = [
+def producer_inputs():
+    names = [
         "platforms/android/runtime/build_payload.py",
         "platforms/android/runtime/payload.lock.json",
         "platforms/android/native/runtime/guest_compat.c",
         "dev/runtime-contract.json",
         "ai/prototype/package.json",
         "ai/prototype/package-lock.json",
+        "scripts/check_runtime_parity.py",
+        "scripts/build-android-release.py",
     ]
-    inputs_before = {name: sha(ROOT / name) for name in input_names}
+    return {name: sha(ROOT / name) for name in names}
+
+
+def payload_record(abi, packaged=False):
+    lock = json.loads((HERE / "payload.lock.json").read_text())
+    contract = json.loads((ROOT / "dev/runtime-contract.json").read_text())
+    if lock["contract_sha256"] != sha(ROOT / "dev/runtime-contract.json"):
+        raise ValueError(
+            "Runtime contract changed; explicitly resolve/review new payload pins"
+        )
+    record = dict(lock["abi"][abi])
+    if packaged:
+        extras = record.get("packaged_runtime_packages", [])
+        if not extras or "nginx" not in {p["package"] for p in extras}:
+            raise ValueError("Missing pinned packaged Runtime nginx closure")
+        indexes = {i["sha256"]: i for i in lock["packaged_runtime_indexes"]}
+        releases = {r["sha256"] for r in lock["apt_releases"]}
+        for p in extras:
+            index = indexes[p["frozen_metadata"]["index_sha256"]]
+            if (
+                index["release_sha256"] not in releases
+                or index["path"]
+                != "main/binary-" + record["base"]["arch"] + "/Packages"
+                or not p["url"].startswith(index["origin"] + "pool/")
+                or not re.fullmatch(r"[0-9a-f]{64}", p["sha256"])
+            ):
+                raise ValueError("Packaged Runtime frozen dependency provenance drift")
+        record["packages"] = record["packages"] + extras
+        if len({p["package"] for p in record["packages"]}) != len(record["packages"]):
+            raise ValueError("Duplicate packaged Runtime Debian package")
+    if record["base"] != BASES[abi]:
+        raise ValueError("Guest base provenance/ABI drift")
+    if {p["package"]: p["version"] for p in record["wheels"]} != contract[
+        "dependencies"
+    ]["python"]:
+        raise ValueError("Guest Python dependency drift")
+    if record["node"]["version"] != contract["dependencies"]["node"]:
+        raise ValueError("Guest Node dependency drift")
+    for item in record["packages"]:
+        if item["arch"] not in (record["base"]["arch"], "all"):
+            raise ValueError("Guest Debian ABI drift")
+    pg = next(p for p in record["packages"] if p["package"] == "postgresql-17")
+    if pg["version"].split(".")[0] != contract["dependencies"]["postgresql_major"]:
+        raise ValueError("Guest PostgreSQL dependency drift")
+    return lock, record
+
+
+def safe_name(name):
+    if (
+        not name
+        or name.startswith("/")
+        or any(p in ("", ".", "..") for p in name.split("/"))
+    ):
+        raise ValueError("Unsafe guest path")
+    return name
+
+
+def guest_path(name, files):
+    """Resolve guest absolute/relative links without following any host filesystem link."""
+    pending = name.split("/")
+    resolved = []
+    links = 0
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not resolved:
+                raise ValueError("Guest link escapes root")
+            resolved.pop()
+            continue
+        resolved.append(part)
+        entry = files.get("/".join(resolved), {})
+        if entry.get("kind") == "symlink":
+            links += 1
+            if links > 40:
+                raise ValueError("Guest link cycle")
+            target = entry["target"]
+            if target.startswith("/"):
+                resolved = []
+            else:
+                resolved.pop()
+            pending = target.split("/") + pending
+    return "/".join(resolved)
+
+
+def guest_elf(data, abi):
+    """Read ELF program/dynamic tables without loading guest code on the host."""
+    import struct
+
+    if len(data) < 64 or data[:6] != b"\x7fELF\x02\x01":
+        raise ValueError("Guest expected little-endian ELF64")
+    kind, machine = struct.unpack_from("<HH", data, 16)
+    if kind not in (2, 3) or machine != {"x86_64": 62, "arm64-v8a": 183}[abi]:
+        raise ValueError("Guest ELF ABI/type mismatch")
+    offset = struct.unpack_from("<Q", data, 32)[0]
+    size, count = struct.unpack_from("<HH", data, 54)
+    if size < 56 or not count or offset + count * size > len(data):
+        raise ValueError("Guest ELF program headers invalid")
+    headers = [
+        struct.unpack_from("<IIQQQQQQ", data, offset + i * size) for i in range(count)
+    ]
+    loads = [h for h in headers if h[0] == 1]
+    if not loads:
+        raise ValueError("Guest ELF has no LOAD")
+    for h in headers:
+        if h[2] + h[5] > len(data):
+            raise ValueError("Guest ELF segment truncated")
+        if h[0] == 1 and (
+            h[5] > h[6] or h[1] & 3 == 3 or h[7] < 4096 or h[2] % 4096 != h[3] % 4096
+        ):
+            raise ValueError("Guest ELF unsafe LOAD")
+        if (
+            abi == "arm64-v8a"
+            and h[0] == 1
+            and (h[7] < 16384 or h[2] % 16384 != h[3] % 16384)
+        ):
+            raise ValueError("Guest ARM64 ELF lacks 16KiB LOAD layout")
+    interpreter = None
+    entries = []
+    for h in headers:
+        if h[0] == 3:
+            interpreter = data[h[2] : h[2] + h[5]].rstrip(b"\0").decode()
+        if h[0] == 2:
+            if h[5] % 16:
+                raise ValueError("Guest ELF dynamic table invalid")
+            for i in range(h[2], h[2] + h[5], 16):
+                tag, value = struct.unpack_from("<qQ", data, i)
+                if tag == 0:
+                    break
+                entries.append((tag, value))
+    strings = next((v for t, v in entries if t == 5), None)
+    string_size = next((v for t, v in entries if t == 10), 0)
+    table = b""
+    if strings is not None:
+        segment = next(
+            (
+                h
+                for h in loads
+                if h[3] <= strings and strings + string_size <= h[3] + h[5]
+            ),
+            None,
+        )
+        if segment is None:
+            raise ValueError("Guest ELF string table invalid")
+        start = segment[2] + strings - segment[3]
+        table = data[start : start + string_size]
+
+    def string(index):
+        end = table.find(b"\0", index)
+        if index >= len(table) or end < 0:
+            raise ValueError("Guest ELF dynamic string invalid")
+        return table[index:end].decode()
+
+    return {
+        "machine": machine,
+        "type": kind,
+        "interpreter": interpreter,
+        "needed": [string(v) for t, v in entries if t == 1],
+        "rpath": [string(v) for t, v in entries if t == 15],
+        "runpath": [string(v) for t, v in entries if t == 29],
+        "load_alignment": min(h[7] for h in loads),
+    }
+
+
+def inspect_guest(archive, files, abi):
+    """Check the complete ZIP inventory, native ABI and loader closure, never execute it."""
+    for name, entry in files.items():
+        safe_name(name)
+        if entry["kind"] not in ("file", "symlink", "directory"):
+            raise ValueError("Unknown guest file kind")
+        # Ordinary files cannot have link/file ancestors (ZIP extraction writes files first).
+        for parent in Path(name).parents:
+            if (
+                str(parent) != "."
+                and files.get(parent.as_posix(), {}).get("kind") != "directory"
+            ):
+                raise ValueError("Guest parent is missing or not a directory")
+        if entry["kind"] == "symlink":
+            guest_path(name, files)
+    inventory = {}
+    with zipfile.ZipFile(archive) as source:
+        names = source.namelist()
+        if len(names) != len(set(names)) or set(names) != {
+            n for n, r in files.items() if r["kind"] == "file"
+        }:
+            raise ValueError("Guest archive inventory drift")
+        for name in names:
+            entry = files[name]
+            info = source.getinfo(name)
+            if (
+                info.file_size != entry["size"]
+                or info.external_attr >> 16 != stat.S_IFREG | entry["mode"]
+            ):
+                raise ValueError("Guest file size/mode drift")
+            with source.open(name) as stream:
+                if hashlib.file_digest(stream, "sha256").hexdigest() != entry["sha256"]:
+                    raise ValueError("Guest file byte drift")
+            with source.open(name) as stream:
+                magic = stream.read(4)
+            if magic == b"\x7fELF":
+                inventory[name] = guest_elf(source.read(name), abi)
+    triple = "x86_64-linux-gnu" if abi == "x86_64" else "aarch64-linux-gnu"
+    defaults = ["/lib/" + triple, "/usr/lib/" + triple, "/lib", "/usr/lib"]
+    contexts = {}
+
+    def visit(name, inherited=()):
+        context = (name, inherited)
+        if context in contexts:
+            return contexts[context] is not False  # A pending edge is an ELF cycle.
+        contexts[context] = None
+        elf = inventory[name]
+        if elf["interpreter"]:
+            interpreter = guest_path(elf["interpreter"], files)
+            if interpreter not in inventory:
+                raise ValueError("Missing guest ELF interpreter: " + name)
+        origin = "/" + str(Path(name).parent)
+
+        def expand(values):
+            paths = [
+                part.replace("${ORIGIN}", origin).replace("$ORIGIN", origin)
+                for value in values
+                for part in value.split(":")
+            ]
+            if any(not p.startswith("/") or "$" in p for p in paths):
+                raise ValueError("Unsupported guest ELF search path: " + name)
+            return paths
+
+        # glibc DT_RPATH propagates to descendants; DT_RUNPATH applies only to
+        # direct children. Bundled wheel libraries rely on the former. A global
+        # basename/sibling search would falsely admit a genuinely missing loader path.
+        rpath = expand(elf["rpath"]) if not elf["runpath"] else []
+        inherited_next = tuple(dict.fromkeys(rpath + list(inherited)))
+        search = list(inherited_next) + expand(elf["runpath"]) + defaults
+        dependencies = {}
+        for needed in elf["needed"]:
+            if "/" in needed:
+                raise ValueError("Unsupported guest ELF dependency path")
+            found = next(
+                (
+                    resolved
+                    for directory in search
+                    if (resolved := guest_path(directory + "/" + needed, files))
+                    in inventory
+                ),
+                None,
+            )
+            if found is None:
+                contexts[context] = False
+                return False  # A library may need an ancestor's DT_RPATH context.
+            dependencies[needed] = found
+        if not all(visit(found, inherited_next) for found in dependencies.values()):
+            contexts[context] = False
+            return False
+        contexts[context] = True
+        if "resolved_needed" not in elf:
+            elf["resolved_needed"] = dependencies
+            elf["inherited_rpath"] = list(inherited)
+        return True
+
+    for name, elf in inventory.items():
+        complete = visit(name)
+        # Each actual executable/extension must load in its own context. An
+        # unrelated executable's RPATH cannot repair a broken launch root.
+        launch_root = (
+            elf["interpreter"]
+            or "/bin/" in name
+            or (name.startswith("opt/python-packages/") and ".libs/" not in name)
+        )
+        if launch_root and not complete:
+            raise ValueError("Missing guest native dependency for launch root: " + name)
+    for name, elf in inventory.items():
+        if "resolved_needed" not in elf:
+            raise ValueError(
+                "Missing guest native dependency: "
+                + name
+                + " -> "
+                + ",".join(elf["needed"])
+            )
+    for name in (
+        "usr/lib/postgresql/17/bin/initdb",
+        "usr/lib/postgresql/17/bin/postgres",
+        "usr/lib/postgresql/17/bin/pg_ctl",
+        "usr/lib/postgresql/17/bin/psql",
+        "usr/bin/python3.13",
+        "opt/node/bin/node",
+    ):
+        if guest_path(name, files) not in inventory:
+            raise ValueError("Missing actual guest executable: " + name)
+    return inventory
+
+
+def inspect_dependencies(archive, files, record):
+    from email.parser import BytesParser
+
+    distributions = {}
+    npm = {}
+    with zipfile.ZipFile(archive) as source:
+        for name in files:
+            if name.startswith("opt/python-packages/") and name.endswith(
+                ".dist-info/METADATA"
+            ):
+                metadata = BytesParser().parsebytes(source.read(name))
+                normalized = re.sub(r"[-_.]+", "-", metadata["Name"]).lower()
+                if normalized in distributions:
+                    raise ValueError("Duplicate guest Python distribution")
+                distributions[normalized] = metadata["Version"]
+        expected = {
+            re.sub(r"[-_.]+", "-", p["package"]).lower(): p["version"]
+            for p in record["wheels"]
+        }
+        if distributions != expected:
+            raise ValueError("Guest installed Python dependency inventory drift")
+        node_lock = json.loads((ROOT / "ai/prototype/package-lock.json").read_text())
+        for name, pin in node_lock["packages"].items():
+            if not name or pin.get("dev"):
+                continue
+            package_path = name + "/package.json"
+            if package_path not in files and pin.get("optional"):
+                continue
+            if package_path not in files:
+                raise ValueError("Missing guest Node dependency: " + name)
+            package = json.loads(source.read(package_path))
+            if package["version"] != pin["version"]:
+                raise ValueError("Guest installed Node dependency drift: " + name)
+            npm[name] = {
+                "name": package["name"],
+                "version": package["version"],
+                "integrity": pin.get("integrity"),
+            }
+        pi = npm["node_modules/@earendil-works/pi-ai"]
+        if pi["name"] != "@earendil-works/pi-ai":
+            raise ValueError("Guest Pi identity drift")
+        for name in (
+            "opt/schemii-venv/bin/python",
+            "opt/schemii-venv/lib/python3.13/site-packages",
+        ):
+            if guest_path(name, files) not in files:
+                raise ValueError("Missing shared Runtime Python path")
+    return {"python": distributions, "npm": npm}
+
+
+def verify_payload(payload, abi, shared_record, expected_manifest_sha256):
+    manifest_path = payload / "guest-manifest.json"
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha256 or "")
+        or sha(manifest_path) != expected_manifest_sha256
+    ):
+        raise ValueError("Independent guest manifest anchor mismatch")
+    manifest = json.loads(manifest_path.read_text())
+    lock, record = payload_record(abi, True)
+    expected_dependencies = {
+        "base": record["base"],
+        "packages": record["packages"],
+        "wheels": record["wheels"],
+        "node": record["node"],
+    }
+    if (
+        manifest["abi"] != abi
+        or manifest["producer_inputs"] != producer_inputs()
+        or manifest["producer_sha256"] != sha(Path(__file__))
+        or manifest["payload_lock_sha256"] != sha(HERE / "payload.lock.json")
+        or manifest["contract_sha256"] != lock["contract_sha256"]
+        or manifest.get("dependencies") != expected_dependencies
+    ):
+        raise ValueError("Guest source/ABI/dependency provenance drift")
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from check_runtime_parity import apk_runtime_source_manifest
+
+    if manifest.get("profile") != "packaged-shared-runtime" or manifest.get(
+        "runtime_source"
+    ) != apk_runtime_source_manifest(ROOT, shared_record["commit"]):
+        raise ValueError("Guest packaged Runtime source projection drift")
+    if manifest.get("shared_source") != shared_record:
+        raise ValueError("Guest shared source drift")
+    archive = payload / "guest.zip"
+    if sha(archive) != manifest["archive_sha256"]:
+        raise ValueError("Guest archive drift")
+    inventory = inspect_guest(archive, manifest["files"], abi)
+    if "usr/sbin/nginx" not in inventory:
+        raise ValueError("Missing actual packaged Runtime nginx executable")
+    if inventory != manifest.get("elf_inventory"):
+        raise ValueError("Guest native inventory drift")
+    if inspect_dependencies(archive, manifest["files"], record) != manifest.get(
+        "installed_dependencies"
+    ):
+        raise ValueError("Guest installed dependency record drift")
+    return manifest
+
+
+def assemble(cache, abi, build_id, packaged=False):
+    producer_before = sha(Path(__file__))
+    inputs_before = producer_inputs()
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from check_runtime_parity import apk_source_manifest, apk_runtime_source_manifest
+
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
+    ).strip()
+    shared_record = apk_source_manifest(ROOT, commit)
     compiler = Path(shutil.which("clang")).resolve() if abi == "x86_64" else None
     compiler_identity = (
         None
@@ -415,12 +815,7 @@ def assemble(cache, abi, build_id):
         }
     )
     lock_path = HERE / "payload.lock.json"
-    lock = json.loads(lock_path.read_text())
-    if lock["contract_sha256"] != sha(ROOT / "dev/runtime-contract.json"):
-        raise ValueError(
-            "Runtime contract changed; explicitly resolve/review new payload pins"
-        )
-    record = lock["abi"][abi]
+    lock, record = payload_record(abi, packaged)
     destination = cache / "payloads" / build_id
     destination.mkdir(parents=True)
     root = destination / "rootfs"
@@ -501,6 +896,17 @@ def assemble(cache, abi, build_id):
             ],
             check=True,
         )
+    # Construct the shared Runtime's stable Python path without executing a guest
+    # interpreter or installing from ambient pip. Wheels remain exact verified bytes.
+    venv = root / "opt/schemii-venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/python").symlink_to("/usr/bin/python3.13")
+    (venv / "pyvenv.cfg").write_text(
+        "home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.13\n"
+    )
+    (venv / "lib/python3.13").mkdir(parents=True)
+    (venv / "lib/python3.13/site-packages").symlink_to("/opt/python-packages")
+    (packages / "schemii-shared.pth").write_text("/shared/src\n")
     # npm uses the canonical lock/integrities, but never installs executable lifecycle scripts.
     npm = destination / "npm"
     npm.mkdir()
@@ -510,6 +916,7 @@ def assemble(cache, abi, build_id):
     env = os.environ.copy()
     env.pop("NODE_OPTIONS", None)
     env.pop("NODE_PATH", None)
+    env["PATH"] = str(installer / "bin") + os.pathsep + os.defpath
     subprocess.run(
         [
             str(installer / "bin/node"),
@@ -586,15 +993,34 @@ def assemble(cache, abi, build_id):
         "contract_sha256": lock["contract_sha256"],
         "archive_sha256": sha(archive),
         "files": files,
+        "dependencies": {
+            "base": record["base"],
+            "packages": record["packages"],
+            "wheels": record["wheels"],
+            "node": record["node"],
+        },
+        "shared_source": shared_record,
+        "elf_inventory": inspect_guest(archive, files, abi),
+        "installed_dependencies": inspect_dependencies(archive, files, record),
+        "execution": "NOT_RUN",
+        "readiness": "PENDING",
+        "page_scope": "x86_64-4KiB-diagnostic"
+        if abi == "x86_64"
+        else "ARM64-16KiB-static-only",
         "node": record["node"]["version"],
         "postgresql_major": 17,
         "python_minor": "3.13",
         "pi_lock_sha256": sha(ROOT / "ai/prototype/package-lock.json"),
         "runtime_acceptance": "pending",
     }
+    if packaged:
+        manifest["profile"] = "packaged-shared-runtime"
+        manifest["runtime_source"] = apk_runtime_source_manifest(ROOT, commit)
+        if "usr/sbin/nginx" not in manifest["elf_inventory"]:
+            raise ValueError("Missing actual packaged Runtime nginx executable")
     if sha(Path(__file__)) != producer_before:
         raise ValueError("Payload producer changed during assembly; manifest refused")
-    if inputs_before != {name: sha(ROOT / name) for name in input_names}:
+    if inputs_before != producer_inputs():
         raise ValueError("Payload input changed during assembly; manifest refused")
     if compiler is not None and sha(compiler) != compiler_identity["binary_sha256"]:
         raise ValueError(
@@ -628,12 +1054,16 @@ def main():
     b = sub.add_parser("assemble")
     b.add_argument("--abi", choices=BASES, required=True)
     b.add_argument("--build-id", required=True)
+    b.add_argument("--packaged-shared-runtime", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
     sys.path.insert(0, str(HERE.parent))
     from build import validate_cache_owner
 
-    validate_cache_owner(args.cache.resolve())
+    args.cache = args.cache.resolve()
+    args.cache.mkdir(parents=True, exist_ok=True)
+    (args.cache / "downloads").mkdir(exist_ok=True)
+    validate_cache_owner(args.cache)
     with (args.cache / ".payload-lock").open("w") as lease:
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.action == "prepare-resolver":
@@ -646,7 +1076,7 @@ def main():
         else:
             if not re.fullmatch(r"[A-Za-z0-9_-]+", args.build_id):
                 raise ValueError("Unsafe build ID")
-            assemble(args.cache, args.abi, args.build_id)
+            assemble(args.cache, args.abi, args.build_id, args.packaged_shared_runtime)
 
 
 if __name__ == "__main__":
