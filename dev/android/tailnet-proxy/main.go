@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -16,7 +15,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -32,18 +30,20 @@ import (
 const tailscaleVersion = "v1.104.7"
 
 type config struct {
-	StateDir   string
-	StatusFile string
-	Hostname   string
-	Upstream   string
-	UpstreamCA string
-	DNSServer  string
+	StateDir   string `json:"state_dir"`
+	StatusFile string `json:"status_file"`
+	Hostname   string `json:"hostname"`
+	Upstream   string `json:"upstream"`
+	UpstreamCA string `json:"upstream_ca"`
+	DNSServer  string `json:"dns_server"`
+	platform   networkPlatform
+	instanceID string
 }
 
 var nodeName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func (c config) validate() (*url.URL, error) {
-	if _, err := vpnResolver(c.DNSServer); err != nil {
+	if err := c.networkPlatform().validate(c); err != nil {
 		return nil, err
 	}
 	if !nodeName.MatchString(c.Hostname) {
@@ -65,8 +65,8 @@ func (c config) validate() (*url.URL, error) {
 	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || u.RawQuery != "" || (u.Path != "" && u.Path != "/") {
 		return nil, errors.New("upstream must be the local HTTPS ingress without credentials, path or query")
 	}
-	if u.Hostname() != "127.0.0.1" || u.Port() != "8001" {
-		return nil, errors.New("upstream must be https://127.0.0.1:8001")
+	if u.Hostname() != "127.0.0.1" || u.Port() == "" {
+		return nil, errors.New("upstream must be loopback HTTPS with an explicit platform port")
 	}
 	return u, nil
 }
@@ -130,6 +130,13 @@ func protectManagedState(directory, host string) error {
 		}
 		for _, entry := range entries {
 			name := entry.Name()
+			if base, ok := strings.CutSuffix(name, ".renewal.json"); ok {
+				if !validDNSName(base) {
+					return errors.New("private certificate retry cache has an unsupported name")
+				}
+				paths = append(paths, filepath.Join(certs, name))
+				continue
+			}
 			base, cert := strings.CutSuffix(name, ".crt")
 			if !cert {
 				base, cert = strings.CutSuffix(name, ".key")
@@ -190,29 +197,38 @@ func startNode(server nodeStarter, directory string) error {
 }
 
 type status struct {
-	Schema             int      `json:"schema"`
-	PID                int      `json:"pid"`
-	BackendState       string   `json:"backend_state"`
-	StartupStage       string   `json:"startup_stage,omitempty"`
-	NetworkObservation string   `json:"network_observation,omitempty"`
-	Online             bool     `json:"online"`
-	Ready              bool     `json:"ready"`
-	Listening          bool     `json:"listening"`
-	CertificateReady   bool     `json:"certificate_ready"`
-	Hostname           string   `json:"hostname"`
-	Origin             string   `json:"origin"`
-	TailnetIPs         []string `json:"tailnet_ips"`
-	LoginURL           string   `json:"login_url,omitempty"`
-	Error              string   `json:"error,omitempty"`
-	UpdatedAt          int64    `json:"updated_at"`
+	InstanceID                string   `json:"instance_id,omitempty"`
+	Schema                    int      `json:"schema"`
+	PID                       int      `json:"pid"`
+	BackendState              string   `json:"backend_state"`
+	StartupStage              string   `json:"startup_stage,omitempty"`
+	NetworkObservation        string   `json:"network_observation,omitempty"`
+	Online                    bool     `json:"online"`
+	Ready                     bool     `json:"ready"`
+	Listening                 bool     `json:"listening"`
+	CertificateReady          bool     `json:"certificate_ready"`
+	CertificateExpiresAt      int64    `json:"certificate_expires_at,omitempty"`
+	CertificateRenewalError   string   `json:"certificate_renewal_error,omitempty"`
+	CertificateRetryAt        int64    `json:"certificate_retry_at,omitempty"`
+	NetworkRequired           bool     `json:"network_required,omitempty"`
+	NetworkGeneration         uint64   `json:"network_generation,omitempty"`
+	VerifiedNetworkGeneration uint64   `json:"verified_network_generation,omitempty"`
+	NetworkAvailable          bool     `json:"network_available,omitempty"`
+	Hostname                  string   `json:"hostname"`
+	Origin                    string   `json:"origin"`
+	TailnetIPs                []string `json:"tailnet_ips"`
+	LoginURL                  string   `json:"login_url,omitempty"`
+	Error                     string   `json:"error,omitempty"`
+	UpdatedAt                 int64    `json:"updated_at"`
 }
 
 type statusStore struct {
-	mu        sync.Mutex
-	path      string
-	value     status
-	lastValue string
-	lastWrite time.Time
+	mu           sync.Mutex
+	path         string
+	value        status
+	lastValue    string
+	lastWrite    time.Time
+	expectedHost string
 }
 
 func newStatusStore(path string) *statusStore {
@@ -223,7 +239,17 @@ func (s *statusStore) update(change func(*status)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	change(&s.value)
+	return s.writeLocked()
+}
+
+func (s *statusStore) writeLocked() error {
 	s.value.Ready = s.value.Listening && s.value.Online && s.value.CertificateReady
+	if s.value.CertificateExpiresAt != 0 && time.Now().Unix() >= s.value.CertificateExpiresAt {
+		s.value.Ready, s.value.CertificateReady = false, false
+	}
+	if s.value.NetworkRequired {
+		s.value.Ready = s.value.Ready && s.value.NetworkAvailable && s.value.VerifiedNetworkGeneration == s.value.NetworkGeneration
+	}
 	comparison := s.value
 	comparison.UpdatedAt = 0
 	encoded, err := json.Marshal(comparison)
@@ -330,62 +356,74 @@ type certificateClient interface {
 	CertPair(context.Context, string) ([]byte, []byte, error)
 }
 
-func verifyPublicCertificate(ctx context.Context, client certificateClient, directory, host string, roots *x509.CertPool) error {
+func fetchPublicCertificate(ctx context.Context, client certificateClient, directory, host string, roots *x509.CertPool) (*tls.Certificate, error) {
 	// CertPair reads the cached key and ACME identity before issuing anything.
 	// Guard immediately before that read as well as before SDK initialization.
 	if err := protectManagedState(directory, host); err != nil {
-		return err
+		return nil, err
 	}
 	certPEM, keyPEM, err := client.CertPair(ctx, host)
 	if err != nil {
-		if retryAfter, limited := local.RateLimitRetryAfter(err); limited {
-			return fmt.Errorf("tailnet certificate issuance is rate limited; retry after %d seconds", int64(retryAfter.Seconds())+1)
+		var providerError certificateError
+		if errors.As(err, &providerError) {
+			return nil, providerError // Already classified; never contains CA bodies/tokens.
 		}
-		return errors.New("tailnet certificate issuance failed; check MagicDNS, HTTPS approval and internet access")
+		if retryAfter, limited := local.RateLimitRetryAfter(err); limited {
+			return nil, fmt.Errorf("tailnet certificate issuance is rate limited; retry after %d seconds", int64(retryAfter.Seconds())+1)
+		}
+		return nil, errors.New("tailnet certificate issuance failed; check MagicDNS, HTTPS approval and internet access")
 	}
+	return publicCertificateAt(certPEM, keyPEM, host, roots, time.Now())
+}
+
+func publicCertificateAt(certPEM, keyPEM []byte, host string, roots *x509.CertPool, now time.Time) (*tls.Certificate, error) {
 	pair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil || len(pair.Certificate) == 0 {
-		return errors.New("tailnet returned an invalid certificate/key pair")
+		return nil, errors.New("tailnet returned an invalid certificate/key pair")
 	}
 	leaf, err := x509.ParseCertificate(pair.Certificate[0])
 	if err != nil {
-		return errors.New("tailnet returned an invalid leaf certificate")
+		return nil, errors.New("tailnet returned an invalid leaf certificate")
 	}
 	intermediates := x509.NewCertPool()
 	for _, der := range pair.Certificate[1:] {
 		cert, err := x509.ParseCertificate(der)
 		if err != nil {
-			return errors.New("tailnet returned an invalid certificate chain")
+			return nil, errors.New("tailnet returned an invalid certificate chain")
 		}
 		intermediates.AddCert(cert)
 	}
 	// A nil Roots uses Debian's system roots. The private Schemii ingress CA
 	// deliberately belongs only to the upstream transport, never this check.
-	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: host, Roots: roots, Intermediates: intermediates}); err != nil {
-		return errors.New("tailnet certificate is not valid for its hostname and system trust roots")
+	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: host, Roots: roots, Intermediates: intermediates, CurrentTime: now}); err != nil {
+		return nil, errors.New("tailnet certificate is not valid for its hostname and system trust roots")
 	}
-	return nil
+	pair.Leaf = leaf
+	return &pair, nil
 }
 
-func observe(ctx context.Context, client *local.Client, store *statusStore, failures chan<- error, protect func(string) error) {
+func verifyPublicCertificate(ctx context.Context, client certificateClient, directory, host string, roots *x509.CertPool) error {
+	_, err := fetchPublicCertificate(ctx, client, directory, host, roots)
+	return err
+}
+
+func observe(ctx context.Context, client *local.Client, store *statusStore, failures chan<- error, protect func(string) error, platform networkPlatform) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
 		probe, cancel := context.WithTimeout(ctx, 5*time.Second)
 		st, err := client.StatusWithoutPeers(probe)
+		generation, available := platform.networkState(probe)
 		cancel()
 		if err == nil {
 			host, _, _ := identity(st)
 			err = protect(host)
 		}
+
 		if err == nil {
-			err = store.update(func(value *status) {
-				value.BackendState = st.BackendState
-				value.Online = st.BackendState == "Running"
-				value.Hostname, value.Origin, value.TailnetIPs = identity(st)
-				value.LoginURL = st.AuthURL
-			})
+			err = store.observeNode(st, generation, available)
 		}
+
 		if err != nil && ctx.Err() == nil {
 			// A lost private status path must not leave an unobservable server.
 			select {
@@ -438,6 +476,7 @@ func proxyHandler(target *url.URL, caPEM []byte, host string) (http.Handler, *ht
 }
 
 func run(ctx context.Context, cfg config) (returned error) {
+	platform := cfg.networkPlatform()
 	target, err := cfg.validate()
 	if err != nil {
 		return err
@@ -467,7 +506,7 @@ func run(ctx context.Context, cfg config) (returned error) {
 		transport.CloseIdleConnections()
 	}
 	store := newStatusStore(cfg.StatusFile)
-	if err = store.update(func(*status) {}); err != nil {
+	if err = store.update(func(s *status) { s.InstanceID = cfg.instanceID }); err != nil {
 		return err
 	}
 	managedHost := ""
@@ -496,14 +535,14 @@ func run(ctx context.Context, cfg config) (returned error) {
 	initializationFinished, err = initializeNode(ctx, func() error {
 		if err := store.update(func(value *status) {
 			value.StartupStage = "Android interface observation"
-			value.NetworkObservation = interfaceObservationMode
+			value.NetworkObservation = platform.observation()
 		}); err != nil {
 			return err
 		}
-		if err := configureAndroidNetwork(cfg.DNSServer); err != nil {
+		if err := platform.configure(server); err != nil {
 			return err
 		}
-		diagnostics("network observation configured: %s (IPv6-only underlay observation is unsupported)", interfaceObservationMode)
+		diagnostics("network observation configured: %s", platform.observation())
 		if err := store.update(func(value *status) { value.StartupStage = "SDK initialization" }); err != nil {
 			return err
 		}
@@ -511,12 +550,16 @@ func run(ctx context.Context, cfg config) (returned error) {
 	}, 20*time.Second)
 	if err != nil {
 		diagnostics("initialization failed: %v", err)
+		if !initializationFinished {
+			return errInitializationIncomplete
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
 		return errors.New("tailnet SDK initialization failed; inspect its private startup stage and bounded diagnostics")
 	}
-	defer server.Close()
+	platform.started(server, store)
+	defer func() { platform.stopped(); server.Close() }()
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -533,7 +576,7 @@ func run(ctx context.Context, cfg config) (returned error) {
 	observed := make(chan struct{})
 	go func() {
 		defer close(observed)
-		observe(ctx, client, store, failures, func(host string) error { return protectManagedState(cfg.StateDir, host) })
+		observe(ctx, client, store, failures, func(host string) error { return protectManagedState(cfg.StateDir, host) }, platform)
 	}()
 	defer func() { cancel(); <-observed }()
 	type onlineResult struct {
@@ -562,6 +605,7 @@ func run(ctx context.Context, cfg config) (returned error) {
 		return errors.New("tailnet did not supply a valid ts.net hostname; enable MagicDNS")
 	}
 	managedHost = host
+	store.pinIdentity(host)
 	if err = store.update(func(value *status) {
 		value.BackendState, value.Online, value.Hostname, value.Origin, value.TailnetIPs = "Running", true, host, origin, ips
 		value.LoginURL = ""
@@ -580,12 +624,18 @@ func run(ctx context.Context, cfg config) (returned error) {
 	if !allowed {
 		return errors.New("enable HTTPS certificates for this node in the tailnet")
 	}
+	certificates, closeCertificates, err := platform.certificates(ctx, client, cfg.StateDir, host)
+	if err != nil {
+		return err
+	}
+	defer closeCertificates()
 	issuance, finishIssuance := context.WithTimeout(ctx, 90*time.Second)
 	if err := store.update(func(value *status) { value.StartupStage = "certificate issuance" }); err != nil {
 		finishIssuance()
 		return err
 	}
-	err = verifyPublicCertificate(issuance, client, cfg.StateDir, host, nil)
+	certificate, certErr := fetchPublicCertificate(issuance, certificates, cfg.StateDir, host, platform.roots())
+	err = certErr
 	finishIssuance()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -596,14 +646,25 @@ func run(ctx context.Context, cfg config) (returned error) {
 	if err := protectManagedState(cfg.StateDir, host); err != nil {
 		return err
 	}
-	if err = store.update(func(value *status) { value.CertificateReady = true }); err != nil {
+	if err = store.update(func(value *status) {
+		value.CertificateReady = true
+		value.CertificateExpiresAt = certificate.Leaf.NotAfter.Unix()
+		value.CertificateRenewalError, value.CertificateRetryAt = certificateRenewalState(certificates)
+	}); err != nil {
 		return err
+	}
+	if renewable, ok := certificates.(interface {
+		startRenewal(*statusStore, chan<- error, time.Duration) func()
+	}); ok {
+		stopRenewal := renewable.startRenewal(store, failures, time.Minute)
+		defer stopRenewal()
 	}
 	handler, transport, err := proxyHandler(target, caPEM, host)
 	if err != nil {
 		return err
 	}
 	defer transport.CloseIdleConnections()
+	handler = platformHandler(handler, platform)
 	// The only registered listener is this tailnet TLS port. No fallback, host
 	// listener, Funnel, SOCKS proxy or forwarding of unmatched ports is enabled.
 	type result struct {
@@ -612,8 +673,32 @@ func run(ctx context.Context, cfg config) (returned error) {
 	}
 	listening := make(chan result, 1)
 	go func() {
-		listener, err := server.ListenTLS("tcp", ":443")
-		listening <- result{listener, err}
+		raw, err := server.Listen("tcp", ":443")
+		if err != nil {
+			listening <- result{nil, err}
+			return
+		}
+		listener := tls.NewListener(raw, &tls.Config{MinVersion: tls.VersionTLS12,
+			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				if !platform.ingressAvailable() {
+					return nil, errors.New("Android network is not currently verified")
+				}
+				if hello.ServerName != host {
+					return nil, errors.New("unexpected tailnet TLS name")
+				}
+				issuance, cancel := context.WithTimeout(hello.Context(), time.Minute)
+				defer cancel()
+				pair, err := fetchPublicCertificate(issuance, certificates, cfg.StateDir, host, platform.roots())
+				statusErr := storeCertificateResult(store, certificates, pair, err)
+				if err != nil {
+					return nil, err
+				}
+				if statusErr != nil {
+					return nil, statusErr
+				}
+				return pair, nil
+			}})
+		listening <- result{listener, nil}
 	}()
 	var listener net.Listener
 	select {
@@ -655,31 +740,4 @@ func run(ctx context.Context, cfg config) (returned error) {
 		web.Close()
 	}
 	return err
-}
-
-func main() {
-	syscall.Umask(0077)
-	cfg := config{}
-	flag.StringVar(&cfg.StateDir, "state-dir", "", "private persistent node directory")
-	flag.StringVar(&cfg.StatusFile, "status-file", "", "private status JSON outside node directory")
-	flag.StringVar(&cfg.Hostname, "hostname", "schemii-phone", "requested dedicated node hostname")
-	flag.StringVar(&cfg.Upstream, "upstream", "https://127.0.0.1:8001", "existing local HTTPS ingress")
-	flag.StringVar(&cfg.UpstreamCA, "upstream-ca", "", "existing local ingress CA PEM")
-	flag.StringVar(&cfg.DNSServer, "dns-server", androidDNSServer, "connected Android Tailscale VPN DNS resolver")
-	version := flag.Bool("version", false, "report the pinned tailnet library version without starting")
-	flag.Parse()
-	if *version {
-		fmt.Println("schemii-tailnet-proxy tsnet " + tailscaleVersion)
-		return
-	}
-	if flag.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "Unexpected positional arguments")
-		os.Exit(2)
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
-	if err := run(ctx, cfg); err != nil {
-		fmt.Fprintln(os.Stderr, "Schemii tailnet: "+err.Error())
-		os.Exit(1)
-	}
 }
