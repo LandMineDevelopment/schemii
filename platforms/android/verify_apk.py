@@ -61,7 +61,8 @@ def integration_manifest(apk, aapt2, debuggable):
     )
     if (
         "package: name='development.landmine.schemii.runtimeprobe'" not in badging
-        or "sdkVersion:'29'" not in badging
+        or "minSdkVersion:'29'" not in badging
+        or "compileSdkVersion='36'" not in badging
         or "targetSdkVersion:'36'" not in badging
         or ("application-debuggable" in badging) != debuggable
     ):
