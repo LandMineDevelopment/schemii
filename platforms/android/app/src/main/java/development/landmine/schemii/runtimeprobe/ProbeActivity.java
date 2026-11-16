@@ -1,6 +1,7 @@
 package development.landmine.schemii.runtimeprobe;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.os.Bundle;
 import android.widget.TextView;
 import org.json.JSONArray;
@@ -650,12 +651,39 @@ public final class ProbeActivity extends Activity {
         report.put("integration_case_inventory_complete", true);
     }
 
+    private TextView bootStatus;
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (BootIdentityProbe.PACKAGE.equals(getPackageName()) && bootStatus != null) {
+            BootIdentityProbe.dispatchExport(this, bootStatus, intent);
+        }
+        // The delivered intent never replaces the original Activity request and
+        // never enters generic/native dispatch. Only boot export-only is handled.
+    }
+
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         TextView view = new TextView(this);
         view.setPadding(24, 40, 24, 24);
         view.setText("Running disposable native execution controls…");
         setContentView(view);
+        if (BootIdentityProbe.PACKAGE.equals(getPackageName())) {
+            bootStatus = view;
+            if (getActionBar() != null) getActionBar().hide();
+            final int pad = Math.round(16 * getResources().getDisplayMetrics().density);
+            view.setPadding(pad, pad, pad, pad);
+            view.setOnApplyWindowInsetsListener((v, insets) -> {
+                if (android.os.Build.VERSION.SDK_INT >= 30) {
+                    android.graphics.Insets safe = insets.getInsets(android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
+                    v.setPadding(pad + safe.left, pad + safe.top, pad + safe.right, pad + safe.bottom);
+                } else {
+                    v.setPadding(pad + insets.getSystemWindowInsetLeft(), pad + insets.getSystemWindowInsetTop(), pad + insets.getSystemWindowInsetRight(), pad + insets.getSystemWindowInsetBottom());
+                }
+                return insets;
+            });
+            view.requestApplyInsets();
+        }
         if (BootIdentityProbe.dispatch(this, view)) return;
         if (getIntent().getBooleanExtra("export_report_only", false)) {
             new Thread(() -> {

@@ -1,6 +1,7 @@
 package development.landmine.schemii.runtimeprobe;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -22,6 +23,7 @@ final class BootIdentityProbe {
     static final String PROFILE = "boot-identity-p1b-v1";
     private static native String observe();
     private static Journal retained;
+    private static Refusal retainedRefusal;
 
     private static void require(boolean ok) throws IOException {
         if (!ok) throw new IOException("Boot-only identity/profile refused");
@@ -53,15 +55,87 @@ final class BootIdentityProbe {
             out.write(raw); out.getFD().sync();
         }
     }
-    private static void export(byte[] raw, String run) throws Exception {
+    private static synchronized void export(byte[] raw, String run) throws Exception {
         require(raw.length > 0 && raw.length <= 65536);
         String digest = sha(raw);
         int count = (raw.length + 1199) / 1200;
         for (int i = 0; i < count; i++) {
             String chunk = android.util.Base64.encodeToString(Arrays.copyOfRange(raw, i * 1200, Math.min(raw.length, (i + 1) * 1200)), android.util.Base64.NO_WRAP);
-            android.util.Log.i("SchemiiBootIdentity", run + ":" + i + "/" + count + ":" + raw.length + ":" + digest + ":" + chunk);
+            require(android.util.Log.i("SchemiiBootIdentity", run + ":" + i + "/" + count + ":" + raw.length + ":" + digest + ":" + chunk) > 0);
         }
     }
+    // Request/diagnostic helpers: no Android, native observation or recovery authority.
+    static final class Request {
+        final String run, commit, source, provenance;
+        final boolean exportOnly;
+        Request(Map<String, Object> extras, boolean newIntent) throws Exception {
+            Set<String> allowed = new HashSet<>(Arrays.asList("run_id", "expected_source_commit", "expected_source_sha256", "expected_native_provenance", "export_report_only"));
+            require(allowed.containsAll(extras.keySet()));
+            run = token(extras.get("run_id"), "[a-zA-Z0-9_-]{1,80}");
+            commit = token(extras.get("expected_source_commit"), "[0-9a-f]{40}");
+            source = token(extras.get("expected_source_sha256"), "[0-9a-f]{64}");
+            provenance = token(extras.get("expected_native_provenance"), "[0-9a-f]{64}");
+            require(run != null && commit != null && source != null && provenance != null);
+            require(!extras.containsKey("export_report_only") || extras.get("export_report_only") instanceof Boolean);
+            exportOnly = Boolean.TRUE.equals(extras.get("export_report_only"));
+            require(!newIntent || exportOnly); // A delivered intent can NEVER dispatch native work.
+        }
+        static String token(Object value, String pattern) {
+            return value instanceof String && ((String)value).matches(pattern) ? (String)value : null;
+        }
+    }
+    static String sourceDigest(Map<String, String> files) throws Exception {
+        // JSONObject.quote escapes '/' on Android. The build contract deliberately
+        // uses literal ASCII paths; use the same deterministic encoding everywhere.
+        StringBuilder canonical = new StringBuilder("{");
+        for (Map.Entry<String, String> entry : new TreeMap<>(files).entrySet()) {
+            require(entry.getKey().matches("[a-zA-Z0-9_./]+") && entry.getValue().matches("[0-9a-f]{64}"));
+            if (canonical.length() > 1) canonical.append(',');
+            canonical.append(Journal.quote(entry.getKey())).append(':').append(Journal.quote(entry.getValue()));
+        }
+        return sha(canonical.append('}').toString().getBytes(StandardCharsets.UTF_8));
+    }
+    static final class Progress {
+        String phase = "request";
+        boolean admitted;
+        String captureCategory;
+    }
+    static final class Refusal {
+        static final Set<String> PHASES = new HashSet<>(Arrays.asList("request", "metadata", "profile", "source", "source-digest", "request-identity", "libraries", "claim", "retained-export"));
+        final String run, commit, source, provenance, phase, category, trust;
+        final long time = System.nanoTime();
+        boolean first, exportFailed;
+        Refusal(Map<String, Object> extras, Progress progress, Throwable failure) throws Exception {
+            require(PHASES.contains(progress.phase));
+            String candidate = Request.token(extras.get("run_id"), "[a-zA-Z0-9_-]{1,80}");
+            run = candidate == null ? "unbound" : candidate;
+            commit = Request.token(extras.get("expected_source_commit"), "[0-9a-f]{40}");
+            source = Request.token(extras.get("expected_source_sha256"), "[0-9a-f]{64}");
+            provenance = Request.token(extras.get("expected_native_provenance"), "[0-9a-f]{64}");
+            trust = progress.admitted ? "admitted" : candidate != null && commit != null && source != null && provenance != null ? "declared-only" : "unbound";
+            phase = progress.phase; category = progress.captureCategory == null ? Journal.category(failure) : progress.captureCategory;
+        }
+        boolean matches(Request request) {
+            return run.equals(request.run) && request.commit.equals(commit) && request.source.equals(source) && request.provenance.equals(provenance);
+        }
+        static String nullable(String value) { return value == null ? "null" : Journal.quote(value); }
+        byte[] envelope() {
+            return ("{\"schema\":1,\"kind\":\"boot-identity-refusal-v1\",\"run_id\":" + Journal.quote(run)
+                + ",\"source_commit\":" + nullable(commit) + ",\"source_sha256\":" + nullable(source) + ",\"native_provenance_sha256\":" + nullable(provenance)
+                + ",\"identity_trust\":" + Journal.quote(trust) + ",\"sequence\":1,\"clock\":\"java-nanoTime-process\",\"monotonic_ns\":" + time
+                + ",\"phase\":" + Journal.quote(phase) + ",\"category\":" + Journal.quote(category)
+                + ",\"outcome\":\"refused\",\"retention\":\"volatile-only\",\"retained_first\":" + first + ",\"prior_export_failure\":" + exportFailed
+                + ",\"delivery\":\"unacknowledged\",\"observation_complete\":false,\"stack_acceptance\":false}").getBytes(StandardCharsets.UTF_8);
+        }
+        synchronized boolean emit(Journal.Sender sender) {
+            try { sender.send(envelope(), run); return true; }
+            catch (Throwable failure) {
+                if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
+                exportFailed = true; return false; // Explicit retained loss, never auto-retry.
+            }
+        }
+    }
+    // End request/diagnostic helpers.
     private static JSONObject fact(String path, String kind) throws Exception {
         try {
             String text = new String(bounded(Files.newInputStream(Paths.get(path)), 16384), StandardCharsets.UTF_8).trim();
@@ -81,7 +155,8 @@ final class BootIdentityProbe {
             return new JSONObject().put("status", error instanceof AccessDeniedException ? "AccessDenied" : "unknown").put("value", JSONObject.NULL);
         }
     }
-    private static JSONObject preflight(Activity a, JSONObject p, byte[] raw) throws Exception {
+    private static JSONObject preflight(Activity a, JSONObject p, byte[] raw, Request request, Progress progress) throws Exception {
+        progress.phase = "profile";
         keys(p, "schema kind stack_acceptance source_commit adapter_dirty target_sdk min_sdk compile_sdk application_id abis peer_components debuggable diagnostic_log_export wrapper_controls_only wrapper_fixture diagnostic_profile native_files native_donor toolchain_lock_sha256 adapter_sources parity_helper host_tools pending boot_identity");
         require(PACKAGE.equals(a.getPackageName()) && PACKAGE.equals(p.get("application_id")) && PROFILE.equals(p.get("diagnostic_profile")));
         require(Integer.valueOf(1).equals(p.get("schema")) && "disposable-feasibility".equals(p.get("kind")));
@@ -90,6 +165,7 @@ final class BootIdentityProbe {
         require(Integer.valueOf(36).equals(p.get("compile_sdk")) && Integer.valueOf(36).equals(p.get("target_sdk")) && Integer.valueOf(29).equals(p.get("min_sdk")));
         ApplicationInfo info = a.getApplicationInfo();
         require((info.flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0 && info.targetSdkVersion == 36 && info.minSdkVersion == 29 && android.os.Build.VERSION.SDK_INT == 36);
+        progress.phase = "source";
         JSONObject id = p.getJSONObject("boot_identity");
         keys(id, "source_commit source_sha256 files");
         require(id.getString("source_commit").matches("[0-9a-f]{40}") && id.getString("source_commit").equals(p.getString("source_commit")) && id.getString("source_sha256").matches("[0-9a-f]{64}"));
@@ -99,24 +175,17 @@ final class BootIdentityProbe {
         String[] names = {prefix + "native/host/boot_identity.c", prefix + "native/host/boot_identity.h", prefix + "native/host/boot_identity_jni.c", prefix + java + "BootIdentityProbe.java", prefix + java + "ProbeActivity.java", prefix + "runtime/check_boot_identity_report.py"};
         keys(files, String.join(" ", names));
         require("854f90067b0838bb9d97108461b6d110426067534550d886a1f926900c95def3".equals(files.get(names[0])) && "b4621a7e4d66a4f2156f5b66943189a7d268f41f667bf4bf41c9f94cddab40a3".equals(files.get(names[1])));
-        Arrays.sort(names);
-        // Exact canonical source-digest encoding shared with the build checker.
-        StringBuilder canonical = new StringBuilder("{");
+        Map<String, String> sourceFiles = new HashMap<>();
         for (String name : names) {
             String digest = files.getString(name);
             require(digest.matches("[0-9a-f]{64}") && digest.equals(p.getJSONObject("adapter_sources").getString(name)));
-            if (canonical.length() > 1) canonical.append(',');
-            canonical.append(JSONObject.quote(name)).append(':').append(JSONObject.quote(digest));
+            sourceFiles.put(name, digest);
         }
-        canonical.append('}');
-        require(sha(canonical.toString().getBytes(StandardCharsets.UTF_8)).equals(id.getString("source_sha256")));
-        Bundle extras = a.getIntent().getExtras();
-        Set<String> allowed = new HashSet<>(Arrays.asList("run_id", "expected_source_commit", "expected_source_sha256", "expected_native_provenance", "export_report_only"));
-        require(extras != null && allowed.containsAll(extras.keySet()));
-        require(id.getString("source_commit").equals(extras.get("expected_source_commit")) && id.getString("source_sha256").equals(extras.get("expected_source_sha256")) && sha(raw).equals(extras.get("expected_native_provenance")));
-        Object run = extras.get("run_id");
-        require(run instanceof String && ((String)run).matches("[a-zA-Z0-9_-]{1,80}"));
-        if (extras.containsKey("export_report_only")) require(extras.get("export_report_only") instanceof Boolean);
+        progress.phase = "source-digest";
+        require(sourceDigest(sourceFiles).equals(id.getString("source_sha256")));
+        progress.phase = "request-identity";
+        require(id.getString("source_commit").equals(request.commit) && id.getString("source_sha256").equals(request.source) && sha(raw).equals(request.provenance));
+        progress.phase = "libraries";
         JSONArray abis = p.getJSONArray("abis");
         require(abis.length() > 0 && abis.length() <= 2);
         Set<String> nativeNames = new HashSet<>(), seen = new HashSet<>();
@@ -135,6 +204,7 @@ final class BootIdentityProbe {
                 require(sha(bounded(in, 16 * 1024 * 1024)).equals(p.getJSONObject("native_files").getString("lib/" + abi + "/" + lib)));
             }
         }
+        progress.admitted = true;
         return id;
     }
 
@@ -323,27 +393,61 @@ final class BootIdentityProbe {
     }
 
     static boolean dispatch(Activity a, TextView view) {
+        return dispatch(a, view, a.getIntent(), false);
+    }
+    static void dispatchExport(Activity a, TextView view, Intent intent) {
+        dispatch(a, view, intent, true);
+    }
+    private static void showRefusal(Activity a, TextView view, Refusal refusal) {
+        boolean emitted = refusal.emit(BootIdentityProbe::export);
+        a.runOnUiThread(() -> view.setText("Boot identity request refused at " + refusal.phase
+            + (emitted ? "; diagnostic frames submitted (delivery unacknowledged)." : "; diagnostic export failed.")
+            + " Volatile evidence only; no observation/recovery acceptance. Preserve this JVM; export-only can retrieve the first matching refusal."));
+    }
+    private static boolean dispatch(Activity a, TextView view, Intent intent, boolean newIntent) {
         boolean separatePackage = PACKAGE.equals(a.getPackageName());
-        byte[] raw;
-        JSONObject p;
-        try {
-            raw = bounded(a.getAssets().open("runtime/native-provenance.json"), 2 * 1024 * 1024);
-            p = new JSONObject(new String(raw, StandardCharsets.UTF_8));
-        } catch (Exception error) {
-            if (!separatePackage) { view.setText("Diagnostic metadata unavailable; refused"); return true; }
-            view.setText("Boot identity metadata unavailable; refused"); return true;
+        if (!separatePackage) {
+            try {
+                byte[] raw = bounded(a.getAssets().open("runtime/native-provenance.json"), 2 * 1024 * 1024);
+                if (!PROFILE.equals(new JSONObject(new String(raw, StandardCharsets.UTF_8)).opt("diagnostic_profile"))) return false;
+            } catch (Exception error) { view.setText("Diagnostic metadata unavailable; refused"); return true; }
         }
-        if (!separatePackage && !PROFILE.equals(p.opt("diagnostic_profile"))) return false;
-        view.setText("Boot identity observation pending; no recovery authority");
+        // Snapshot extras on the UI thread. Never mutate Activity.intent or read it
+        // from a worker: later onNewIntent delivery cannot change this request.
+        Map<String, Object> values = new HashMap<>();
+        String snapshotFailure = null;
+        try {
+            Bundle extras = intent == null ? null : intent.getExtras();
+            require(extras != null);
+            for (String key : extras.keySet()) values.put(key, extras.get(key));
+        } catch (Throwable error) { snapshotFailure = Journal.category(error); }
+        final Map<String, Object> snapshot = Collections.unmodifiableMap(new HashMap<>(values));
+        final String captureFailure = snapshotFailure;
+        view.setText(newIntent ? "Export-only request pending; native work is fenced" : "Boot identity observation pending; no recovery authority");
         new Thread(() -> {
             Journal claimed = null;
+            Progress progress = new Progress();
             try {
-                JSONObject id = preflight(a, p, raw);
-                String run = a.getIntent().getStringExtra("run_id");
-                String provenance = sha(raw);
+                progress.captureCategory = captureFailure;
+                require(captureFailure == null);
+                final Request request = new Request(snapshot, newIntent);
+                if (request.exportOnly) {
+                    final Refusal first;
+                    // An in-flight request refusal must never conceal the
+                    // original attempt's later terminal/report diagnostics.
+                    synchronized (BootIdentityProbe.class) { first = retained == null ? retainedRefusal : null; }
+                    if (first != null && first.matches(request)) { showRefusal(a, view, first); return; }
+                }
+                progress.phase = "metadata";
+                final byte[] raw = bounded(a.getAssets().open("runtime/native-provenance.json"), 2 * 1024 * 1024);
+                final JSONObject p = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+                final JSONObject id = preflight(a, p, raw, request, progress);
+                final String run = request.run;
+                final String provenance = request.provenance;
                 Journal.Validator validator = bytes -> validateRetainedReport(bytes, id, run, provenance);
                 final Journal journal;
-                if (a.getIntent().getBooleanExtra("export_report_only", false)) {
+                if (request.exportOnly) {
+                    progress.phase = "retained-export";
                     synchronized (BootIdentityProbe.class) {
                         if (retained == null) {
                             Journal restored = new Journal(a.getFilesDir(), run, id.getString("source_commit"), id.getString("source_sha256"), provenance);
@@ -356,6 +460,7 @@ final class BootIdentityProbe {
                     a.runOnUiThread(() -> view.setText(emitted ? "Retained diagnostics exported; inspect storage-loss facts; no native replay" : "Diagnostic export failed; loss may be memory-only; preserve this JVM"));
                     return;
                 }
+                progress.phase = "claim";
                 synchronized (BootIdentityProbe.class) {
                     require(retained == null);
                     journal = new Journal(a.getFilesDir(), run, id.getString("source_commit"), id.getString("source_sha256"), provenance);
@@ -389,7 +494,17 @@ final class BootIdentityProbe {
                 if (claimed != null && claimed.start == null) {
                     synchronized (BootIdentityProbe.class) { if (retained == claimed) retained = null; }
                 }
-                a.runOnUiThread(() -> view.setText("Boot identity request refused or attempt still in flight; preserve this JVM and original evidence"));
+                if (error instanceof InterruptedException) Thread.currentThread().interrupt();
+                try {
+                    Refusal refusal = new Refusal(snapshot, progress, error);
+                    synchronized (BootIdentityProbe.class) {
+                        if (retainedRefusal == null) { refusal.first = true; retainedRefusal = refusal; }
+                    }
+                    showRefusal(a, view, refusal);
+                } catch (Throwable diagnosticFailure) {
+                    if (diagnosticFailure instanceof InterruptedException) Thread.currentThread().interrupt();
+                    a.runOnUiThread(() -> view.setText("Boot identity refusal diagnostics failed; no acceptance. Preserve this JVM and original evidence."));
+                }
             }
         }, "boot-identity-once").start();
         return true;

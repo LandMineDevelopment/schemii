@@ -740,6 +740,116 @@ def check_diagnostics(bundle, p, identity, **expected):
     }
 
 
+def check_refusal(bundle, p, identity, **expected):
+    """Inspect a redacted preflight/request refusal, never an observed boot read.
+
+    Before admission, source fields are caller declarations. Even an exact match
+    provides correlation only. The first refusal survives only in the current
+    JVM; complete durable attempt evidence is explicitly absent.
+    """
+    check_provenance(p, identity)
+    closed(
+        bundle,
+        "schema kind run_id source_commit source_sha256 native_provenance_sha256 identity_trust sequence clock monotonic_ns phase category outcome retention retained_first prior_export_failure delivery observation_complete stack_acceptance",
+    )
+    require(
+        type(bundle["schema"]) is int
+        and bundle["schema"] == 1
+        and type(bundle["sequence"]) is int
+        and bundle["sequence"] == 1
+        and bundle["kind"] == "boot-identity-refusal-v1"
+        and bundle["clock"] == "java-nanoTime-process"
+        and bundle["outcome"] == "refused"
+        and bundle["retention"] == "volatile-only"
+        and bundle["delivery"] == "unacknowledged"
+        and bundle["observation_complete"] is False
+        and bundle["stack_acceptance"] is False,
+        "Refusal envelope drift",
+    )
+    integer(bundle["monotonic_ns"], -(2**63), 2**63 - 1)
+    for key in ("retained_first", "prior_export_failure"):
+        require(type(bundle[key]) is bool, "Refusal flag type drift")
+    require(
+        type(bundle["run_id"]) is str
+        and re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", bundle["run_id"]) is not None
+        and bundle["run_id"] == expected["run_id"],
+        "Refusal correlation drift",
+    )
+    for key, size in (
+        ("source_commit", 40),
+        ("source_sha256", 64),
+        ("native_provenance_sha256", 64),
+    ):
+        value = bundle[key]
+        require(
+            value is None
+            or (
+                type(value) is str
+                and re.fullmatch(r"[0-9a-f]{" + str(size) + "}", value) is not None
+            ),
+            "Refusal identity token drift",
+        )
+    phase, category, trust = (
+        bundle["phase"],
+        bundle["category"],
+        bundle["identity_trust"],
+    )
+    require(
+        type(phase) is str
+        and phase
+        in {
+            "request",
+            "metadata",
+            "profile",
+            "source",
+            "source-digest",
+            "request-identity",
+            "libraries",
+            "claim",
+            "retained-export",
+        }
+        and type(category) is str
+        and category in {"native-linkage", "io", "interrupted", "refused", "java-error"}
+        and type(trust) is str
+        and trust in {"unbound", "declared-only", "admitted"},
+        "Refusal classification drift",
+    )
+    ids = ("source_commit", "source_sha256", "native_provenance_sha256")
+    if trust != "unbound":
+        require(
+            all(bundle[k] is not None for k in ids), "Bound refusal missing identity"
+        )
+    else:
+        require(
+            bundle["run_id"] == "unbound" or any(bundle[k] is None for k in ids),
+            "Unbound refusal with complete declaration",
+        )
+    matches = (
+        bundle["source_commit"] == identity["source_commit"]
+        and bundle["source_sha256"] == identity["source_sha256"]
+        and bundle["native_provenance_sha256"] == expected["provenance_sha256"]
+    )
+    require(
+        (trust == "admitted") == (phase in {"claim", "retained-export"}),
+        "Refusal admission phase drift",
+    )
+    if trust == "admitted":
+        require(matches, "Admitted refusal identity drift")
+    return {
+        "diagnostic_export_valid": True,
+        "diagnostic_complete": False,
+        "evidence_loss": True,
+        "identity_admitted": trust == "admitted",
+        "declared_identity_matches_expected": matches,
+        "volatile_first_refusal_retained": bundle["retained_first"],
+        "prior_export_failure": bundle["prior_export_failure"],
+        "observation_complete": False,
+        "runtime_gate": "NO-GO-request-refused",
+        "owner_authority": False,
+        "recovery_acceptance": False,
+    }
+
+
 def decode_export(lines, run_id):
     chunks, expected = {}, None
     for line in lines:
@@ -780,9 +890,13 @@ def main():
     args = parser.parse_args()
     raw = args.provenance.read_bytes()
     report = loads(args.report.read_bytes())
+    validators = {
+        "boot-identity-diagnostics-v1": check_diagnostics,
+        "boot-identity-refusal-v1": check_refusal,
+    }
     validator = (
-        check_diagnostics
-        if type(report) is dict and report.get("kind") == "boot-identity-diagnostics-v1"
+        validators.get(report.get("kind"), check_report)
+        if type(report) is dict
         else check_report
     )
     result = validator(

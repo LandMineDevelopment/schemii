@@ -456,6 +456,186 @@ int main(void) {
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 check.decode_export(bad, "p1b-01")
 
+    def test_production_canonical_request_and_refusal_paths(self):
+        # Exact production pure-Java seams; no app/JNI/kernel boot read.
+        source = (
+            PATH.parents[1]
+            / "app/src/main/java/development/landmine/schemii/runtimeprobe/BootIdentityProbe.java"
+        ).read_text()
+        helpers = "".join(
+            source[source.index(first) : source.index(after)]
+            for first, after in (
+                ("    private static void require(", "    private static String sha("),
+                (
+                    "    private static String sha(",
+                    "    private static byte[] bounded(",
+                ),
+                ("    private static byte[] bounded(", "    private static void keys("),
+                (
+                    "    private static void persist(",
+                    "    private static synchronized void export(",
+                ),
+                (
+                    "    // Request/diagnostic helpers:",
+                    "    // End request/diagnostic helpers.",
+                ),
+                ("    static final class Journal {", "    // End diagnostic journal."),
+            )
+        )
+        harness = r"""
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.security.MessageDigest;
+import java.util.*;
+public class RequestControls {
+__PRODUCTION__
+    static final String SECRET = "private-exception-or-extra-value-must-not-escape";
+    static Map<String, Object> extras() {
+        Map<String, Object> e = new HashMap<>();
+        e.put("run_id", "p1b-01"); e.put("expected_source_commit", "c".repeat(40));
+        e.put("expected_source_sha256", "d".repeat(64)); e.put("expected_native_provenance", "e".repeat(64));
+        return e;
+    }
+    static void rejected(Map<String, Object> e, boolean delivered) throws Exception {
+        try { new Request(e, delivered); throw new AssertionError("accepted unsafe request"); }
+        catch (IOException expected) { }
+    }
+    static void emit(String name, Refusal r) throws Exception {
+        require(r.emit((raw, run) -> {
+            require(!new String(raw, StandardCharsets.UTF_8).contains(SECRET));
+            System.out.println(name + " " + Base64.getEncoder().encodeToString(raw));
+        }));
+    }
+    public static void main(String[] args) throws Exception {
+        Map<String, String> files = new HashMap<>();
+        for (String line : Files.readAllLines(Paths.get(args[0]))) {
+            String[] pair = line.split("=", 2); files.put(pair[0], pair[1]);
+        }
+        System.out.println("digest " + sourceDigest(files));
+        Map<String, String> badFiles = new HashMap<>(files); badFiles.replaceAll((k, v) -> SECRET);
+        try { sourceDigest(badFiles); throw new AssertionError(); } catch (IOException expected) { }
+        Map<String, Object> original = extras(); Request captured = new Request(original, false);
+        original.put("run_id", "changed-after-capture"); original.put("export_report_only", true);
+        require(captured.run.equals("p1b-01") && !captured.exportOnly);
+        rejected(extras(), true); // Every new-intent delivery requires explicit export-only.
+        for (Object invalid : new Object[]{null, "true", 1, new Object()}) {
+            Map<String, Object> bad = extras(); bad.put("export_report_only", invalid); rejected(bad, false);
+        }
+        for (String key : extras().keySet()) {
+            Map<String, Object> missing = extras(); missing.remove(key); rejected(missing, false);
+            Map<String, Object> wrong = extras(); wrong.put(key, SECRET + " /"); rejected(wrong, false);
+            Map<String, Object> typed = extras(); typed.put(key, true); rejected(typed, false);
+        }
+        Map<String, Object> unknown = extras(); unknown.put("secret", SECRET); rejected(unknown, false);
+        Map<String, Object> export = extras(); export.put("export_report_only", true);
+        Request delivered = new Request(export, true); require(delivered.exportOnly);
+        Progress progress = new Progress(); progress.phase = "source-digest";
+        Refusal first = new Refusal(extras(), progress, new IOException(SECRET)); first.first = true;
+        require(first.matches(delivered)); emit("canonical_refused", first);
+        require(!first.emit((raw, run) -> { throw new InterruptedException(SECRET); }));
+        require(Thread.currentThread().isInterrupted()); Thread.interrupted();
+        emit("retained_transport_loss", first);
+        require(!new String(first.envelope(), StandardCharsets.UTF_8).contains(SECRET));
+        Map<String, Object> foreign = extras(); foreign.put("expected_source_commit", "0".repeat(40));
+        require(!first.matches(new Request(foreign, false)));
+        emit("foreign_declaration", new Refusal(foreign, progress, new IOException(SECRET)));
+        Map<String, Object> invalid = extras(); invalid.put("run_id", SECRET + " /"); invalid.put("expected_source_commit", SECRET);
+        progress.phase = "request";
+        emit("unbound", new Refusal(invalid, progress, new AssertionError(SECRET)));
+        progress.phase = "claim"; progress.admitted = true;
+        emit("admitted_claim_refused", new Refusal(extras(), progress, new IOException(SECRET)));
+    }
+}
+""".replace("__PRODUCTION__", helpers)
+        p, identity, _ = fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "RequestControls.java").write_text(harness)
+            (root / "files").write_text(
+                "".join(k + "=" + v + "\n" for k, v in identity["files"].items())
+            )
+            subprocess.run(
+                ["javac", "-Xlint:all", str(root / "RequestControls.java")],
+                check=True,
+                capture_output=True,
+            )
+            result = subprocess.run(
+                ["java", "-cp", str(root), "RequestControls", str(root / "files")],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        lines = dict(line.split(" ", 1) for line in result.stdout.splitlines())
+        canonical = json.dumps(identity["files"], sort_keys=True, separators=(",", ":"))
+        self.assertEqual(lines.pop("digest"), check.sha(canonical.encode()))
+        self.assertNotEqual(
+            check.sha(canonical.replace("/", r"\/").encode()),
+            check.sha(canonical.encode()),
+        )
+        self.assertEqual(len(lines), 5)
+        bundles = {
+            name: check.loads(base64.b64decode(raw)) for name, raw in lines.items()
+        }
+        for label, bundle in bundles.items():
+            result = check.check_refusal(
+                bundle,
+                p,
+                identity,
+                run_id="unbound" if label == "unbound" else "p1b-01",
+                provenance_sha256="e" * 64,
+            )
+            with self.subTest(label=label):
+                self.assertFalse(result["observation_complete"])
+                self.assertFalse(result["diagnostic_complete"])
+                self.assertTrue(result["evidence_loss"])
+                self.assertFalse(result["owner_authority"])
+                self.assertFalse(result["recovery_acceptance"])
+                self.assertEqual(
+                    result["identity_admitted"], label == "admitted_claim_refused"
+                )
+                self.assertEqual(
+                    result["declared_identity_matches_expected"],
+                    label not in ("unbound", "foreign_declaration"),
+                )
+        first, replay = bundles["canonical_refused"], bundles["retained_transport_loss"]
+        self.assertEqual(
+            {k: v for k, v in replay.items() if k != "prior_export_failure"},
+            {k: v for k, v in first.items() if k != "prior_export_failure"},
+        )
+        self.assertTrue(replay["prior_export_failure"])
+        for key, value in (
+            ("schema", True),
+            ("sequence", 2),
+            ("sequence", True),
+            ("phase", "native-call"),
+            ("category", "exception-text"),
+            ("identity_trust", "admitted"),
+            ("identity_trust", []),
+            ("retention", "file-synced"),
+            ("observation_complete", True),
+            ("delivery", "acknowledged"),
+            ("stack_acceptance", True),
+            ("source_commit", None),
+            ("source_commit", "private-value"),
+            ("monotonic_ns", True),
+            ("prior_export_failure", 1),
+            ("run_id", "wrong"),
+            ("raw_exception", "forbidden"),
+        ):
+            bad = copy.deepcopy(first)
+            bad[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                check.check_refusal(
+                    bad, p, identity, run_id="p1b-01", provenance_sha256="e" * 64
+                )
+        wrong = copy.deepcopy(bundles["admitted_claim_refused"])
+        wrong["source_commit"] = "0" * 40
+        with self.assertRaises(ValueError):
+            check.check_refusal(
+                wrong, p, identity, run_id="p1b-01", provenance_sha256="e" * 64
+            )
+
     def test_production_java_journal_failure_and_export_only(self):
         # Compile the exact production pure-Java journal and its four I/O/hash
         # helpers. The Work callback injects failures instead of loading JNI;
@@ -478,7 +658,10 @@ int main(void) {
                     "    private static byte[] bounded(",
                 ),
                 ("    private static byte[] bounded(", "    private static void keys("),
-                ("    private static void persist(", "    private static void export("),
+                (
+                    "    private static void persist(",
+                    "    private static synchronized void export(",
+                ),
             )
         )
         harness = r"""
