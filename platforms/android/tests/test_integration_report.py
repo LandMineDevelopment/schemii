@@ -75,6 +75,15 @@ def positive_case():
     )
 
 
+def ownership_report(*checks):
+    return dict(
+        checks=list(checks),
+        retained_invocations=[],
+        retained_native_operations=[],
+        retained_guest_owners=0,
+    )
+
+
 class IntegrationReportControls(unittest.TestCase):
     def validate_case(self, raw, exit_code=0):
         return checker.finite_case(
@@ -210,6 +219,93 @@ class IntegrationReportControls(unittest.TestCase):
         changed = copy.deepcopy(call)
         changed.update(retained_ownership=True, failed=True, control_pass=False)
         self.assertFalse(checker.network_case(changed, {"bridge_sha256": "bridge"}))
+
+    def test_retained_callback_requires_its_native_ownership_summary(self):
+        report = ownership_report(
+            dict(name="network-callbacks-cde", retained_ownership=True)
+        )
+        for wrong_summary in [None, "retained_invocations", "retained_guest_owners"]:
+            with self.subTest(summary=wrong_summary):
+                changed = copy.deepcopy(report)
+                if wrong_summary:
+                    changed[wrong_summary] = (
+                        1
+                        if wrong_summary == "retained_guest_owners"
+                        else ["unrelated owner"]
+                    )
+                with self.assertRaisesRegex(ValueError, "missing ownership summary"):
+                    checker.ownership_retained(changed)
+        report["retained_native_operations"] = ["network-callbacks-cde"]
+        self.assertTrue(checker.ownership_retained(report))
+
+    def test_retained_operation_fences_subsequent_observations(self):
+        for name, field in [
+            ("network-callbacks-cde", "retained_native_operations"),
+            ("subreaper-orphan-v1-native-fast-orphan", "retained_invocations"),
+        ]:
+            with self.subTest(operation=name):
+                report = ownership_report(
+                    dict(name=name, retained_ownership=True),
+                    dict(name="later-process", retained_ownership=False),
+                )
+                report[field] = [name]
+                with self.assertRaisesRegex(ValueError, "after retained ownership"):
+                    checker.ownership_retained(report)
+
+    def test_unknown_ownership_summary_shape_is_refused(self):
+        original = ownership_report(
+            dict(name="network-callbacks-cde", retained_ownership=False)
+        )
+        for field in [
+            "retained_invocations",
+            "retained_native_operations",
+        ]:
+            for value in [None, False, 0, "", {}]:
+                with self.subTest(field=field, value=value):
+                    report = copy.deepcopy(original)
+                    report[field] = value
+                    with self.assertRaisesRegex(ValueError, "must be arrays"):
+                        checker.ownership_retained(report)
+        for value in [None, False, -1, "", [], {}]:
+            with self.subTest(guest_count=value):
+                report = copy.deepcopy(original)
+                report["retained_guest_owners"] = value
+                with self.assertRaisesRegex(ValueError, "nonnegative count"):
+                    checker.ownership_retained(report)
+
+    def test_unknown_raw_ownership_is_refused(self):
+        for value in [None, 0, "false", [], {}]:
+            with self.subTest(value=value):
+                report = ownership_report(
+                    dict(name="network-callbacks-cde", retained_ownership=value)
+                )
+                with self.assertRaisesRegex(ValueError, "ownership witness"):
+                    checker.ownership_retained(report)
+
+    def test_clean_closed_unready_callback_is_not_retained(self):
+        call = dict(
+            name="network-callbacks-cde",
+            source_head=checker.NETWORK_HEAD,
+            node_started=False,
+            enrollment_attempted=False,
+            retained_ownership=False,
+            api_returned_after_close=True,
+            control_pass=False,
+            bridge_identity_verified=False,
+            report=dict(ready=False, stack_acceptance=False),
+        )
+        self.assertFalse(checker.network_case(call, {"bridge_sha256": "bridge"}))
+        self.assertFalse(checker.ownership_retained(ownership_report(call)))
+
+    def test_summary_uncertainty_stays_conservative_without_raw_retention(self):
+        report = ownership_report(
+            dict(name="network-callbacks-cde", retained_ownership=False)
+        )
+        report["retained_native_operations"] = ["unconfirmed native operation"]
+        self.assertTrue(checker.ownership_retained(report))
+        report["retained_native_operations"] = []
+        report["retained_guest_owners"] = 1
+        self.assertTrue(checker.ownership_retained(report))
 
 
 if __name__ == "__main__":

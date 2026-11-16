@@ -310,6 +310,43 @@ def network_case(call, component):
     return ready
 
 
+def ownership_retained(report):
+    """Reconcile collector witnesses before admitting any later observations."""
+    summaries = {
+        field: report[field]
+        for field in [
+            "retained_invocations",
+            "retained_native_operations",
+        ]
+    }
+    require(
+        all(type(value) is list for value in summaries.values()),
+        "Ownership summaries must be arrays",
+    )
+    guest_owners = report["retained_guest_owners"]
+    require(
+        type(guest_owners) is int and guest_owners >= 0,
+        "Retained guest ownership must be a nonnegative count",
+    )
+    raw_retained = False
+    checks = report["checks"]
+    for index, check in enumerate(checks):
+        require(
+            type(check["retained_ownership"]) is bool,
+            "Invalid retained ownership witness",
+        )
+        if check["retained_ownership"]:
+            require(index == len(checks) - 1, "Observation after retained ownership")
+            field = (
+                "retained_native_operations"
+                if check["name"] == "network-callbacks-cde"
+                else "retained_invocations"
+            )
+            require(summaries[field], "Retained operation missing ownership summary")
+            raw_retained = True
+    return raw_retained or any(summaries.values()) or guest_owners > 0
+
+
 def validate(report, apk, expected_commit, signer_sha256, debuggable, root, aapt2):
     require(
         re.fullmatch(r"[0-9a-f]{40}", expected_commit) is not None,
@@ -388,6 +425,7 @@ def validate(report, apk, expected_commit, signer_sha256, debuggable, root, aapt
         "Network elapsed observation missing",
     )
     network_ready = network_case(checks[0], components["network"])
+    retained = ownership_retained(report)
     expected = [
         (mode, which) for mode in ["native", "proot"] for which in SUBREAPER_CASES
     ]
@@ -496,11 +534,6 @@ def validate(report, apk, expected_commit, signer_sha256, debuggable, root, aapt
         )
         result["mode"] = mode
         results.append(result)
-    retained = bool(
-        report["retained_invocations"]
-        or report["retained_native_operations"]
-        or report["retained_guest_owners"]
-    )
     complete_inventory = (
         len(results) == 32 and report.get("integration_case_inventory_complete") is True
     )
