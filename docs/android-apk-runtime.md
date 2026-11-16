@@ -150,7 +150,12 @@ Both helper/selector digests and checkout revision are bound before/after build;
 packages and runs keep their original identities and are not current-source proof.
 
 `--native-donor /private/prior-build/receipt.json` can reuse only the three base
-bionic executable bytes per ABI. It verifies the donor APK/provenance/file hashes,
+bionic executable bytes per ABI. Reuse also requires
+`--native-donor-receipt-sha256 EXPECTED_SHA256`, selected independently by the
+coordinator before donor admission. Missing, malformed or mismatched anchors fail
+closed before any executable is copied. The expected and observed receipt digests
+are recorded in the new APK provenance. This anchors the immutable product; it
+is not compiler attestation. It verifies the donor APK/provenance/file hashes,
 committed clean source, native recipe/ABI mapping, native source files and unchanged
 toolchain lock. Peer libraries and runtime acceptance are not inherited. Current
 canonical static packages omit old guest archives: their recorded full contract
@@ -160,7 +165,8 @@ preserved and are not relabeled or re-resolved merely for source packaging proof
 ```bash
 python3 platforms/android/build.py build --build-id canonical-UNIQUE \
   --abi arm64-v8a --abi x86_64 --non-debuggable \
-  --native-donor /private/prior-build/receipt.json
+  --native-donor /private/prior-build/receipt.json \
+  --native-donor-receipt-sha256 INDEPENDENT_EXPECTED_RECEIPT_SHA256
 python3 platforms/android/check_package_controls.py /private/canonical-UNIQUE/schemii-runtime-probe.apk \
   --expected-commit INDEPENDENT_FULL_GIT_SHA --source-only
 ```
@@ -339,14 +345,30 @@ same-UID process, name or group as ownership.
 Deadline/cancellation sends no automatic signal and never discards an uncertain
 owner. It retains the Process reference, cwd/output/journal and uncertainty,
 fences later launches and records a concrete reconciliation action. Activity
-destruction interrupts collection rather than killing owners. This is fail-closed
+destruction synchronizes cancellation with the same completion gate used to
+accept output and release the captured owner. File reads, JSON handling and
+journal I/O run outside that gate. The durable journal is explicitly provisional:
+it contains no accepted output and retains ownership. Only after those operations
+finish does one short, synchronized in-memory commit accept the candidate output
+and release the direct-owner reference. The final run report records that commit;
+a provisional journal alone never proves it. Cancellation or interruption during
+read or journal preparation prevents the commit, writes a retained/cancelled
+outcome where possible and keeps the launch fence. An I/O failure leaves the
+last conservative journal and captured owner intact. No lock-held file operation
+postpones cancellation through slow report handling. Destruction interrupts
+collection rather than killing owners. This is fail-closed
 diagnostic behavior, not a production owner-loss solution. If cleanup cannot be
 proved, stop and preserve the owned state for coordinator review.
 
 The opt-in `--wrapper-controls-only --log-report` build mode excludes guests,
 network and peer process campaigns. Its new source-bound finite native fixture
 checks two native fresh cwds and one PRoot cwd, exact64KiB,65537-byte overflow,
-partial/trailing JSON refusal, deadline and interruption. The last two retain
+partial/trailing JSON refusal, deadline, interruption and two latch-controlled
+late cancellations inside the actual read and journal handling paths. The original
+nine observations retain their original906 identity. The updated eleven-control
+campaign adds those two boundaries; host Java controls independently exercise the
+production gate during read/journal cancellation, lifecycle closing and thread
+interruption, plus uncontested completion. The cancellation controls retain
 ownership at collection failure and refuse another launch. A separately labeled
 fixture oracle then waits for its known one-child finite program to finish itself
 and specifically reap that child; only this source-bound fixture reference can be
@@ -355,7 +377,12 @@ failure labels and generic descendant uncertainty remain unchanged. This does
 not prove arbitrary descendants, owner death, PostgreSQL cleanup or13e behavior.
 
 `runtime/check_wrapper_report.py` validates the original Android report against
-independently selected signed APK/source/signing-certificate inputs. Fixture
+independently selected signed APK/source/signing-certificate inputs. It hashes
+actual packaged fixture bytes, verifies their ELF ABI/source identity and checks
+observed executable identity. Finite cleanup is recomputed from observed owner
+exit, parent source, exact child birth, specific reaping, status/count and child
+done witnesses. Contradictory exit, cancellation, timeout, ownership or output
+fields fail even when a summary claims success. Fixture
 success remains `stack_acceptance=false`. The original68 polling reports retain
 their old shared-cwd/32KiB/deadline limitations and original source labels.
 

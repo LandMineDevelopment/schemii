@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import tempfile
@@ -247,11 +248,19 @@ def native_recipe(source):
     ).hexdigest()
 
 
-def reuse_native(donor_path, out, abis):
+def reuse_native(donor_path, out, abis, expected_receipt_sha256):
     """Reuse only exact base executables; no peer component or acceptance inheritance."""
     from verify_apk import elf_identity
 
     raw = donor_path.read_bytes()
+    # The caller selects this anchor independently of the supplied donor. Local
+    # receipt/APK/provenance agreement alone permits a fully rebound substitute.
+    if not isinstance(expected_receipt_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_receipt_sha256
+    ):
+        raise ValueError("Independent expected native donor receipt SHA256 required")
+    if hashlib.sha256(raw).hexdigest() != expected_receipt_sha256:
+        raise ValueError("Native donor does not match independently selected receipt")
     receipt = json.loads(raw)
     apk = Path(receipt["apk"])
     if digest(apk) != receipt["apk_sha256"]:
@@ -313,6 +322,7 @@ def reuse_native(donor_path, out, abis):
         "apk_sha256": receipt["apk_sha256"],
         "native_provenance_sha256": receipt["native_provenance_sha256"],
         "receipt_sha256": hashlib.sha256(raw).hexdigest(),
+        "expected_receipt_sha256": expected_receipt_sha256,
         "recipe_sha256": recipe,
         "scope": "base bionic executable bytes only; no shared-source/runtime acceptance reuse",
     }
@@ -381,6 +391,10 @@ def adapter_sources():
 
 
 def build(args, cache):
+    if bool(args.native_donor) != bool(args.native_donor_receipt_sha256):
+        raise ValueError(
+            "Native donor and independent receipt SHA256 must be supplied together"
+        )
     if not args.build_id or any(
         c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
         for c in args.build_id
@@ -429,7 +443,9 @@ def build(args, cache):
     artifacts = {}
     native_donor = None
     if args.native_donor:
-        artifacts, native_donor = reuse_native(args.native_donor, out, abis)
+        artifacts, native_donor = reuse_native(
+            args.native_donor, out, abis, args.native_donor_receipt_sha256
+        )
     else:
         for abi in abis:
             artifacts.update(native(cache, out, abi))
@@ -793,6 +809,10 @@ def main():
         "--native-donor",
         type=Path,
         help="Reuse exact committed base native binaries from this receipt",
+    )
+    b.add_argument(
+        "--native-donor-receipt-sha256",
+        help="Independently selected immutable donor receipt SHA256 (required for reuse)",
     )
     b.add_argument("--network-handoff", type=Path)
     b.add_argument("--network-checkout", type=Path)

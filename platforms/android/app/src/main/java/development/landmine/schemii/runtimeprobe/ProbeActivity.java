@@ -25,8 +25,9 @@ public final class ProbeActivity extends Activity {
         final File cwd;
         final File output;
         final JSONObject result;
-        OwnedInvocation(Process process, File journal, File cwd, File output, JSONObject result) {
-            this.process = process; this.journal = journal; this.cwd = cwd; this.output = output; this.result = result;
+        final CollectorCompletion completion;
+        OwnedInvocation(Process process, File journal, File cwd, File output, JSONObject result, CollectorCompletion completion) {
+            this.process = process; this.journal = journal; this.cwd = cwd; this.output = output; this.result = result; this.completion = completion;
         }
     }
 
@@ -43,7 +44,12 @@ public final class ProbeActivity extends Activity {
     }
 
     private static String completeOutput(File output) throws IOException {
+        return completeOutput(output, null);
+    }
+
+    private static String completeOutput(File output, Runnable duringRead) throws IOException {
         try (FileInputStream input = new FileInputStream(output); ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+            if (duringRead != null) duringRead.run();
             byte[] buffer = new byte[8192];
             for (int n; (n = input.read(buffer, 0, Math.min(buffer.length, 65537 - bytes.size()))) != -1;) {
                 bytes.write(buffer, 0, n);
@@ -101,6 +107,11 @@ public final class ProbeActivity extends Activity {
 
     private JSONObject collect(String name, Command factory, Map<String, String> env,
                                String mode, long deadlineMs) throws Exception {
+        return collect(name, factory, env, mode, deadlineMs, null);
+    }
+
+    private JSONObject collect(String name, Command factory, Map<String, String> env,
+                               String mode, long deadlineMs, String cancellationBoundary) throws Exception {
         long started = System.nanoTime();
         requireNoRetainedOwner();
         if (!name.matches("[a-zA-Z0-9_-]+")) throw new IOException("Unsafe invocation name");
@@ -136,7 +147,7 @@ public final class ProbeActivity extends Activity {
             if (closing || Thread.currentThread().isInterrupted()) throw new IOException("Activity closing or collector cancelled before launch");
             if (!owned.isEmpty() || !retainedGuests.isEmpty()) throw new IOException("Prior owned process/uncertainty retained; refuse another launch");
             p = pb.start();
-            entry = new OwnedInvocation(p, journal, cwd, output, result);
+            entry = new OwnedInvocation(p, journal, cwd, output, result, new CollectorCompletion(owned, () -> closing));
             owned.add(entry);
         }
         result.put("phase", "waiting").put("retained_ownership", true);
@@ -152,25 +163,74 @@ public final class ProbeActivity extends Activity {
             .put("termination_attempted", false).put("output_accepted", false)
             .put("output_truncated", false).put("output_overflow", false)
             .put("output_bytes_observed", output.length()).put("phase", done && !cancelled ? "direct-child-exited" : "retained-uncertain");
+        boolean committed = false;
         if (done && !cancelled) {
-            try {
-                String text = completeOutput(output);
-                singleObject(text); // Partial JSON or a valid prefix followed by more data cannot pass.
-                result.put("output", text).put("output_accepted", true)
-                    .put("output_sha256", hex(java.security.MessageDigest.getInstance("SHA-256").digest(text.getBytes("UTF-8"))));
-            } catch (IOException | org.json.JSONException error) {
-                boolean overflow = output.length() > 65536;
-                result.put("output_error", error.toString()).put("output_overflow", overflow).put("output_truncated", overflow);
-            }
-            result.put("retained_ownership", false);
-        } else {
-            result.put("output_error", "Unfinished/cancelled owner: output not accepted; process reference, files and uncertainty retained")
-                .put("next_action", "Stop launching; independently reconcile retained owner and descendants. No automatic signal, restart or cleanup.");
+            JSONObject candidate = new JSONObject(result.toString());
+            committed = entry.completion.finish(() -> {
+                try {
+                    String text = completeOutput(output, () -> cancelAtBoundary(cancellationBoundary, "read", entry.completion));
+                    singleObject(text); // No valid prefix, malformed UTF8 or partial JSON.
+                    candidate.put("output", text).put("output_accepted", true)
+                        .put("output_sha256", hex(java.security.MessageDigest.getInstance("SHA-256").digest(text.getBytes("UTF-8"))));
+                } catch (IOException | org.json.JSONException error) {
+                    boolean overflow = output.length() > 65536;
+                    candidate.put("output_error", error.toString()).put("output_overflow", overflow).put("output_truncated", overflow);
+                }
+            }, () -> {
+                // A prepared journal is never evidence of accepted output or
+                // owner release, including across a crash before memory commit.
+                JSONObject prepared = new JSONObject(result.toString())
+                    .put("phase", "completion-prepared").put("completion_state", "prepared")
+                    .put("journal_outcome", "provisional-no-output-acceptance")
+                    .put("elapsed_ms", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+                writeJson(journal, prepared);
+                cancelAtBoundary(cancellationBoundary, "journal", entry.completion);
+            }, () -> {
+                Iterator<String> keys = candidate.keys();
+                while (keys.hasNext()) { String key = keys.next(); result.put(key, candidate.get(key)); }
+                result.put("retained_ownership", false).put("completion_state", "committed")
+                    .put("journal_outcome", "provisional-no-output-acceptance")
+                    .put("elapsed_ms", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+                owned.remove(entry);
+            });
         }
-        result.put("elapsed_ms", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
-        writeJson(journal, result);
-        if (done && !cancelled) synchronized (owned) { owned.remove(entry); }
+        if (!committed) {
+            cancelled = cancelled || entry.completion.cancelled();
+            result.remove("output"); result.remove("output_sha256");
+            result.put("cancelled", cancelled).put("timeout", !done && !cancelled)
+                .put("phase", "retained-uncertain").put("completion_state", "retained")
+                .put("retained_ownership", true).put("output_accepted", false)
+                .put("output_error", "Unfinished/cancelled owner: output not accepted; process reference, files and uncertainty retained")
+                .put("next_action", "Stop launching; independently reconcile retained owner and descendants. No automatic signal, restart or cleanup.")
+                .put("elapsed_ms", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+            writeJson(journal, result);
+        }
         return result;
+    }
+
+    /** Wrapper-only latch control: cancel while real read/journal handling is in flight. */
+    private static void cancelAtBoundary(String selected, String stage, CollectorCompletion completion) {
+        if (!stage.equals(selected)) return;
+        java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch cancelled = new java.util.concurrent.CountDownLatch(1);
+        Thread collector = Thread.currentThread();
+        Thread controller = new Thread(() -> {
+            try {
+                entered.await();
+                completion.cancel();
+                collector.interrupt();
+            } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            finally { cancelled.countDown(); }
+        }, "finite-late-cancel-" + stage);
+        controller.start();
+        entered.countDown();
+        boolean interrupted = false;
+        // Simulate ordinary file I/O that may complete despite interruption.
+        for (;;) {
+            try { cancelled.await(); controller.join(); break; }
+            catch (InterruptedException error) { interrupted = true; }
+        }
+        if (interrupted) collector.interrupt();
     }
 
     private static String hex(byte[] bytes) {
@@ -366,6 +426,7 @@ public final class ProbeActivity extends Activity {
         result.put("fixture_oracle", oracle);
         boolean done = entry.process.waitFor(5, TimeUnit.SECONDS);
         oracle.put("direct_owner_exit_observed", done);
+        if (done) oracle.put("direct_owner_exit", entry.process.exitValue());
         if (!done) {
             writeJson(entry.journal, result);
             throw new IOException("Finite fixture did not finish; owner/uncertainty retained, stop controls");
@@ -463,6 +524,22 @@ public final class ProbeActivity extends Activity {
         stopped &= cancelBlocked;
         finiteFixtureOracle(cancelled);
         cancelled.put("fixture_control_pass", stopped);
+        report.put("completion_protocol", "provisional-journal-v1");
+        for (String stage : Arrays.asList("read", "journal")) {
+            JSONObject late = collect("wrapper-late-" + stage, cwd -> Arrays.asList(fixture, "family"),
+                Collections.emptyMap(), "native-fixture", 45000, stage);
+            checks.put(late);
+            boolean refused = late.getBoolean("cancelled") && !late.getBoolean("timeout")
+                && late.getBoolean("direct_child_exit_observed") && late.getInt("exit") == 0
+                && !late.getBoolean("process_alive_after_wait") && late.getBoolean("retained_ownership")
+                && !late.getBoolean("output_accepted") && !late.has("output");
+            boolean fenced = false;
+            try { execute("wrapper-late-must-not-launch-" + stage, Arrays.asList(fixture, "cwd"), Collections.emptyMap(), attempt); }
+            catch (IOException expected) { fenced = true; }
+            late.put("new_launch_refused_while_retained", fenced).put("cancellation_boundary", stage);
+            finiteFixtureOracle(late);
+            late.put("fixture_control_pass", refused && fenced);
+        }
         boolean all = true;
         for (int i = 0; i < checks.length(); ++i) all &= checks.getJSONObject(i).getBoolean("fixture_control_pass");
         report.put("wrapper_fixture_controls_pass", all).put("production_ownership", false)
@@ -657,7 +734,10 @@ public final class ProbeActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
-        closing = true;
+        synchronized (owned) {
+            closing = true;
+            for (OwnedInvocation entry : owned) entry.completion.cancel();
+        }
         // Interrupt collection, never kill an owner or discard its descendants.
         Thread worker = probeWorker;
         if (worker != null) worker.interrupt();
