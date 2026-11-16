@@ -61,13 +61,14 @@ static void fail(struct boot_identity_result *r, enum boot_identity_status statu
   }
 }
 
-static void close_node(struct boot_identity_result *r, int fd) {
+static void close_node(struct boot_identity_result *r, int fd, unsigned node) {
   if (close(fd) == 0)
     return;
   int error = errno;
-  if (r->status == BOOT_ID_OK)
+  if (r->status == BOOT_ID_OK) {
+    r->failed_node = node;
     fail(r, BOOT_ID_CLOSE_FAILED, BOOT_ID_STAGE_CLOSE, error);
-  else if (!r->cleanup_error)
+  } else if (!r->cleanup_error)
     r->cleanup_error = error;
   /* Never retry close: the descriptor may already have been released. */
 }
@@ -143,12 +144,12 @@ static void read_sample(struct boot_identity_result *r, unsigned sample,
     if (fd < 0)
       fail(r, BOOT_ID_OPEN_FAILED, BOOT_ID_STAGE_OPEN, errno);
     if (parent != AT_FDCWD)
-      close_node(r, parent);
+      close_node(r, parent, i);
     if (fd < 0)
       return;
     ++s->opened_nodes;
     if (r->status != BOOT_ID_OK || !verify_node(r, s, fd, i + 1)) {
-      close_node(r, fd);
+      close_node(r, fd, i + 1);
       return;
     }
     if (i + 1 < BOOT_IDENTITY_PATH_NODES) {
@@ -173,7 +174,7 @@ static void read_sample(struct boot_identity_result *r, unsigned sample,
       if (status != BOOT_ID_OK)
         fail(r, status, BOOT_ID_STAGE_PARSE, 0);
     }
-    close_node(r, fd);
+    close_node(r, fd, i + 1);
   }
 }
 

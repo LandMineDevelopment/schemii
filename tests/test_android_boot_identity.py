@@ -466,6 +466,8 @@ def test_second_sample_must_parse_independently(native):
 def test_close_failure_refuses_without_retry(native, at):
     report = invoke(native, fault="close", at=at, error=errno.EINTR)
     refused(report, "close_failed", "close", errno.EINTR)
+    assert report["failed_sample"] == (at - 1) // 5 + 1
+    assert report["failed_node"] == (at - 1) % 5 + 1
 
 
 def test_cleanup_error_does_not_hide_original_failure(native):
@@ -473,6 +475,8 @@ def test_cleanup_error_does_not_hide_original_failure(native):
     refused(report, "read_failed", "read", errno.EIO)
     assert report["cleanup_errno"] == errno.EIO
     assert report["read_calls"] == 1
+    assert report["failed_sample"] == 1
+    assert report["failed_node"] == 5
 
 
 def test_real_fixed_proc_reader_without_exporting_identity(native):
