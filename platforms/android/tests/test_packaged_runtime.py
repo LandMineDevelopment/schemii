@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import stat
 import struct
@@ -306,6 +307,162 @@ def test_packaged_profile_requires_complete_selected_abi_and_clean_exact_source(
                 packaged_shared_runtime=False, guest_manifest_sha256=["a" * 64]
             )
         )
+
+
+@pytest.fixture
+def committed_adapter(tmp_path, monkeypatch):
+    root = tmp_path / "source"
+    android = root / "platforms/android"
+    java = android / "java/ProbeActivity.java"
+    java.parent.mkdir(parents=True)
+    java.write_text("class ProbeActivity {}\n")
+    (android / "AndroidManifest.xml").write_text("<manifest />\n")
+    (root / ".gitignore").write_text(
+        "**/__pycache__/\nplatforms/android/java/ignored/\n"
+    )
+
+    def git(*args):
+        return subprocess.check_output(
+            [
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Admission fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-C",
+                str(root),
+                *args,
+            ],
+            text=True,
+        ).strip()
+
+    git("init", "-q")
+    git("add", ".")
+    git("commit", "-qm", "Committed admission fixture")
+    args = SimpleNamespace(
+        packaged_shared_runtime=True,
+        guest_payload=[Path("not-opened-payload")],
+        guest_manifest_sha256=["a" * 64],
+        abi=["x86_64"],
+        non_debuggable=True,
+        expected_adapter_commit=git("rev-parse", "HEAD"),
+        native_donor=Path("not-opened-donor"),
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Admission must not perform SDK, native or cache operations")
+
+    monkeypatch.setattr(build, "ROOT", root)
+    monkeypatch.setattr(build, "HERE", android)
+    monkeypatch.setattr(build, "run", forbidden)
+    monkeypatch.setattr(build, "fetch", forbidden)
+    return root, android, args, git
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+@pytest.mark.parametrize("name", ["java/ProbeActivity.java", "AndroidManifest.xml"])
+def test_packaged_admission_rejects_hidden_adapter_bytes(committed_adapter, flag, name):
+    root, android, args, git = committed_adapter
+    git("update-index", flag, "platforms/android/" + name)
+    (android / name).write_text("changed but hidden by the Git index\n")
+    assert git("status", "--porcelain") == ""
+    with pytest.raises(ValueError, match="committed adapter"):
+        build.packaged_admission(args)
+    assert not (root / "cache").exists()
+
+
+def test_packaged_admission_accepts_exact_committed_inputs(committed_adapter):
+    _, android, args, git = committed_adapter
+    generated = android / "__pycache__/unused.cpython-314.pyc"
+    generated.parent.mkdir()
+    generated.write_bytes(b"unconsumed interpreter cache")
+    assert git("status", "--porcelain") == ""
+    assert build.packaged_admission(args) == build.adapter_sources()
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing", "mode", "symlink", "fifo", "ignored_java", "cached_java"]
+)
+def test_packaged_admission_rejects_hidden_inventory_mode_and_links(
+    committed_adapter, mutation
+):
+    root, android, args, git = committed_adapter
+    java = android / "java/ProbeActivity.java"
+    git(
+        "update-index",
+        "--assume-unchanged",
+        "platforms/android/java/ProbeActivity.java",
+    )
+    if mutation == "missing":
+        java.unlink()
+    elif mutation == "mode":
+        java.chmod(0o755)
+    elif mutation in ["symlink", "fifo"]:
+        data = java.read_bytes()
+        java.unlink()
+        if mutation == "symlink":
+            target = root.parent / "retained-java"
+            target.write_bytes(data)
+            java.symlink_to(target)
+        else:
+            os.mkfifo(java, 0o600)
+    else:
+        extra = java.parent / (
+            "ignored/Extra.java"
+            if mutation == "ignored_java"
+            else "__pycache__/Extra.java"
+        )
+        extra.parent.mkdir()
+        extra.write_text("class Extra {}\n")
+    assert git("status", "--porcelain") == ""
+    with pytest.raises(ValueError, match="committed adapter"):
+        build.packaged_admission(args)
+
+
+def test_packaged_cli_rejects_hidden_source_before_cache_creation(
+    committed_adapter, monkeypatch
+):
+    root, android, args, git = committed_adapter
+    git("update-index", "--skip-worktree", "platforms/android/AndroidManifest.xml")
+    (android / "AndroidManifest.xml").write_text("hidden manifest change\n")
+    cache = root.parent / "never-created-cache"
+    monkeypatch.setattr(
+        build.sys,
+        "argv",
+        [
+            "build.py",
+            "--cache",
+            str(cache),
+            "build",
+            "--build-id",
+            "refused",
+            "--abi",
+            "x86_64",
+            "--guest-payload",
+            "not-opened-payload",
+            "--guest-manifest-sha256",
+            "a" * 64,
+            "--packaged-shared-runtime",
+            "--non-debuggable",
+            "--expected-adapter-commit",
+            args.expected_adapter_commit,
+            "--native-donor",
+            "not-opened-donor",
+            "--native-donor-receipt-sha256",
+            "b" * 64,
+        ],
+    )
+    previous = os.umask(0o077)
+    try:
+        with pytest.raises(ValueError, match="committed adapter"):
+            build.main()
+    finally:
+        os.umask(previous)
+    assert not cache.exists()
 
 
 @pytest.mark.parametrize("inherited", [True, False])

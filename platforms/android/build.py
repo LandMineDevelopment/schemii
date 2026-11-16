@@ -415,6 +415,55 @@ def adapter_sources():
     }
 
 
+def committed_adapter_sources(commit):
+    """Bind consumed adapter files to Git objects, independently of index flags."""
+    prefix = HERE.relative_to(ROOT)
+    directory = ROOT
+    for part in prefix.parts:
+        directory /= part
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("Linked or missing committed adapter directory")
+    entries = subprocess.check_output(
+        ["git", "-C", str(ROOT), "ls-tree", "-rz", commit, "--", prefix.as_posix()]
+    )
+    expected = {}
+    for entry in entries.split(b"\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split(b"\t", 1)
+        mode, kind, oid = metadata.split()
+        if kind != b"blob" or mode not in (b"100644", b"100755"):
+            raise ValueError("Nonregular committed adapter input")
+        data = subprocess.check_output(
+            ["git", "-C", str(ROOT), "cat-file", "blob", oid.decode("ascii")]
+        )
+        expected[os.fsdecode(name)] = (
+            mode.decode("ascii"),
+            hashlib.sha256(data).hexdigest(),
+        )
+    if not expected:
+        raise ValueError("Missing committed adapter inventory")
+    actual = {}
+    for path in sorted(HERE.rglob("*")):
+        mode = path.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            continue
+        if not stat.S_ISREG(mode):
+            raise ValueError("Linked or nonregular committed adapter input")
+        name = path.relative_to(ROOT).as_posix()
+        # Interpreter caches are not consumed; Java hidden in such a directory is.
+        if (
+            "__pycache__" in path.parts
+            and path.suffix == ".pyc"
+            and name not in expected
+        ):
+            continue
+        actual[name] = ("100755" if mode & 0o111 else "100644", digest(path))
+    if actual != expected:
+        raise ValueError("Packaged runtime requires exact committed adapter inputs")
+    return {name: value[1] for name, value in expected.items()}
+
+
 def boot_admission(args):
     """Fail before any cache/native/legacy operation for this closed profile."""
     if not getattr(args, "boot_identity_only", False):
@@ -548,6 +597,7 @@ def packaged_admission(args):
         ["git", "-C", str(ROOT), "status", "--porcelain"]
     ):
         raise ValueError("Packaged runtime requires exact committed clean source")
+    return committed_adapter_sources(args.expected_adapter_commit)
 
 
 def packaged_readback(extracted, provenance, shared_record):
@@ -604,7 +654,7 @@ def build(args, cache):
         raise ValueError(
             "Native donor and independent receipt SHA256 must be supplied together"
         )
-    packaged_admission(args)
+    packaged_inputs = packaged_admission(args)
     boot_identity = boot_admission(args)
     if not args.build_id or any(
         c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
@@ -651,6 +701,8 @@ def build(args, cache):
     elif args.subreaper_handoff or args.subreaper_checkout:
         raise ValueError("Subreaper requires the bounded integration profile")
     adapter_before = adapter_sources()
+    if packaged_inputs is not None and adapter_before != packaged_inputs:
+        raise ValueError("Packaged committed adapter inputs changed before build")
     out = cache / "builds" / args.build_id
     out.mkdir(parents=True)  # Never overwrite a prior success or failure.
     sdk = cache / "sdk"
@@ -1070,6 +1122,8 @@ def build(args, cache):
         (out / "packaged-runtime-readback.json").write_text(
             json.dumps(guest_readback, indent=2) + "\n"
         )
+    if packaged_inputs is not None and packaged_admission(args) != packaged_inputs:
+        raise ValueError("Packaged committed adapter inputs changed during build")
     if adapter_sources() != adapter_before:
         raise ValueError("Adapter sources changed during build; receipt refused")
     if helper_identity(args.parity_helper) != helper_before:
@@ -1168,6 +1222,8 @@ def main():
     )
     args = parser.parse_args()
     os.umask(0o077)
+    if args.action == "build":
+        packaged_admission(args)
     cache = args.cache.resolve()
     cache.mkdir(parents=True, exist_ok=True)
     (cache / "downloads").mkdir(exist_ok=True)
