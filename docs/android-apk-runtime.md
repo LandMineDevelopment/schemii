@@ -353,8 +353,11 @@ finish does one short, synchronized in-memory commit accept the candidate output
 and release the direct-owner reference. The final run report records that commit;
 a provisional journal alone never proves it. Cancellation or interruption during
 read or journal preparation prevents the commit, writes a retained/cancelled
-outcome where possible and keeps the launch fence. An I/O failure leaves the
-last conservative journal and captured owner intact. No lock-held file operation
+outcome where possible and keeps the launch fence. Escaping completion or journal
+I/O failures leave the last conservative journal and captured owner intact.
+Caught output-read, parse and overflow failures instead commit a rejected-output
+result and release the exited direct-owner reference after journal preparation
+succeeds. No lock-held file operation
 postpones cancellation through slow report handling. Destruction interrupts
 collection rather than killing owners. This is fail-closed
 diagnostic behavior, not a production owner-loss solution. If cleanup cannot be
