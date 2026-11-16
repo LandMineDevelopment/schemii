@@ -305,7 +305,12 @@ def real():
     root = Path("/home/kasey/.cache/schemii-devops279")
     assert not path.is_symlink() and path.resolve().is_relative_to(root)
     m = json.loads(path.read_text())
-    assert m["owner"] == "devops279-original-local-ci-importer"
+    assert m["owner"] in {
+        "devops279-original-local-ci-importer",
+        "devops279-coordinator-R01-R03",
+    }
+    if m["owner"] == "devops279-coordinator-R01-R03":
+        assert path.resolve().is_relative_to(root / "coordinator-R01-R03")
     assert (
         Path(f"/proc/{m['pid']}/stat").read_text().rsplit(")", 1)[1].split()[19]
         == m["birth"]
@@ -323,6 +328,149 @@ def real():
 
 def target(real):
     return importer.target(real / "migrator.json", real / "collector.json", NAME, DB_ID)
+
+
+def test_node_unmeasured_phases_are_unknown_in_plan_and_export(tmp_path, capsys):
+    fixture_input(tmp_path)
+    p = selected(tmp_path)
+    attempt = p["body"]["rows"]["test_attempts"][0]
+    assert attempt["setup_ms"] is None and attempt["teardown_ms"] is None
+    assert attempt["call_ms"] == 1.5
+    assert "unmeasured-phase-timing" in p["body"]["gaps"]
+    assert (
+        cli.main(
+            [
+                "export",
+                "--input-root",
+                str(tmp_path),
+                "--manifest",
+                "manifest.json",
+                "--database-name",
+                NAME,
+                "--database-id",
+                DB_ID,
+                "--json",
+            ]
+        )
+        == 0
+    )
+    exported = json.loads(capsys.readouterr().out)
+    assert "unmeasured-phase-timing" in exported["gaps"]
+    assert exported["facts"]["rows"]["test_attempts"][0]["setup_ms"] is None
+
+
+@pytest.mark.parametrize(
+    "lane,outcome,raw,expected,gap",
+    [
+        ("node", "passed", (0, 0, 0), (None, 0, None), True),
+        ("node", "skipped", (0, 0, 0), (None, None, None), True),
+        ("python", "passed", (0, 0, 0), (0, 0, 0), False),
+        ("python", "failed", (2, 0, 1), (2, None, 1), True),
+        ("postgres", "skipped", (0, 0, 0), (None, None, None), True),
+        ("python", "failed", (2, 3, 1), (2, 3, 1), False),
+        ("browser", "passed", (0, 0, 0), (0, 0, 0), False),
+    ],
+)
+def test_reporter_phase_observation_semantics(lane, outcome, raw, expected, gap):
+    gaps: set[str] = set()
+    phases = importer.phase_measurements(
+        dict(
+            lane=lane,
+            outcome=outcome,
+            setup_ms=raw[0],
+            execution_ms=raw[1],
+            teardown_ms=raw[2],
+        ),
+        gaps,
+    )
+    assert tuple(phases[k] for k in ("setup_ms", "call_ms", "teardown_ms")) == expected
+    assert gaps == ({"unmeasured-phase-timing"} if gap else set())
+
+
+def test_pg_unknown_phases_stay_null_and_reader_membership_is_allowed(real, tmp_path):
+    fixture_input(tmp_path)
+    p = selected(tmp_path)
+    admin = storage.connection_config(real / "admin.json")
+    user = storage.connection_config(real / "collector.json")["user"]
+    with psycopg.connect(**admin, autocommit=True) as authority:
+        authority.execute(
+            psycopg.sql.SQL("GRANT devops_reader TO {}").format(
+                psycopg.sql.Identifier(user)
+            )
+        )
+        try:
+            with target(real) as conn:
+                operation = str(uuid.uuid4())
+                importer.apply(conn, p, operation, WHEN)
+                row = conn.execute(
+                    "SELECT setup_ms,call_ms,teardown_ms,outcome FROM devops.v1_test_attempts WHERE repository_id=%s",
+                    [p["body"]["repository"]["id"]],
+                ).fetchone()
+                assert row["setup_ms"] is None and row["teardown_ms"] is None
+                assert row["call_ms"] == 1.5 and row["outcome"] == "passed"
+                batch = cli.health(conn, p, operation)["operation_batch"]
+                assert batch["status"] == "partial" and batch["accepted_count"] == 3
+        finally:
+            authority.execute(
+                psycopg.sql.SQL("REVOKE devops_reader FROM {}").format(
+                    psycopg.sql.Identifier(user)
+                )
+            )
+
+
+def test_pg_selected_superuser_without_membership_is_refused(real):
+    admin = storage.connection_config(real / "admin.json")
+    with psycopg.connect(**admin, autocommit=True) as conn:
+        assert conn.execute(
+            "SELECT rolsuper FROM pg_roles WHERE rolname=session_user"
+        ).fetchone() == (True,)
+        assert not conn.execute(
+            "SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=session_user)"
+        ).fetchall()
+    with pytest.raises(storage.Refusal) as error:
+        with importer.target(real / "migrator.json", real / "admin.json", NAME, DB_ID):
+            pytest.fail("selected superuser admitted as collector")
+    assert error.value.reason == "unsafe-collector"
+
+
+def test_pg_collector_membership_requires_effective_access(real):
+    admin = storage.connection_config(real / "admin.json")
+    user = storage.connection_config(real / "collector.json")["user"]
+    with psycopg.connect(**admin, autocommit=True) as conn:
+        # Keep connection possible while disabling inherited collector access,
+        # so this exercises the selected-session guard rather than libpq auth.
+        conn.execute(
+            psycopg.sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                psycopg.sql.Identifier(NAME), psycopg.sql.Identifier(user)
+            )
+        )
+        conn.execute(
+            psycopg.sql.SQL("GRANT devops_collector TO {} WITH INHERIT FALSE").format(
+                psycopg.sql.Identifier(user)
+            )
+        )
+        try:
+            assert conn.execute(
+                "SELECT inherit_option FROM pg_auth_members WHERE roleid=(SELECT oid FROM pg_roles WHERE rolname='devops_collector') AND member=(SELECT oid FROM pg_roles WHERE rolname=%s)",
+                [user],
+            ).fetchone() == (False,)
+            with pytest.raises(storage.Refusal) as error:
+                with target(real):
+                    pytest.fail(
+                        "collector grant without effective inheritance admitted"
+                    )
+            assert error.value.reason == "unsafe-collector"
+        finally:
+            conn.execute(
+                psycopg.sql.SQL(
+                    "GRANT devops_collector TO {} WITH INHERIT TRUE"
+                ).format(psycopg.sql.Identifier(user))
+            )
+            conn.execute(
+                psycopg.sql.SQL("REVOKE CONNECT ON DATABASE {} FROM {}").format(
+                    psycopg.sql.Identifier(NAME), psycopg.sql.Identifier(user)
+                )
+            )
 
 
 def test_pg_import_replay_conflict_and_revision(real, tmp_path):

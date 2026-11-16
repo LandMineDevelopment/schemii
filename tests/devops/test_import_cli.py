@@ -9,7 +9,7 @@ import psycopg
 import pytest
 
 from scripts.devops import cli, importer
-from tests.devops.test_importer import DB_ID, NAME, fixture_input
+from tests.devops.test_importer import DB_ID, NAME, WHEN, fixture_input, target
 
 pytest_plugins = ["tests.devops.test_importer"]
 
@@ -98,6 +98,80 @@ def import_arguments(root, state, real, operation, plan_id, action="import"):
         str(real / "collector.json"),
         "--json",
     ]
+
+
+@pytest.mark.parametrize("retract", [False, True])
+@pytest.mark.parametrize("older_success", [False, True])
+def test_health_uses_current_batch_revisions(real, tmp_path, retract, older_success):
+    fixture_input(tmp_path)
+    p = importer.plan(tmp_path, "manifest.json", NAME, DB_ID)
+    operation = str(uuid.uuid4())
+    with target(real) as conn:
+        importer.apply(conn, p, operation, WHEN)
+        row = conn.execute(
+            "SELECT * FROM devops.import_batches WHERE id=%s", [operation]
+        ).fetchone()
+        assert row is not None
+        # A synthetic earlier successful operation stays a valid fallback. Its
+        # start time deliberately ties, so ordering also needs stable identity.
+        older_id = str(uuid.UUID(int=1))
+        if older_success:
+            importer.insert(
+                conn,
+                "import_batches",
+                row
+                | dict(
+                    id=older_id,
+                    source_key=older_id,
+                    evidence_ref=older_id,
+                    status="complete",
+                    reason_code="none",
+                ),
+            )
+        importer.insert(
+            conn,
+            "import_batches",
+            row
+            | dict(
+                revision=2,
+                change_kind="correction",
+                status="complete",
+                reason_code="none",
+            ),
+        )
+        assert (
+            str(cli.health(conn, p, operation)["last_complete_success"]["id"])
+            == operation
+        )
+        importer.insert(
+            conn,
+            "import_batches",
+            row
+            | dict(
+                revision=3,
+                change_kind="retraction" if retract else "correction",
+                status="partial",
+                accepted_count=2,
+                reason_code="incomplete-source",
+            ),
+        )
+        health = cli.health(conn, p, operation)
+        assert (
+            str(health["last_complete_success"]["id"])
+            if health["last_complete_success"]
+            else None
+        ) == (older_id if older_success else None)
+        if not retract:
+            assert str(health["last_published_batch"]["id"]) == operation
+            assert health["last_published_batch"]["accepted_count"] == 2
+        else:
+            assert (
+                str(health["last_published_batch"]["id"])
+                if health["last_published_batch"]
+                else None
+            ) == (older_id if older_success else None)
+        assert health["operation_batch"]["status"] == "partial"
+        assert health["operation_batch"]["accepted_count"] == 2
 
 
 @pytest.mark.parametrize("after_commit", [False, True])

@@ -94,9 +94,15 @@ status, nullable emitted acceptance and observed durations retain their meaning.
 `base_sha`, run policy/inventory and cohort remain NULL because these producers do
 not emit them. A branch label is never interpreted as a SHA. Command inventory is
 the digest of the actual sanitized plan cases; `expected_cases` is the emitted
-start count, including NULL. Setup/call/teardown remain separate milliseconds;
-real emitted zero remains zero. Original wall timestamps and monotonic durations
-are separate, and no command wall timestamps are invented.
+start count, including NULL. Setup/call/teardown remain separate milliseconds.
+Node's unmeasured setup/teardown placeholders become NULL. For nonpassing Node
+and pytest attempts, zero phases that cannot be distinguished from missing
+observations also become NULL. The projection records `unmeasured-phase-timing`
+as a collection gap; original outcome and known nonzero timings remain intact.
+Passing pytest lifecycle phases and Node call timing retain measured zero;
+browser hook/body measurements retain their emitted values. Original receipts
+stay unchanged. Wall timestamps and monotonic durations remain separate, and no
+command wall timestamps are invented.
 
 Original failure followed by recovery retains both attempts. The reporters emit
 `not-run` and some `cancelled` records for unstarted cases without an observation
@@ -191,7 +197,12 @@ when database reconciliation succeeds.
 It separates that operation's last attempt, the stream's last published batch,
 the stream's last complete collection success, gaps, changed-plan/stale state,
 unknown freshness outside the selected manifest, and cleanup pending. A partial
-last batch is not last complete success. It cannot infer attempts belonging to
+last batch is not last complete success. Both stream summaries select each
+batch's latest revision before applying status filters. Retracted batches are
+excluded, and superseded complete revisions cannot become current success.
+Ties use stable batch identity; the exact operation lookup still reports its
+latest revision, including a retraction, for reconciliation.
+It cannot infer attempts belonging to
 unselected operation journals. Status is read-only and never repairs a checkpoint.
 
 ## Results, refusal and reconciliation
@@ -210,6 +221,15 @@ For `busy-stream`/`busy-operation`, reconcile the active owner; do not poll/retr
 For target/schema/role failures, ask the provisioner to reconcile the original
 foundation contract; never reset or restamp it. For unknown commit state, query
 status before exact resume. Original raw diagnostics stay private.
+
+The selected collector session must itself be a nonprivileged login with actual
+grant ancestry limited to `devops_collector` and optional `devops_reader`,
+effective inherited collector access, and no database CREATE/TEMP or public
+schema privileges. Superuser/role-management/database-creation/replication/RLS
+bypass rights refuse even without explicit collector membership. A grant without
+effective inheritance is insufficient; use the dedicated provisioned collector
+profile. PostgreSQL 18 keeps inheritance on individual membership edges, so
+changing only a login's INHERIT attribute does not repair an existing grant.
 
 Before natural intake, the coordinator must approve an exact source-reviewed
 manifest and stable identity mapping, original files/producer compatibility,

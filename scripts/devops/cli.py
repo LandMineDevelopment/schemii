@@ -162,11 +162,11 @@ def health(conn, selected, operation):
     body = selected["body"]
     params = [body["repository"]["id"], body["installation_id"]]
     last = conn.execute(
-        "SELECT id, status, finished_at, accepted_count, rejected_count, reason_code FROM devops.import_batches WHERE repository_id=%s AND installation_id=%s ORDER BY started_at DESC,id DESC LIMIT 1",
+        "SELECT id, status, finished_at, accepted_count, rejected_count, reason_code FROM devops.v1_collection_health WHERE repository_id=%s AND installation_id=%s ORDER BY started_at DESC,id DESC LIMIT 1",
         params,
     ).fetchone()
     complete = conn.execute(
-        "SELECT id, finished_at FROM devops.import_batches WHERE repository_id=%s AND installation_id=%s AND status='complete' AND change_kind <> 'retraction' ORDER BY finished_at DESC,id DESC LIMIT 1",
+        "SELECT id, finished_at FROM devops.v1_collection_health WHERE repository_id=%s AND installation_id=%s AND status='complete' ORDER BY finished_at DESC NULLS LAST,id DESC LIMIT 1",
         params,
     ).fetchone()
     committed = conn.execute(

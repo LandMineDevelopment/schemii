@@ -83,6 +83,29 @@ def measured(value: Any) -> Any:
     return value
 
 
+def phase_measurements(attempt: dict, gaps: set[str]) -> dict:
+    """Project schema-1 reporter observations, not their placeholder zeros."""
+    phases = {
+        "setup_ms": measured(attempt["setup_ms"]),
+        "call_ms": measured(attempt["execution_ms"]),
+        "teardown_ms": measured(attempt["teardown_ms"]),
+    }
+    # Node never measures setup/teardown. Pytest can omit phase reports after
+    # setup failure/skip; schema 1 flattens those missing values to zero. A
+    # passing pytest attempt proves all three normal lifecycle phases existed.
+    unknown = {"setup_ms", "teardown_ms"} if attempt["lane"] == "node" else set()
+    if (
+        attempt["lane"] in {"node", "python", "postgres"}
+        and attempt["outcome"] != "passed"
+    ):
+        unknown.update(key for key, value in phases.items() if value == 0)
+    for key in unknown:
+        phases[key] = None
+    if unknown:
+        gaps.add("unmeasured-phase-timing")
+    return phases
+
+
 @dataclass
 class Inputs:
     root: Path
@@ -660,9 +683,7 @@ def plan(root: Path, manifest: str, database_name: str, database_id: str) -> dic
                         case_key=attempt["test_id"],
                         attempt_number=attempt["attempt"],
                         outcome=attempt["outcome"],
-                        setup_ms=measured(attempt["setup_ms"]),
-                        call_ms=measured(attempt["execution_ms"]),
-                        teardown_ms=measured(attempt["teardown_ms"]),
+                        **phase_measurements(attempt, gaps),
                     ),
                 )
             c["evidence_sha256"] = digest(
@@ -768,10 +789,27 @@ def target(profile: Path, collector_profile: Path, name: str, identity: str):
             require(not checked["pending_versions"], "migration-pending")
             with connect(collector) as conn:
                 actor = conn.execute(
-                    "SELECT current_database() AS name, session_user AS actor, pg_has_role(session_user,'devops_collector','MEMBER') AS member"
+                    "SELECT current_database() AS name, session_user AS actor, current_user AS effective_actor, rolcanlogin, rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole OR rolreplication AS dangerous, pg_has_role(session_user,'devops_collector','USAGE') AS effective_access, has_database_privilege(session_user,current_database(),'CREATE') OR has_database_privilege(session_user,current_database(),'TEMP') OR has_schema_privilege(session_user,'public','CREATE') OR has_schema_privilege(session_user,'public','USAGE') AS extra_privileges FROM pg_roles WHERE rolname=session_user"
                 ).fetchone()
+                # Follow actual grants, not superuser's implicit pg_has_role
+                # membership. This validates the selected connection itself,
+                # including privileged logins with no collector grant edges.
+                memberships = {
+                    row["rolname"]
+                    for row in conn.execute(
+                        "WITH RECURSIVE ancestors(oid) AS (SELECT roleid FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=session_user) UNION SELECT m.roleid FROM pg_auth_members m JOIN ancestors a ON m.member=a.oid) SELECT r.rolname FROM ancestors a JOIN pg_roles r ON r.oid=a.oid"
+                    )
+                }
                 require(
-                    actor and actor["name"] == name and actor["member"],
+                    actor
+                    and actor["name"] == name
+                    and actor["actor"] == collector["user"] == actor["effective_actor"]
+                    and actor["rolcanlogin"]
+                    and not actor["dangerous"]
+                    and not actor["extra_privileges"]
+                    and actor["effective_access"]
+                    and "devops_collector" in memberships
+                    and not memberships - {"devops_collector", "devops_reader"},
                     "unsafe-collector",
                 )
                 yield conn
