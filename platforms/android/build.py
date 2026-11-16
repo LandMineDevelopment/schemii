@@ -401,11 +401,44 @@ def build(args, cache):
     ):
         raise ValueError("Build ID must be a single safe name")
     if args.wrapper_controls_only and (
-        args.guest_payload or args.network_handoff or args.process_head
+        args.guest_payload
+        or args.network_handoff
+        or args.process_head
+        or args.integration_probes
+        or args.subreaper_handoff
     ):
         raise ValueError(
             "Wrapper fixture mode cannot include guest, network or peer process campaigns"
         )
+    if args.integration_probes:
+        if (
+            args.wrapper_controls_only
+            or args.guest_payload
+            or args.process_head
+            or not args.network_handoff
+            or not args.network_checkout
+            or not args.subreaper_handoff
+            or not args.subreaper_checkout
+        ):
+            raise ValueError(
+                "Integration probes require only immutable network+subreaper inputs; no guest/polling/wrapper campaign"
+            )
+        from runtime.peer_inputs import (
+            anchored_handoff,
+            NETWORK_HANDOFF,
+            NETWORK_HEAD,
+            NETWORK_INVENTORY,
+            inventory_sha256,
+        )
+
+        selected = anchored_handoff(args.network_handoff, NETWORK_HANDOFF)
+        if (
+            selected["source_head"] != NETWORK_HEAD
+            or inventory_sha256(selected["source_files"]) != NETWORK_INVENTORY
+        ):
+            raise ValueError("Integration network source identity drift")
+    elif args.subreaper_handoff or args.subreaper_checkout:
+        raise ValueError("Subreaper requires the bounded integration profile")
     adapter_before = adapter_sources()
     out = cache / "builds" / args.build_id
     out.mkdir(parents=True)  # Never overwrite a prior success or failure.
@@ -504,6 +537,15 @@ def build(args, cache):
         )
         artifacts.update(libraries)
         peer_components["process"] = component
+    if args.integration_probes:
+        from runtime.peer_inputs import subreaper
+
+        tc = cache / "sdk/android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        component, libraries = subreaper(
+            args.subreaper_handoff, args.subreaper_checkout, out, abis, tc
+        )
+        artifacts.update(libraries)
+        peer_components["subreaper"] = component
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -527,6 +569,9 @@ def build(args, cache):
         "diagnostic_log_export": args.log_report,
         "wrapper_controls_only": args.wrapper_controls_only,
         "wrapper_fixture": fixture,
+        "diagnostic_profile": "subreaper13e-networkcde-v1"
+        if args.integration_probes
+        else None,
         "native_files": artifacts,
         "native_donor": native_donor,
         "toolchain_lock_sha256": digest(HERE / "toolchain.lock.json"),
@@ -607,6 +652,10 @@ def build(args, cache):
                 "manifest_sha256": digest(manifest_path),
                 "payload_lock_sha256": manifest["payload_lock_sha256"],
             }
+    if args.integration_probes:
+        from runtime.peer_inputs import integration_components
+
+        integration_components(provenance)
     (out / "assets/runtime/native-provenance.json").write_text(
         json.dumps(provenance, indent=2) + "\n"
     )
@@ -736,7 +785,7 @@ def build(args, cache):
     from verify_apk import verify_package
 
     package_readback = verify_package(
-        signed, ROOT, args.parity_helper.resolve(), commit
+        signed, ROOT, args.parity_helper.resolve(), commit, aapt2=bt / "aapt2"
     )
     (out / "package-readback.json").write_text(
         json.dumps(package_readback, indent=2) + "\n"
@@ -814,6 +863,13 @@ def main():
         "--native-donor-receipt-sha256",
         help="Independently selected immutable donor receipt SHA256 (required for reuse)",
     )
+    b.add_argument(
+        "--integration-probes",
+        action="store_true",
+        help="Only reviewed13e subreaper + cde network callbacks; never guest/node",
+    )
+    b.add_argument("--subreaper-handoff", type=Path)
+    b.add_argument("--subreaper-checkout", type=Path)
     b.add_argument("--network-handoff", type=Path)
     b.add_argument("--network-checkout", type=Path)
     b.add_argument("--process-head")

@@ -7,6 +7,8 @@ import importlib.util
 import json
 from pathlib import Path
 import struct
+import re
+import subprocess
 import tempfile
 import zipfile
 import hashlib
@@ -49,7 +51,45 @@ def parity_module(helper):
     return module
 
 
-def verify_package(apk: Path, root: Path, helper: Path, expected_commit: str) -> dict:
+def integration_manifest(apk, aapt2, debuggable):
+    if aapt2 is None:
+        raise ValueError(
+            "Pinned aapt2 required for actual integration manifest readback"
+        )
+    badging = subprocess.check_output(
+        [str(aapt2), "dump", "badging", str(apk)], text=True
+    )
+    if (
+        "package: name='development.landmine.schemii.runtimeprobe'" not in badging
+        or "sdkVersion:'29'" not in badging
+        or "targetSdkVersion:'36'" not in badging
+        or ("application-debuggable" in badging) != debuggable
+    ):
+        raise ValueError("Actual integration APK manifest SDK/debug/package drift")
+    permissions = set(re.findall(r"^uses-permission: name='([^']+)'", badging, re.M))
+    if permissions != {
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+    }:
+        raise ValueError("Integration manifest permission drift")
+    tree = subprocess.check_output(
+        [str(aapt2), "dump", "xmltree", str(apk), "--file", "AndroidManifest.xml"],
+        text=True,
+    )
+    if re.search(r"E: (?:service|receiver|provider)\b", tree):
+        raise ValueError("Diagnostic manifest contains production component")
+    return {
+        "package": "development.landmine.schemii.runtimeprobe",
+        "min_sdk": 29,
+        "target_sdk": 36,
+        "debuggable": debuggable,
+        "permissions": sorted(permissions),
+    }
+
+
+def verify_package(
+    apk: Path, root: Path, helper: Path, expected_commit: str, *, aapt2=None
+) -> dict:
     module = parity_module(helper)
     with tempfile.TemporaryDirectory(prefix="apk-shared-") as temp:
         extracted = Path(temp)
@@ -94,11 +134,18 @@ def verify_package(apk: Path, root: Path, helper: Path, expected_commit: str) ->
                     "lib/" + abi + "/libcollector_fixture.so" for abi in native["abis"]
                 )
             components = native.get("peer_components", {})
-            if set(components) - {"network", "process"}:
+            manifest = None
+            if native.get("diagnostic_profile"):
+                from runtime.peer_inputs import integration_components
+
+                integration_components(native)
+                manifest = integration_manifest(apk, aapt2, native["debuggable"])
+            if set(components) - {"network", "process", "subreaper"}:
                 raise ValueError("Unknown native peer component")
             for component, filename in [
                 ("network", "libschemii_network.so"),
                 ("process", "libschemii_proc_discovery.so"),
+                ("subreaper", "libsubreaper_probe.so"),
             ]:
                 if component in components:
                     expected_native.update(
@@ -118,6 +165,13 @@ def verify_package(apk: Path, root: Path, helper: Path, expected_commit: str) ->
                 if hashlib.sha256(data).hexdigest() != sha:
                     raise ValueError("Native byte drift")
                 identities[name] = elf_identity(data, name.split("/")[1])
+                if native.get("diagnostic_profile") and name.endswith(
+                    "/libsubreaper_probe.so"
+                ):
+                    from runtime.peer_inputs import SUBREAPER_HEAD
+
+                    if SUBREAPER_HEAD.encode() + b"\0" not in data:
+                        raise ValueError("Packaged subreaper source ID drift")
             guest_payloads = {}
             for abi, identity in native.get("guest_payloads", {}).items():
                 if abi not in native["abis"]:
@@ -167,6 +221,7 @@ def verify_package(apk: Path, root: Path, helper: Path, expected_commit: str) ->
             "source": source,
             "native_elf": identities,
             "guest_payloads": guest_payloads,
+            "manifest": manifest,
             "apk_runtime_acceptance": "pending",
         }
 
@@ -179,6 +234,7 @@ def main():
     )
     parser.add_argument("--parity-helper", type=Path)
     parser.add_argument("--expected-commit", required=True)
+    parser.add_argument("--aapt2", type=Path)
     args = parser.parse_args()
     print(
         json.dumps(
@@ -187,6 +243,7 @@ def main():
                 args.root,
                 args.parity_helper or args.root / "scripts/check_runtime_parity.py",
                 args.expected_commit,
+                aapt2=args.aapt2,
             ),
             indent=2,
         )

@@ -28,3 +28,13 @@ release together only after a cancellation check under the lifecycle gate.
 `runtime/check_wrapper_report.py` checks raw finite witnesses against actual
 packaged fixture identity. Host latch controls and wrapper-only Android controls
 do not establish general descendant recovery or production supervision.
+
+The bounded `--integration-probes` profile admits only reviewed13e subreaper and
+cde network inputs through independently selected handoff/library anchors. It
+runs neither the wrapper-only controls nor old polling/guest/backend campaigns.
+Each process case uses the fixed collector and an exact finite-oracle report
+policy; unknown cleanup retains the captured Process and fences further launches.
+`runtime/check_integration_report.py` binds actual reports to signed package,
+component, ABI/debug and per-mode inventories. Callback readiness and finite
+candidate completion remain separate from production ownership and tailnet
+readiness. See the guide for commands and pending device/host gates.

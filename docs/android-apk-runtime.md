@@ -389,6 +389,81 @@ fields fail even when a summary claims success. Fixture
 success remains `stack_acceptance=false`. The original68 polling reports retain
 their old shared-cwd/32KiB/deadline limitations and original source labels.
 
+## Bounded13e/cde diagnostic integration
+
+The separate `--integration-probes` profile admits immutable subreaper
+`13e04d8fd9c65d206967cfc50b60f4571bba5f08` and network
+`cde504d128d2a1ba8e3f50b02028db7d93395529`. Handoff digests are independently
+selected in the adapter. Every source hash is checked against committed Git;
+the full38-file network inventory, original build receipt and exact ABI-specific
+library digests are retained. Only the new subreaper C plus its unchanged
+observer/header are compiled with NDK30/minAPI29; the APK keeps compile/target36.
+The admitted Go libraries are reused without rebuilding their SDK/dependencies.
+No peer source is edited or integrated into this branch.
+
+```bash
+python3 platforms/android/build.py build --build-id integration-UNIQUE \
+  --abi arm64-v8a --abi x86_64 --integration-probes --log-report \
+  --native-donor /private/original021/receipt.json \
+  --native-donor-receipt-sha256 INDEPENDENT_EXPECTED_RECEIPT_SHA256 \
+  --network-handoff /private/reviewed-cde/integration-handoff-cde504d1.json \
+  --network-checkout /readonly/network-checkout \
+  --subreaper-handoff /private/reviewed13e/integration-handoff-13e04d8f.json \
+  --subreaper-checkout /readonly/process-checkout
+# Add --non-debuggable for the independently labeled nondebug package.
+```
+
+The profile excludes guests, wrapper-only controls, old6242 polling and legacy
+owner-control probes. It first calls the admitted `NetworkProbe.run(Context)` on
+the existing worker. A normal API return follows reviewed close/stop/detach;
+exceptions retain a native-operation uncertainty record and fence later launches.
+The underlay report preserves actual framework DNS, selected validated non-VPN
+default generation, TCP/UDP binding, SO_COOKIE prerequisite and public-root TLS
+observations. It starts no node and attempts no enrollment, ACME or provider
+operation. Normal cancellation/close is distinct from tested network transitions
+or actual Activity destruction; standard SDK bootstrap behavior is unchanged.
+This callback probe does not establish tailnet/private-ingress readiness.
+
+Each of16 subreaper cases then runs once natively and once through the actual
+packaged PRoot/loader. Each invocation has a fresh private empty cwd, separate
+report and PRoot scratch,45000ms wait budget and complete64KiB JSON bound. The
+component Git/source/compiler/native API and library identities stay distinct
+from the adapter revision. Only five positive cases may complete while their
+dedicated owner lives. Eleven refusal/timeout/owner-loss cases stay incomplete;
+`control_pass` is not `candidate_complete`. Nonzero reports remain evidence.
+
+The collector requires the exact source/case/ABI and finite raw cleanup contract
+before release. It also reads only source-bound known fixture births after the
+oracle finishes, recording absent or different-birth observations; permission
+errors, live/zombie births or unknown identity escape with the Process retained
+and the launch fence intact. These are read-only checks, never PID adoption or
+signals. The original reviewed outer oracle alone releases/reaps its finite test
+tree. Owner loss explicitly preserves a surviving orphan and oracle intervention;
+that intervention never becomes candidate or production cleanup. If Android or
+PRoot defeats this contract, preserve the blocked report/state and stop. No
+tracer redesign, second tracer, shared supervisor change or kernel workaround is
+part of this diagnostic.
+
+Actual signed readback checks all449 canonical shared bytes with the default
+in-checkout helper/selector and independently expected adapter SHA, exact native
+inventory/ELF ABI/alignment and actual manifest permissions/debug/SDK. The new
+report checker additionally requires independently selected APK/source/signer
+and debug profile:
+
+```bash
+python3 platforms/android/runtime/check_integration_report.py /private/report.json \
+  --apk /private/integration-UNIQUE/schemii-runtime-probe.apk \
+  --expected-commit INDEPENDENT_ADAPTER_SHA --signer-sha256 EXPECTED_CERT_SHA256 \
+  --aapt2 /private/pinned-sdk/android-16/aapt2 --debuggable
+```
+
+A valid measurement can still be blocked or show failed/incomplete candidate
+controls. Neither ELF alignment nor emulator execution proves native Moto ARM64,
+physical16KiB pages, general descendants/owner death, PostgreSQL shutdown, full
+backend, production FGS, CE/DE/pre-PIN, trusted node certificates or release
+acceptance. Original53d eleven-control evidence and all old reports retain their
+original identities; this new profile never relabels or replays them.
+
 ## Host/runtime interface and coexistence
 
 [runtime-interface.json](../platforms/android/runtime-interface.json) is explicitly

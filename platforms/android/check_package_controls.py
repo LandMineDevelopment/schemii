@@ -10,8 +10,17 @@ import zipfile
 from verify_apk import verify_package
 
 
-def check(apk, root, helper, expected_commit, guest_only=False, source_only=False):
-    positive = verify_package(apk, root, helper, expected_commit)
+def check(
+    apk,
+    root,
+    helper,
+    expected_commit,
+    guest_only=False,
+    source_only=False,
+    integration_only=False,
+    aapt2=None,
+):
+    positive = verify_package(apk, root, helper, expected_commit, aapt2=aapt2)
     with zipfile.ZipFile(apk) as package:
         entries = {info.filename: package.read(info) for info in package.infolist()}
     chosen = "assets/shared/src/schemii/main.py"
@@ -58,6 +67,58 @@ def check(apk, root, helper, expected_commit, guest_only=False, source_only=Fals
                 ),
             }
         )
+    if integration_only:
+        original = json.loads(entries["assets/runtime/native-provenance.json"])
+        if not original.get("diagnostic_profile"):
+            raise ValueError("Integration controls require actual integration package")
+
+        def provenance(files, change):
+            value = json.loads(files["assets/runtime/native-provenance.json"])
+            change(value)
+            files["assets/runtime/native-provenance.json"] = json.dumps(value).encode()
+
+        abi = original["abis"][0]
+
+        def wrong_abi(files):
+            target = "lib/" + abi + "/libsubreaper_probe.so"
+            data = entries["lib/" + original["abis"][1] + "/libsubreaper_probe.so"]
+            files[target] = data
+            sha = hashlib.sha256(data).hexdigest()
+
+            def rebind(n):
+                n["native_files"][target] = sha
+                n["peer_components"]["subreaper"]["builds"][abi]["library_sha256"] = sha
+
+            provenance(files, rebind)
+
+        mutations = {
+            "missing-subreaper": lambda f: f.pop(
+                "lib/" + abi + "/libsubreaper_probe.so"
+            ),
+            "stale-network-library": lambda f: f.__setitem__(
+                "lib/" + abi + "/libschemii_network.so", b"stale"
+            ),
+            "wrong-network-source": lambda f: provenance(
+                f,
+                lambda n: n["peer_components"]["network"].update(source_head="0" * 40),
+            ),
+            "wrong-process-source": lambda f: provenance(
+                f,
+                lambda n: n["peer_components"]["subreaper"].update(
+                    source_head="0" * 40
+                ),
+            ),
+            "missing-case": lambda f: provenance(
+                f, lambda n: n["peer_components"]["subreaper"]["cases"].pop()
+            ),
+            "wrong-profile": lambda f: provenance(
+                f, lambda n: n.update(diagnostic_profile="old-polling")
+            ),
+            "wrong-debug-label": lambda f: provenance(
+                f, lambda n: n.update(debuggable=not n["debuggable"])
+            ),
+            "wrong-native-abi": lambda f: wrong_abi(f),
+        }
     if guest_only:
         if not guests:
             raise ValueError("Guest controls require an actual packaged guest")
@@ -82,7 +143,7 @@ def check(apk, root, helper, expected_commit, guest_only=False, source_only=Fals
                 for name, data in changed.items():
                     package.writestr(name, data)
             try:
-                verify_package(path, root, helper, expected_commit)
+                verify_package(path, root, helper, expected_commit, aapt2=aapt2)
             except Exception as error:
                 outcomes[case] = {
                     "rejected": True,
@@ -93,7 +154,7 @@ def check(apk, root, helper, expected_commit, guest_only=False, source_only=Fals
                 raise AssertionError("Accepted counterexample: " + case)
     if source_only:
         try:
-            verify_package(apk, root, helper, "0" * 40)
+            verify_package(apk, root, helper, "0" * 40, aapt2=aapt2)
         except Exception as error:
             outcomes["wrong-independent-expected-source"] = {
                 "rejected": True,
@@ -122,6 +183,8 @@ def main():
         help="Run shared-record/source controls, without unrelated native/guest mutations",
     )
     parser.add_argument("--parity-helper", type=Path)
+    parser.add_argument("--integration-only", action="store_true")
+    parser.add_argument("--aapt2", type=Path)
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument(
         "--guest-only",
@@ -129,7 +192,7 @@ def main():
         help="Run only the new guest/probe/interface byte controls",
     )
     args = parser.parse_args()
-    if args.source_only and args.guest_only:
+    if sum([args.source_only, args.guest_only, args.integration_only]) > 1:
         parser.error("Choose one control scope")
     print(
         json.dumps(
@@ -140,6 +203,8 @@ def main():
                 args.expected_commit,
                 args.guest_only,
                 args.source_only,
+                args.integration_only,
+                args.aapt2,
             ),
             indent=2,
         )

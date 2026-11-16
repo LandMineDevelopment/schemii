@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit;
 public final class ProbeActivity extends Activity {
     private static final List<OwnedInvocation> owned = new ArrayList<>();
     private static final List<Process> retainedGuests = new ArrayList<>();
+    private static final List<JSONObject> retainedNativeOperations = new ArrayList<>();
     private volatile boolean closing;
     private volatile Thread probeWorker;
     private File attempt;
@@ -32,6 +33,7 @@ public final class ProbeActivity extends Activity {
     }
 
     private interface Command { List<String> in(File cwd); }
+    private interface ReportPolicy { JSONArray verify(JSONObject report, int exit) throws Exception; }
 
     private static void writeJson(File target, JSONObject value) throws Exception {
         File temporary = new File(target.getParentFile(), target.getName() + ".tmp");
@@ -75,7 +77,7 @@ public final class ProbeActivity extends Activity {
 
     private void requireNoRetainedOwner() throws IOException {
         synchronized (owned) {
-            if (closing || Thread.currentThread().isInterrupted() || !owned.isEmpty() || !retainedGuests.isEmpty()) {
+            if (closing || Thread.currentThread().isInterrupted() || !owned.isEmpty() || !retainedGuests.isEmpty() || !retainedNativeOperations.isEmpty()) {
                 throw new IOException("Owned process/uncertainty retained or Activity closing; refuse another launch");
             }
         }
@@ -112,6 +114,11 @@ public final class ProbeActivity extends Activity {
 
     private JSONObject collect(String name, Command factory, Map<String, String> env,
                                String mode, long deadlineMs, String cancellationBoundary) throws Exception {
+        return collect(name, factory, env, mode, deadlineMs, cancellationBoundary, null);
+    }
+
+    private JSONObject collect(String name, Command factory, Map<String, String> env,
+                               String mode, long deadlineMs, String cancellationBoundary, ReportPolicy policy) throws Exception {
         long started = System.nanoTime();
         requireNoRetainedOwner();
         if (!name.matches("[a-zA-Z0-9_-]+")) throw new IOException("Unsafe invocation name");
@@ -145,7 +152,7 @@ public final class ProbeActivity extends Activity {
         OwnedInvocation entry;
         synchronized (owned) {
             if (closing || Thread.currentThread().isInterrupted()) throw new IOException("Activity closing or collector cancelled before launch");
-            if (!owned.isEmpty() || !retainedGuests.isEmpty()) throw new IOException("Prior owned process/uncertainty retained; refuse another launch");
+            if (!owned.isEmpty() || !retainedGuests.isEmpty() || !retainedNativeOperations.isEmpty()) throw new IOException("Prior owned process/uncertainty retained; refuse another launch");
             p = pb.start();
             entry = new OwnedInvocation(p, journal, cwd, output, result, new CollectorCompletion(owned, () -> closing));
             owned.add(entry);
@@ -175,6 +182,21 @@ public final class ProbeActivity extends Activity {
                 } catch (IOException | org.json.JSONException error) {
                     boolean overflow = output.length() > 65536;
                     candidate.put("output_error", error.toString()).put("output_overflow", overflow).put("output_truncated", overflow);
+                }
+                if (policy != null) {
+                    try {
+                        if (!candidate.getBoolean("output_accepted")) throw new IOException("Required component report incomplete/invalid");
+                        candidate.put("finite_post_birth_observations", policy.verify(singleObject(candidate.getString("output")), p.exitValue()));
+                    } catch (Exception error) {
+                        result.put("completion_state", "retained").put("phase", "retained-component-failure")
+                            .put("component_error", error.toString())
+                            .put("elapsed_ms", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+                        if (candidate.has("output")) result.put("rejected_component_report", singleObject(candidate.getString("output")));
+                        else result.put("output_error", candidate.optString("output_error", "No complete report"))
+                            .put("output_overflow", candidate.getBoolean("output_overflow")).put("output_truncated", candidate.getBoolean("output_truncated"));
+                        writeJson(journal, result);
+                        throw error; // Escape the rejected-output commit: retain owner/fence.
+                    }
                 }
             }, () -> {
                 // A prepared journal is never evidence of accepted output or
@@ -546,6 +568,88 @@ public final class ProbeActivity extends Activity {
             .put("owner_death_solution", false);
     }
 
+    private static String executableArchitecture(File executable) throws Exception {
+        byte[] header = new byte[20];
+        try (DataInputStream input = new DataInputStream(new FileInputStream(executable))) { input.readFully(header); }
+        if (header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' || header[3] != 'F' || header[4] != 2 || header[5] != 1) throw new IOException("Installed component is not ELF64 little endian");
+        int machine = (header[18] & 255) | ((header[19] & 255) << 8);
+        if (machine == 62) return "x86_64";
+        if (machine == 183) return "aarch64";
+        throw new IOException("Unsupported installed native ABI");
+    }
+
+    private void integrationProbes(JSONArray checks, JSONObject report, String lib, JSONObject build) throws Exception {
+        JSONObject components = build.getJSONObject("peer_components");
+        JSONObject process = components.getJSONObject("subreaper"), network = components.getJSONObject("network");
+        String executable = lib + "/libsubreaper_probe.so";
+        String architecture = executableArchitecture(new File(executable));
+        String abi = architecture.equals("aarch64") ? "arm64-v8a" : "x86_64";
+        JSONObject installed = new JSONObject();
+        for (String filename : Arrays.asList("libsubreaper_probe.so", "libschemii_network.so")) {
+            String sha = fileSha(new File(lib, filename));
+            if (!sha.equals(build.getJSONObject("native_files").getString("lib/" + abi + "/" + filename))) throw new IOException("Installed integration component byte drift");
+            installed.put(filename, sha);
+        }
+        report.put("diagnostic_profile", build.getString("diagnostic_profile"))
+            .put("executed_abi", abi).put("integration_library_sha256", installed)
+            .put("production_ownership", false).put("owner_death_solution", false);
+        runIdentity.put("diagnostic_profile", report.getString("diagnostic_profile"));
+        try { report.put("selinux_enforce_observation", new String(Files.readAllBytes(java.nio.file.Paths.get("/sys/fs/selinux/enforce")), "UTF-8").trim()); }
+        catch (IOException error) { report.put("selinux_enforce_observation", "unknown: " + error.getClass().getSimpleName()); }
+        requireNoRetainedOwner();
+        JSONObject call = new JSONObject().put("name", "network-callbacks-cde").put("run_identity", runIdentity)
+            .put("source_head", network.getString("source_head")).put("library_sha256", installed.getString("libschemii_network.so"))
+            .put("node_started", false).put("enrollment_attempted", false).put("retained_ownership", true);
+        checks.put(call);
+        synchronized (owned) { retainedNativeOperations.add(call); }
+        long started = System.nanoTime();
+        boolean normalReturn = false;
+        try {
+            Class<?> entry = Class.forName("development.landmine.schemii.android.network.NetworkProbe");
+            JSONObject observed = (JSONObject)entry.getMethod("run", android.content.Context.class).invoke(null, getApplicationContext());
+            normalReturn = true; // Reviewed API returns only after close/stop/detach.
+            call.put("report", observed).put("api_returned_after_close", true)
+                .put("bridge_identity_verified", network.getString("bridge_sha256").equals(observed.optString("native_bridge_sha256")));
+            call.put("control_pass", observed.optBoolean("ready", false) && call.getBoolean("bridge_identity_verified"));
+        } catch (Exception | LinkageError error) {
+            call.put("failed", true).put("control_pass", false).put("error", error.toString())
+                .put("cause", error.getCause() == null ? "" : error.getCause().toString());
+        } finally {
+            call.put("elapsed_ms", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started))
+                .put("retained_ownership", !normalReturn).put("cleanup_basis", normalReturn ? "reviewed public API normal return after close/stop/detach" : "native completion unknown; retain Activity JVM and stop");
+            if (normalReturn) synchronized (owned) { retainedNativeOperations.remove(call); }
+            writeJson(new File(new File(attempt, "reports"), "network-callbacks-cde.json"), call);
+        }
+        requireNoRetainedOwner(); // No process launch after an uncertain native operation.
+        for (String mode : Arrays.asList("native", "proot")) {
+            JSONArray cases = process.getJSONArray("cases");
+            for (int index = 0; index < cases.length(); ++index) {
+                String which = cases.getString(index);
+                String name = "subreaper-orphan-v1-" + mode + "-" + which;
+                List<String> argv = Arrays.asList(executable, "subreaper-orphan-control", "--case", which);
+                Map<String, String> env = new HashMap<>();
+                if (mode.equals("proot")) {
+                    File temporary = new File(new File(attempt, "proot-tmp"), name);
+                    if (!temporary.mkdir()) throw new IOException("PRoot scratch must be fresh");
+                    android.system.Os.chmod(temporary.getAbsolutePath(), 0700);
+                    env.put("PROOT_LOADER", lib + "/libproot_loader.so"); env.put("PROOT_TMP_DIR", temporary.getAbsolutePath());
+                    env.put("PROOT_NO_SECCOMP", "1"); env.put("PROOT_DONT_SHARE_LIBANDROID_SHMEM", "1");
+                }
+                JSONObject value = collect(name, cwd -> mode.equals("native") ? argv : Arrays.asList(lib + "/libproot.so", "-v", "0", "-r", "/", "-w", cwd.getAbsolutePath(), executable, "subreaper-orphan-control", "--case", which), env, mode, 45000, null,
+                    (observed, exit) -> {
+                        IntegrationChecks.subreaper(observed, process.getString("source_id"), which, exit, architecture,
+                            runIdentity.getLong("java_owner_uid"), runIdentity.getString("boot_id"));
+                        return IntegrationChecks.releasedBirths(observed, runIdentity.getLong("java_owner_uid"), runIdentity.getString("boot_id"));
+                    });
+                value.put("component_source_head", process.getString("source_head")).put("component_library_sha256", installed.getString("libsubreaper_probe.so"))
+                    .put("finite_oracle_cleanup_verified", value.getBoolean("output_accepted") && !value.getBoolean("retained_ownership"));
+                checks.put(value);
+                if (!value.getBoolean("output_accepted") || value.getBoolean("retained_ownership")) throw new IOException("Incomplete subreaper collection; stop all later launches");
+            }
+        }
+        report.put("integration_case_inventory_complete", true);
+    }
+
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         TextView view = new TextView(this);
@@ -636,7 +740,9 @@ public final class ProbeActivity extends Activity {
                 String probe = lib + "/libruntime_probe.so";
                 JSONArray checks = new JSONArray();
                 report.put("checks", checks);
-                if (build.optBoolean("wrapper_controls_only", false)) {
+                if (build.optString("diagnostic_profile").equals("subreaper13e-networkcde-v1")) {
+                    integrationProbes(checks, report, lib, build);
+                } else if (build.optBoolean("wrapper_controls_only", false)) {
                     runIdentity.put("fixture_source_sha256", build.getJSONObject("wrapper_fixture").getString("source_sha256"));
                     wrapperControls(checks, report, lib, build);
                 } else {
@@ -715,6 +821,7 @@ public final class ProbeActivity extends Activity {
                 synchronized (owned) {
                     for (OwnedInvocation entry : owned) retained.put(entry.result);
                     report.put("retained_guest_owners", retainedGuests.size());
+                    report.put("retained_native_operations", new JSONArray(retainedNativeOperations));
                 }
                 report.put("retained_invocations", retained);
                 if (attempt != null) writeJson(new File(attempt, "report.json"), report);
