@@ -670,3 +670,101 @@ def test_apk_record_cannot_add_unreviewed_exception(apk_package):
     record["exceptions"] = {"omitted_services": "temporary"}
     with pytest.raises(ParityError, match="manifest drift"):
         check_apk_sources(root, payload, record, commit)
+
+
+@pytest.fixture
+def apk_runtime_package(apk_package, tmp_path):
+    from scripts.check_runtime_parity import apk_runtime_source_manifest
+
+    root, shared, original, commit = apk_package
+    record = apk_runtime_source_manifest(root, commit)
+    assert record["shared_source"] == original
+    assert not set(record["adapter_files"]) & set(original["source_files"])
+    adapters = tmp_path / "runtime-support"
+    for name in record["adapter_files"]:
+        target = adapters / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / name, target)
+    return root, shared, adapters, record, commit
+
+
+def test_packaged_runtime_is_exact_separate_composition(apk_runtime_package):
+    from scripts.check_runtime_parity import (
+        APK_RUNTIME_SUPPORT,
+        check_apk_runtime_sources,
+    )
+
+    root, shared, adapters, record, commit = apk_runtime_package
+    assert set(record["adapter_files"]) == APK_RUNTIME_SUPPORT
+    assert (
+        set(record["source_files"])
+        == set(record["shared_source"]["source_files"]) | APK_RUNTIME_SUPPORT
+    )
+    result = check_apk_runtime_sources(root, shared, adapters, record, commit)
+    assert result["status"] == "passed"
+    assert result["adapter_file_count"] == 4
+    assert result["execution"] == "NOT_RUN"
+    assert result["readiness"] == "PENDING"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "dev/android/runtime.py",
+        "dev/android/recovery.py",
+        "dev/android/nginx.conf.in",
+        "dev/schemii.toml",
+    ],
+)
+def test_packaged_runtime_rejects_missing_or_rebound_adapter(apk_runtime_package, name):
+    from scripts.check_runtime_parity import check_apk_runtime_sources
+
+    root, shared, adapters, record, commit = apk_runtime_package
+    path = adapters / name
+    path.unlink()
+    with pytest.raises(ParityError, match="inventory/content"):
+        check_apk_runtime_sources(root, shared, adapters, record, commit)
+    record["adapter_files"].pop(name)
+    record["source_files"].pop(name)
+    with pytest.raises(ParityError, match="manifest drift"):
+        check_apk_runtime_sources(root, shared, adapters, record, commit)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "dev/android/host.py",
+        "dev/android/bin/unreviewed",
+        "secrets/password",
+        "dev/android/pgdata/rows",
+    ],
+)
+def test_packaged_runtime_refuses_untrusted_or_private_extras(
+    apk_runtime_package, extra
+):
+    from scripts.check_runtime_parity import check_apk_runtime_sources
+
+    root, shared, adapters, record, commit = apk_runtime_package
+    target = adapters / extra
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("unreviewed")
+    with pytest.raises(ParityError, match="unexpected payload"):
+        check_apk_runtime_sources(root, shared, adapters, record, commit)
+
+
+def test_packaged_runtime_refuses_changed_symlinked_and_wrong_source(
+    apk_runtime_package,
+):
+    from scripts.check_runtime_parity import check_apk_runtime_sources
+
+    root, shared, adapters, record, commit = apk_runtime_package
+    path = adapters / "dev/android/runtime.py"
+    path.write_text("# fork")
+    with pytest.raises(ParityError, match="inventory/content"):
+        check_apk_runtime_sources(root, shared, adapters, record, commit)
+    path.unlink()
+    path.symlink_to(root / "dev/android/runtime.py")
+    with pytest.raises(ParityError, match="links"):
+        check_apk_runtime_sources(root, shared, adapters, record, commit)
+    with pytest.raises(ParityError):
+        check_apk_runtime_sources(root, shared, adapters, record, "0" * 40)

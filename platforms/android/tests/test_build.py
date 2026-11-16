@@ -15,6 +15,7 @@ import unittest
 import zipfile
 
 HERE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(HERE))
 
 
 def load(name):
@@ -264,6 +265,8 @@ class BootOnlyControls(unittest.TestCase):
     def test_boot_admission_rejects_every_foreign_input_before_source_or_native(self):
         for name in (
             "guest_payload",
+            "packaged_shared_runtime",
+            "guest_manifest_sha256",
             "network_handoff",
             "network_checkout",
             "process_head",
