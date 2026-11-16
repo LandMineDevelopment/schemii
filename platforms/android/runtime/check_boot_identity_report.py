@@ -387,6 +387,22 @@ def check_report(r, p, identity, *, run_id, provenance_sha256, signer_sha256, ab
     require(
         type(n["samples"]) is list and len(n["samples"]) == 2, "Sample inventory drift"
     )
+
+    def verified_read(s):
+        return s["origin"] == 1 and all(
+            s[k] == 5
+            for k in ("opened_nodes", "procfs_checks", "type_checks", "mount_checks")
+        )
+
+    def parsed_sample(s):
+        # Each data call consumes at least one byte; a short-of-capacity
+        # successful read must then make a distinct EOF call.
+        return (
+            verified_read(s)
+            and s["bytes_read"] in (36, 37)
+            and 2 <= s["read_calls"] <= s["bytes_read"] + 1
+        )
+
     for s in n["samples"]:
         closed(
             s,
@@ -409,9 +425,23 @@ def check_report(r, p, identity, *, run_id, provenance_sha256, signer_sha256, ab
             <= s["opened_nodes"],
             "Sample counters drift",
         )
+        require(
+            s["opened_nodes"] - s["mount_checks"] <= 1,
+            "More than one unverified path node",
+        )
+        require(
+            (s["origin"] == 1) == (s["mount_checks"] == 5),
+            "Origin/counter drift",
+        )
+        require(
+            (not s["bytes_read"] or s["read_calls"] > 0)
+            and (not s["read_calls"] or verified_read(s)),
+            "Read before verified origin",
+        )
     if n["status"] == 0:
         require(
             n["knownness"] == 1
+            and n["stage"] == 0
             and n["errno"]
             == n["cleanup_errno"]
             == n["failed_sample"]
@@ -420,20 +450,7 @@ def check_report(r, p, identity, *, run_id, provenance_sha256, signer_sha256, ab
             "Mislabelled known observation",
         )
         require(
-            all(
-                s["origin"] == 1
-                and all(
-                    s[k] == 5
-                    for k in (
-                        "opened_nodes",
-                        "procfs_checks",
-                        "type_checks",
-                        "mount_checks",
-                    )
-                )
-                and s["bytes_read"] in (36, 37)
-                for s in n["samples"]
-            ),
+            all(parsed_sample(s) for s in n["samples"]),
             "Unverified known origin",
         )
         gate = "caller-mount-observed-only"
@@ -459,11 +476,261 @@ def check_report(r, p, identity, *, run_id, provenance_sha256, signer_sha256, ab
         syscall_failure = n["status"] in (1, 2, 5, 10)
         require((n["errno"] > 0) == syscall_failure, "Failure errno drift")
         require((n["failed_node"] == 0) == (n["status"] == 11), "Failure node drift")
+        sample_index = n["failed_sample"] - 1
+        if sample_index == 0:
+            require(
+                all(v == 0 for v in n["samples"][1].values()),
+                "Second sample after first-sample refusal",
+            )
+        else:
+            require(parsed_sample(n["samples"][0]), "Unfinished first sample")
+        s = n["samples"][sample_index]
+        status, node, stage = n["status"], n["failed_node"], n["stage"]
+        require((s["origin"] == 2) == (status == 4), "Rejected origin/status drift")
+        if status == 1:
+            require(
+                all(
+                    s[k] == node - 1
+                    for k in (
+                        "opened_nodes",
+                        "procfs_checks",
+                        "type_checks",
+                        "mount_checks",
+                    )
+                )
+                and s["read_calls"] == s["bytes_read"] == 0,
+                "Open failure counters",
+            )
+        elif status in (2, 3, 4):
+            require(
+                s["opened_nodes"] == node
+                and s["procfs_checks"] == node - (stage == 2)
+                and s["type_checks"] == node - (stage in (2, 3))
+                and s["mount_checks"] == node - 1
+                and s["read_calls"] == s["bytes_read"] == 0,
+                "Origin failure counters",
+            )
+        elif status in (5, 6, 7, 8, 9):
+            require(node == 5 and verified_read(s), "Read failure origin")
+            size, calls = s["bytes_read"], s["read_calls"]
+            if status == 5:
+                feasible = size < 38 and 1 <= calls <= size + 1
+            elif status == 6:
+                feasible = size == 0 and calls == 1
+            elif status == 7:
+                feasible = 0 < size < 36 and 2 <= calls <= size + 1
+            elif status == 8:
+                feasible = size in (36, 37) and 2 <= calls <= size + 1
+            else:
+                feasible = size == 38 and 1 <= calls <= 38
+            require(feasible, "Read/parse failure counters")
+        elif status == 10:
+            if node == 5:
+                require(parsed_sample(s), "Leaf close before successful parse")
+            else:
+                require(
+                    s["opened_nodes"] == node + 1
+                    and all(
+                        s[k] == node
+                        for k in ("procfs_checks", "type_checks", "mount_checks")
+                    )
+                    and s["read_calls"] == s["bytes_read"] == 0,
+                    "Parent close failure counters",
+                )
+        else:
+            require(
+                n["failed_sample"] == 2
+                and n["cleanup_errno"] == 0
+                and all(parsed_sample(v) for v in n["samples"]),
+                "Comparison before two complete reads",
+            )
+        if (status == 1 and node == 1) or (status == 10 and node == 5):
+            require(n["cleanup_errno"] == 0, "Cleanup error without a later close")
         gate = "NO-GO-native-unknown"
     require(r["runtime_gate"] == gate, "Runtime gate drift")
     return {
         "observation_complete": True,
         "runtime_gate": gate,
+        "owner_authority": False,
+        "recovery_acceptance": False,
+    }
+
+
+def check_diagnostics(bundle, p, identity, **expected):
+    """Validate retained attempt evidence; an exported failure is never a read."""
+    check_provenance(p, identity)
+    closed(
+        bundle,
+        "schema kind run_id source_commit source_sha256 native_provenance_sha256 clock start terminal export_loss report delivery stack_acceptance",
+    )
+    require(
+        type(bundle["schema"]) is int
+        and bundle["schema"] == 1
+        and bundle["kind"] == "boot-identity-diagnostics-v1"
+        and bundle["clock"] == "java-nanoTime-process"
+        and bundle["delivery"] == "unacknowledged"
+        and bundle["stack_acceptance"] is False,
+        "Diagnostic envelope drift",
+    )
+    require(
+        bool(re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", expected["run_id"]))
+        and bundle["run_id"] == expected["run_id"]
+        and bundle["source_commit"] == identity["source_commit"]
+        and bundle["source_sha256"] == identity["source_sha256"]
+        and bundle["native_provenance_sha256"] == expected["provenance_sha256"],
+        "Diagnostic identity drift",
+    )
+    valid_storage = {"file-synced", "readback-valid"}
+    storage_states = valid_storage | {"write-failed", "absent", "invalid-or-unreadable"}
+    phases = {
+        "start",
+        "context",
+        "native-load",
+        "native-call",
+        "report-build",
+        "report-persist",
+        "terminal-persist",
+        "export",
+    }
+    categories = {
+        "none",
+        "native-linkage",
+        "io",
+        "interrupted",
+        "refused",
+        "java-error",
+    }
+    events = {}
+    for key, sequence in (("start", 1), ("terminal", 2), ("export_loss", 3)):
+        record = bundle[key]
+        closed(record, "storage event")
+        require(
+            type(record["storage"]) is str and record["storage"] in storage_states,
+            "Diagnostic storage state",
+        )
+        event = record["event"]
+        require(
+            (event is not None)
+            == (record["storage"] in valid_storage | {"write-failed"}),
+            "Diagnostic event/storage drift",
+        )
+        if event is None:
+            continue
+        closed(
+            event,
+            "schema run_id source_commit source_sha256 native_provenance_sha256 sequence monotonic_ns phase outcome category",
+        )
+        require(
+            type(event["schema"]) is int
+            and event["schema"] == 1
+            and type(event["sequence"]) is int
+            and event["sequence"] == sequence,
+            "Diagnostic sequence drift",
+        )
+        require(
+            all(
+                event[k] == bundle[k]
+                for k in (
+                    "run_id",
+                    "source_commit",
+                    "source_sha256",
+                    "native_provenance_sha256",
+                )
+            ),
+            "Diagnostic event identity drift",
+        )
+        integer(event["monotonic_ns"], -(2**63), 2**63 - 1)
+        require(
+            type(event["phase"]) is str
+            and event["phase"] in phases
+            and type(event["category"]) is str
+            and event["category"] in categories,
+            "Diagnostic category drift",
+        )
+        if key == "start":
+            require(
+                event["phase"] == "start"
+                and event["outcome"] == "started"
+                and event["category"] == "none",
+                "Diagnostic start drift",
+            )
+        else:
+            require(
+                event["outcome"] in ("success", "failure")
+                and ((event["category"] == "none") == (event["outcome"] == "success")),
+                "Diagnostic outcome drift",
+            )
+            if event["outcome"] == "success":
+                require(
+                    key == "terminal" and event["phase"] == "terminal-persist",
+                    "Diagnostic success phase",
+                )
+            if key == "export_loss":
+                require(
+                    event["outcome"] == "failure" and event["phase"] == "export",
+                    "Diagnostic export loss drift",
+                )
+        events[key] = event
+    times = [
+        events[k]["monotonic_ns"]
+        for k in ("start", "terminal", "export_loss")
+        if k in events
+    ]
+    require(times == sorted(times), "Diagnostic monotonic order drift")
+    payload = bundle["report"]
+    closed(payload, "storage sha256 json")
+    require(
+        type(payload["storage"]) is str and payload["storage"] in storage_states,
+        "Diagnostic report storage drift",
+    )
+    has_report = payload["json"] is not None
+    require(
+        has_report == (payload["storage"] in valid_storage | {"write-failed"}),
+        "Diagnostic report availability drift",
+    )
+    measured = None
+    if has_report:
+        require(type(payload["json"]) is str, "Diagnostic report encoding")
+        raw = payload["json"].encode("utf-8")
+        require(
+            0 < len(raw) <= 49152 and sha(raw) == payload["sha256"],
+            "Diagnostic report digest drift",
+        )
+        measured = check_report(loads(raw), p, identity, **expected)
+    else:
+        require(payload["sha256"] is None, "Digest without retained report")
+    terminal = events.get("terminal")
+    if terminal is not None:
+        require(
+            terminal["phase"] != "export", "Transport failure replaced attempt terminal"
+        )
+        if terminal["outcome"] == "failure" and has_report:
+            require(
+                terminal["phase"] in ("report-persist", "terminal-persist"),
+                "Report before failed observation",
+            )
+    succeeded = terminal is not None and terminal["outcome"] == "success"
+    complete = (
+        all(bundle[k]["storage"] in valid_storage for k in ("start", "terminal"))
+        and bundle["export_loss"]["storage"] in valid_storage | {"absent"}
+        and payload["storage"] in valid_storage | {"absent"}
+    )
+    if succeeded:
+        complete = complete and has_report
+    observation = complete and succeeded and measured is not None
+    return {
+        "diagnostic_export_valid": True,
+        "diagnostic_complete": complete,
+        "observation_complete": observation,
+        "runtime_gate": measured["runtime_gate"]
+        if observation and measured is not None
+        else "NO-GO-attempt-failure-or-evidence-loss",
+        "prior_export_failure": bundle["export_loss"]["storage"] != "absent",
+        "evidence_loss": not complete,
+        "elapsed_ns": events["terminal"]["monotonic_ns"]
+        - events["start"]["monotonic_ns"]
+        if "start" in events and "terminal" in events
+        else None,
         "owner_authority": False,
         "recovery_acceptance": False,
     }
@@ -508,8 +775,14 @@ def main():
         parser.add_argument("--" + name, required=True)
     args = parser.parse_args()
     raw = args.provenance.read_bytes()
-    result = check_report(
-        loads(args.report.read_bytes()),
+    report = loads(args.report.read_bytes())
+    validator = (
+        check_diagnostics
+        if type(report) is dict and report.get("kind") == "boot-identity-diagnostics-v1"
+        else check_report
+    )
+    result = validator(
+        report,
         loads(raw),
         source_identity(args.root, args.commit),
         run_id=args.run_id,
