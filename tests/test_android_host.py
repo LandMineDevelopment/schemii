@@ -156,6 +156,59 @@ def approve(host):
     return wait_for(lambda: host.status() if host.status().get("ready") else None)
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        "",
+        "{}",
+        '{"ready":false}',
+        '{"ready":true,"services":[]}',
+        '{"ready":"false","services":{}}',
+        "[]",
+        "null",
+    ],
+)
+def test_guest_status_rejects_incomplete_control_response(tmp_path, response):
+    host = host_module.Host(tmp_path, tmp_path / "prefix", tmp_path / "control")
+    host.guest_command = lambda action: [
+        sys.executable,
+        "-c",
+        "import sys;sys.stdout.write(sys.argv[1])",
+        response,
+    ]
+    with pytest.raises(host_module.RuntimeFailure, match="status response"):
+        host._call("status")
+
+
+def test_guest_status_accepts_complete_not_ready_response(tmp_path):
+    host = host_module.Host(tmp_path, tmp_path / "prefix", tmp_path / "control")
+    host.guest_command = lambda action: [
+        sys.executable,
+        "-c",
+        'print(\'{"ready":false,"services":{}}\');raise SystemExit(1)',
+    ]
+    assert host._call("status") == {"ready": False, "services": {}}
+
+
+def test_incomplete_guest_status_is_not_ready_and_recovers(native_stack, monkeypatch):
+    host, process = native_stack
+    ready = approve(host)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            host,
+            "guest_command",
+            lambda action: [sys.executable, "-c", "print('{\"ready\":false}')"],
+        )
+        incomplete = host.status()
+    assert incomplete["state"] == "starting"
+    assert incomplete["ready"] is False
+    assert incomplete["services"]["tailnet"]["running"] is True
+    assert "Guest readiness probe unavailable" in incomplete["error"]
+    assert host.status()["ready"] is True
+    assert process.poll() is None
+    assert all(host_module.is_current(value) for value in ready["services"].values())
+
+
 def test_native_pending_private_login_then_complete_stack_stop(native_stack):
     host, process = native_stack
     pending = host.status()

@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "license_source": "https://developer.android.com/studio/terms",
+  "metadata_source": "https://dl.google.com/android/repository/repository2-3.xml",
+  "metadata_sha256": "d670de8bce15cc4ecf5d1a135f2168137ccbb8402111dfc8efcf9cb6f3b2f28f",
+  "archives": [
+    {
+      "package": "platforms;android-36",
+      "url": "https://dl.google.com/android/repository/platform-36_r02.zip",
+      "sha1": "2c1a80dd4d9f7d0e6dd336ec603d9b5c55a6f576",
+      "size": 65878410,
+      "sha256": "37607369a28c5b640b3a7998868d45898ebcb777565a0e85f9acf36f29631d2e"
+    },
+    {
+      "package": "build-tools;36.0.0",
+      "url": "https://dl.google.com/android/repository/build-tools_r36_linux.zip",
+      "sha1": "b0b6376977657e8ad9b969bacf4093601da2c6fb",
+      "size": 63737259,
+      "sha256": "5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b"
+    },
+    {
+      "package": "ndk;30.0.16248370",
+      "url": "https://dl.google.com/android/repository/android-ndk-r30-linux.zip",
+      "sha1": "5107f898313790e449e87eee2183d9a20602dee9",
+      "size": 738633529,
+      "sha256": "753611f410d002cfcd3f3dc2ef49aad532089d3180b436c060a90bf0fcb64df2"
+    },
+    {
+      "package": "platform-tools",
+      "url": "https://dl.google.com/android/repository/platform-tools_r37.0.3-linux.zip",
+      "sha1": "e1579b288a7ae4e9bc28dedec6a154d78b3c04ed",
+      "size": 9571024,
+      "sha256": "214548146cadb2ca3508143d8a1d4be4c59de5bb837253e3ede89ed74cf450d1"
+    },
+    {
+      "package": "emulator",
+      "url": "https://dl.google.com/android/repository/emulator-linux_x64-16863232.zip",
+      "sha1": "5c3eeebb678f7f94a45a0b963409d8e875d1962d",
+      "size": 350070672,
+      "sha256": "887266c9e0a4b6e3449a57ae5392a9e18cec74f05d4d201c01d19aba82492e5c"
+    }
+  ],
+  "sources": {
+    "proot": {
+      "url": "https://github.com/termux/proot.git",
+      "commit": "52d65a4dc140ca554d241a1438ddd4f6b00c9813",
+      "license": "GPL-2.0-or-later"
+    },
+    "talloc": {
+      "url": "https://www.samba.org/ftp/talloc/talloc-2.5.0.tar.gz",
+      "sha256": "912afa237510ae542a7733998eb18a12bcda35ab6729c8e2ddb43e8d0ebab007",
+      "license": "LGPL-3.0-or-later"
+    }
+  },
+  "go": {
+    "version": "1.27.4",
+    "url": "https://go.dev/dl/go1.27.4.linux-amd64.tar.gz",
+    "sha256": "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840",
+    "metadata_source": "https://go.dev/dl/?mode=json&include=all",
+    "license": "BSD-3-Clause"
+  }
+}

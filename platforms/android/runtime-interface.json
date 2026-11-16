@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "status": "provisional-feasibility-only",
+  "application_id": "development.landmine.schemii.runtimeprobe",
+  "compile_sdk": 36,
+  "target_sdk": 36,
+  "min_sdk": 29,
+  "device_abi": "arm64-v8a",
+  "diagnostic_abi": "x86_64",
+  "execution": {
+    "candidate": "apk-packaged-proot",
+    "native_directory": "ApplicationInfo.nativeLibraryDir",
+    "extract_native_libs": true,
+    "proot": "libproot.so",
+    "loader": "libproot_loader.so",
+    "syscall_probe": "libruntime_probe.so",
+    "guest_root": "verified assets/runtime/guest-ABI.zip and manifest; separate disposable CE state",
+    "shared_source": "assets/shared/",
+    "shared_identity": "assets/runtime/shared-source.json",
+    "native_identity": "assets/runtime/native-provenance.json",
+    "environment": {
+      "PROOT_NO_SECCOMP": "1",
+      "PROOT_DONT_SHARE_LIBANDROID_SHMEM": "1"
+    }
+  },
+  "storage": {
+    "default": "credential-protected",
+    "probe_relative_root": "probe-v1",
+    "device_protected": "not-implemented; opt-in owner267",
+    "state_and_control_roots": "host supplies selected roots; no fallback or reset"
+  },
+  "endpoints": {
+    "status": "consumed-by-disposable-guest-probe; shared-supervisor-pending",
+    "host": "127.0.0.1",
+    "metadata_postgres": 15433,
+    "target_postgres": 15434,
+    "pi": 14097,
+    "app": 18000,
+    "ingress": 18443,
+    "external_access": "tailnet-HTTPS-only; owner268",
+    "conflicts": "refuse before init; no automatic alternate port"
+  },
+  "control": {
+    "supervisor": "reuse canonical Python lifecycle; adapter parameterization pending ownership",
+    "operations": [
+      "run-attached",
+      "stop",
+      "status"
+    ],
+    "owner_identity": "pid + start_ticks + boot_id; never pid alone",
+    "descendant_identity": "blocked: task/children unavailable in API36 emulator app",
+    "shutdown": "bounded graceful stop; no forced PostgreSQL cleanup",
+    "ready": false
+  },
+  "runtime_acceptance": "pending"
+}
