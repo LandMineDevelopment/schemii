@@ -390,11 +390,91 @@ def adapter_sources():
     }
 
 
+def boot_admission(args):
+    """Fail before any cache/native/legacy operation for this closed profile."""
+    if not getattr(args, "boot_identity_only", False):
+        if getattr(args, "expected_adapter_commit", None):
+            raise ValueError("Expected adapter commit is boot-only")
+        return None
+    from runtime.check_boot_identity_report import source_identity
+
+    forbidden = (
+        "guest_payload",
+        "network_handoff",
+        "network_checkout",
+        "process_head",
+        "process_checkout",
+        "integration_probes",
+        "subreaper_handoff",
+        "subreaper_checkout",
+        "wrapper_controls_only",
+    )
+    if any(getattr(args, k, None) for k in forbidden):
+        raise ValueError(
+            "Boot-only excludes guest/network/process/subreaper/wrapper inputs"
+        )
+    if not args.non_debuggable or not args.log_report or not args.native_donor:
+        raise ValueError("Boot-only requires nondebug export and anchored base donor")
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
+    ).strip()
+    if args.expected_adapter_commit != commit:
+        raise ValueError("Boot-only expected immutable adapter commit mismatch")
+    identity = source_identity(ROOT, commit)
+    for name, sha in adapter_sources().items():
+        data = subprocess.check_output(
+            ["git", "-C", str(ROOT), "show", commit + ":" + name]
+        )
+        if hashlib.sha256(data).hexdigest() != sha:
+            raise ValueError("Boot-only requires exact committed adapter bytes")
+    if subprocess.check_output(
+        ["git", "-C", str(ROOT), "status", "--porcelain", "--", "platforms/android"]
+    ):
+        raise ValueError("Boot-only adapter worktree is dirty")
+    return identity
+
+
+def boot_native(cache, out, abis, identity):
+    tc = cache / "sdk/android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    artifacts, compilers = {}, {}
+    for abi in abis:
+        cc = tc / (ABI_TRIPLES[abi] + "-clang")
+        target = out / "lib" / abi / "libboot_identity_jni.so"
+        run(
+            cc,
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-fPIC",
+            "-shared",
+            "-Wl,-z,max-page-size=16384",
+            "-Wl,-z,noexecstack",
+            "-Wl,-z,defs",
+            '-DBOOT_IDENTITY_SOURCE_SHA256="' + identity["source_sha256"] + '"',
+            HERE / "native/host/boot_identity.c",
+            HERE / "native/host/boot_identity_jni.c",
+            "-o",
+            target,
+        )
+        artifacts[str(target.relative_to(out))] = digest(target)
+        compilers[abi] = {
+            "binary_sha256": digest(cc.resolve()),
+            "version": subprocess.check_output(
+                [str(cc), "--version"], text=True
+            ).strip(),
+            "target": ABI_TRIPLES[abi],
+        }
+    return artifacts, compilers
+
+
 def build(args, cache):
     if bool(args.native_donor) != bool(args.native_donor_receipt_sha256):
         raise ValueError(
             "Native donor and independent receipt SHA256 must be supplied together"
         )
+    boot_identity = boot_admission(args)
     if not args.build_id or any(
         c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
         for c in args.build_id
@@ -482,6 +562,10 @@ def build(args, cache):
     else:
         for abi in abis:
             artifacts.update(native(cache, out, abi))
+    boot_compilers = None
+    if boot_identity:
+        libraries, boot_compilers = boot_native(cache, out, abis, boot_identity)
+        artifacts.update(libraries)
     fixture = None
     if args.wrapper_controls_only:
         source = HERE / "native/runtime/collector_fixture.c"
@@ -562,16 +646,18 @@ def build(args, cache):
         "target_sdk": 36,
         "min_sdk": 29,
         "compile_sdk": 36,
-        "application_id": "development.landmine.schemii.runtimeprobe",
+        "application_id": "development.landmine.schemii.bootidentityprobe"
+        if boot_identity
+        else "development.landmine.schemii.runtimeprobe",
         "abis": abis,
         "peer_components": peer_components,
         "debuggable": not args.non_debuggable,
         "diagnostic_log_export": args.log_report,
         "wrapper_controls_only": args.wrapper_controls_only,
         "wrapper_fixture": fixture,
-        "diagnostic_profile": "subreaper13e-networkcde-v1"
-        if args.integration_probes
-        else None,
+        "diagnostic_profile": "boot-identity-p1b-v1"
+        if boot_identity
+        else ("subreaper13e-networkcde-v1" if args.integration_probes else None),
         "native_files": artifacts,
         "native_donor": native_donor,
         "toolchain_lock_sha256": digest(HERE / "toolchain.lock.json"),
@@ -596,6 +682,12 @@ def build(args, cache):
             "pre-PIN readiness",
         ],
     }
+    if boot_identity:
+        provenance["boot_identity"] = boot_identity
+        provenance["host_tools"]["boot_compilers"] = boot_compilers
+        from runtime.check_boot_identity_report import check_provenance
+
+        check_provenance(provenance, boot_identity)
     if args.guest_payload:
         provenance["guest_payloads"] = {}
         provenance["guest_probe_sha256"] = digest(HERE / "runtime/guest_probe.py")
@@ -681,6 +773,21 @@ def build(args, cache):
             '<uses-permission android:name="android.permission.INTERNET" />',
             '<uses-permission android:name="android.permission.INTERNET" />\n'
             '    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />',
+        )
+    if boot_identity:
+        text = text.replace(
+            'package="development.landmine.schemii.runtimeprobe"',
+            'package="development.landmine.schemii.bootidentityprobe"',
+        )
+        text = text.replace(
+            'android:name=".ProbeActivity"',
+            'android:name="development.landmine.schemii.runtimeprobe.ProbeActivity"',
+        )
+        text = text.replace(
+            '    <uses-permission android:name="android.permission.INTERNET" />\n', ""
+        )
+        text = text.replace(
+            "Schemii runtime probe", "Schemii boot identity observation"
         )
     manifest.write_text(text)
     run(
@@ -770,7 +877,16 @@ def build(args, cache):
         signed,
         aligned,
     )
-    run(bt / "apksigner", "verify", "--verbose", signed)
+    certificate = subprocess.check_output(
+        [str(bt / "apksigner"), "verify", "--verbose", "--print-certs", str(signed)],
+        text=True,
+    )
+    (out / "signer-readback.txt").write_text(certificate)
+    signer = re.findall(
+        r"^Signer #1 certificate SHA-256 digest: ([0-9a-f]{64})$", certificate, re.M
+    )
+    if len(signer) != 1:
+        raise ValueError("Actual signer identity unavailable")
     badging = subprocess.check_output(
         [str(bt / "aapt"), "dump", "badging", str(signed)], text=True
     )
@@ -778,11 +894,14 @@ def build(args, cache):
     for required in [
         "targetSdkVersion:'36'",
         "sdkVersion:'29'",
-        "package: name='development.landmine.schemii.runtimeprobe'",
+        "package: name='" + provenance["application_id"] + "'",
     ]:
         if required not in badging:
             raise ValueError("Actual APK manifest identity drift")
-    from verify_apk import verify_package
+    if boot_identity:
+        from runtime.check_boot_identity_report import verify_package
+    else:
+        from verify_apk import verify_package
 
     package_readback = verify_package(
         signed, ROOT, args.parity_helper.resolve(), commit, aapt2=bt / "aapt2"
@@ -810,6 +929,7 @@ def build(args, cache):
     receipt = {
         "apk": str(signed),
         "apk_sha256": digest(signed),
+        "signer_sha256": signer[0],
         "source_commit": commit,
         "shared_readback": "passed",
         "stack_acceptance": False,
@@ -822,19 +942,20 @@ def build(args, cache):
     print(json.dumps({k: v for k, v in receipt.items() if k != "native"}, indent=2))
 
 
-def validate_cache_owner(cache):
+def validate_cache_owner(cache, boot_only=False):
+    expected_owner = "apk266-boot-identity" if boot_only else "apk264"
     owner_path = cache / "lease.json"
     if owner_path.exists():
         owner = json.loads(owner_path.read_text())
-        if owner.get("owner") != "apk264" or owner.get("workspace") != str(ROOT):
+        if owner.get("owner") != expected_owner or owner.get("workspace") != str(ROOT):
             raise ValueError("Cache belongs to another owner/workspace; preserving it")
     else:
         owner_path.write_text(
             json.dumps(
                 {
-                    "owner": "apk264",
+                    "owner": expected_owner,
                     "workspace": str(ROOT),
-                    "resource": "apk264:private-sdk-ndk-cache",
+                    "resource": expected_owner + ":private-sdk-ndk-cache",
                 }
             )
             + "\n"
@@ -874,6 +995,8 @@ def main():
     b.add_argument("--network-checkout", type=Path)
     b.add_argument("--process-head")
     b.add_argument("--process-checkout", type=Path)
+    b.add_argument("--boot-identity-only", action="store_true")
+    b.add_argument("--expected-adapter-commit")
     b.add_argument("--non-debuggable", action="store_true")
     b.add_argument("--log-report", action="store_true")
     b.add_argument(
@@ -889,7 +1012,7 @@ def main():
     cache = args.cache.resolve()
     cache.mkdir(parents=True, exist_ok=True)
     (cache / "downloads").mkdir(exist_ok=True)
-    validate_cache_owner(cache)
+    validate_cache_owner(cache, getattr(args, "boot_identity_only", False))
     # Prevent parallel builds/bootstrap from racing private native inputs/signing.
     import fcntl
 
