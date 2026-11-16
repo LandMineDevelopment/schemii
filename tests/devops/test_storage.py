@@ -404,7 +404,7 @@ def test_direct_runtime_public_schema_grants_refuse_before_writes(
 
 
 def test_run_status_and_acceptance_preserve_producer_assertions(collector):
-    _batch, run, _command, _attempt = seed(collector)
+    _batch, run, command, _attempt = seed(collector)
     states = {
         "running": "pending",
         "pending": "pending",
@@ -432,6 +432,16 @@ def test_run_status_and_acceptance_preserve_producer_assertions(collector):
     assert collector.execute(
         "SELECT acceptance FROM devops.v1_ci_runs WHERE id=%s", (run["id"],)
     ).fetchone() == (None,)
+    changed = command | {
+        "id": uuid.uuid4(),
+        "source_key": "source-changed-command",
+        "slot_key": "python-changed",
+        "outcome": "source-changed",
+    }
+    insert(collector, "commands", changed)
+    assert collector.execute(
+        "SELECT outcome FROM devops.v1_command_runs WHERE id=%s", (changed["id"],)
+    ).fetchone() == ("source-changed",)
     for invalid in (
         {"outcome": "unsupported-state"},
         {"outcome": "feedback-passed", "acceptance": True},

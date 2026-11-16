@@ -114,7 +114,7 @@ CREATE TABLE devops.commands (
     started_at timestamptz,
     finished_at timestamptz,
     duration_ms devops.milliseconds,
-    outcome text CHECK (outcome IN ('running', 'passed', 'failed', 'pending', 'cancelled', 'incomplete', 'skipped', 'error', 'timed-out', 'collection-error')),
+    outcome text CHECK (outcome IN ('running', 'passed', 'failed', 'pending', 'cancelled', 'incomplete', 'source-changed', 'skipped', 'error', 'timed-out', 'collection-error')),
     FOREIGN KEY (repository_id, installation_id, run_id, run_revision)
         REFERENCES devops.ci_runs(repository_id, installation_id, id, revision),
     FOREIGN KEY (repository_id, installation_id, donor_command_id, donor_command_revision)

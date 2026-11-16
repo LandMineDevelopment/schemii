@@ -196,7 +196,9 @@ asserting **no acceptance**. Never normalize it or `source-changed` to `passed`.
 Reject unknown statuses and contradictory receipt fields before inserting; these
 storage checks do not replace #279's original inventory/source/evidence validation
 or establish coordinator acceptance. Command and attempt outcomes have their own
-SQL vocabularies and must not be substituted for run status.
+SQL vocabularies and must not be substituted for run status. A command whose
+receipt entry says `source-changed` retains that exact outcome too, even when its
+process exited zero; never copy the earlier process `passed` value over it.
 
 Keys are bounded ASCII tokens; hashes are lowercase 64 hex, Git IDs 40/64 hex,
 ordinals/counts nonnegative, measured milliseconds finite nonnegative numeric(18,3),
