@@ -9,6 +9,7 @@ No host result establishes Android durability, owner custody or admission.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -181,9 +182,13 @@ int main(int argc,char **argv) {
       if (!strcmp(argv[2],"mode_change")) { if (fchmod(dir,0755)) abort(); }
       if (!strcmp(argv[2],"pressure")) j->prefix.bytes=JOURNAL_MAX_BYTES;
       if (!strcmp(argv[2],"seq_overflow")) j->prefix.sequence=UINT64_MAX;
-      if (!strcmp(argv[2],"after_active_fault")) print_result(journal_active(j,1));
+      int after_active=!strcmp(argv[2],"after_active_fault") ||
+                       !strcmp(argv[2],"after_active_validate_fault");
+      if (after_active) print_result(journal_active(j,1));
+      if (!strcmp(argv[2],"after_active_validate_fault") &&
+          !strcmp(argv[3],"mode_change")) { if (fchmod(dir,0755)) abort(); }
       arm(argv[3]);
-      uint64_t seq=!strcmp(argv[2],"after_active_fault") ? 2 : 1;
+      uint64_t seq=after_active ? 2 : 1;
       if (!strcmp(argv[2],"gap")) seq=2;
       if (!strcmp(argv[2],"duplicate")) seq=0;
       r=journal_active(j,seq); print_result(r);
@@ -192,7 +197,8 @@ int main(int argc,char **argv) {
         print_result(journal_inspect(j)); print_result(journal_active(j,2));
       }
       if (!strcmp(argv[2],"active_fault")) print_result(journal_active(j,2));
-      if (!strcmp(argv[2],"after_active_fault")) print_result(journal_active(j,3));
+      if (after_active) print_result(journal_active(j,3));
+      if (!strcmp(argv[2],"after_active_validate_fault")) print_result(journal_inspect(j));
     }
   }
   fault=""; print_result(journal_close(&j));
@@ -666,6 +672,30 @@ def test_append_after_prior_active_preserves_prefix(native, store, fault):
     assert inspected["effect"] == 0
     assert inspected["prefix_bytes"] == (
         640 if fault in ["unknown", "sync1", "sync2"] else 320
+    )
+
+
+@pytest.mark.parametrize(
+    ("fault", "status", "error"),
+    [("mode_change", 2, 0), ("stat_fail", 3, errno.EIO), ("owner", 2, 0)],
+)
+def test_directory_validation_after_prior_active_retains_diagnostics(
+    native, store, fault, status, error
+):
+    rows = run(native, store, "after_active_validate_fault", fault)
+    assert rows[2]["effect"] == 5
+    failed = rows[3]
+    assert failed["status"] == status and failed["stage"] == 3
+    assert failed["error"] == error and failed["cleanup_error"] == 0
+    assert failed["effect"] == failed["bytes"] == failed["loss_known"] == 0
+    assert failed["prefix_bytes"] == 320 and failed["last_sequence"] == 1
+    assert failed["sequence_known"] == 1
+    # Repeat, same-handle inspection and checked close retain the first failure.
+    assert rows[4] == rows[5] == rows[6] == failed
+    anchor = frame(0, bytes(32))
+    assert (store / "anchor").read_bytes() == anchor
+    assert (store / "essential").read_bytes() == frame(
+        1, hashlib.sha256(anchor).digest()
     )
 
 

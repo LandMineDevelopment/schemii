@@ -429,11 +429,12 @@ struct journal_result journal_active(struct journal *j, uint64_t seq) {
     return j->result;
   }
   j->result = blank();
-  if (!metadata(j, j->dir, 1))
-    return j->result;
+  /* Keep acknowledged facts even when pre-write directory checks fail. */
   j->result.prefix_bytes = j->prefix.bytes;
   j->result.last_sequence = j->prefix.sequence;
   j->result.sequence_known = 1;
+  if (!metadata(j, j->dir, 1))
+    return j->result;
   if (j->prefix.sequence == UINT64_MAX) {
     (void)fail(j, JOURNAL_OVERFLOW, JOURNAL_VALIDATE, 0);
     return j->result;
