@@ -656,6 +656,7 @@ public final class ProbeActivity extends Activity {
         view.setPadding(24, 40, 24, 24);
         view.setText("Running disposable native execution controls…");
         setContentView(view);
+        if (BootIdentityProbe.dispatch(this, view)) return;
         if (getIntent().getBooleanExtra("export_report_only", false)) {
             new Thread(() -> {
                 try {

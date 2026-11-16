@@ -249,5 +249,56 @@ class BuildControls(unittest.TestCase):
                     verify.elf_identity(data, "arm64-v8a")
 
 
+class BootOnlyControls(unittest.TestCase):
+    def args(self, **updates):
+        args = dict(
+            boot_identity_only=True,
+            non_debuggable=True,
+            log_report=True,
+            native_donor=Path("donor"),
+            expected_adapter_commit="0" * 40,
+        )
+        args.update(updates)
+        return SimpleNamespace(**args)
+
+    def test_boot_admission_rejects_every_foreign_input_before_source_or_native(self):
+        for name in (
+            "guest_payload",
+            "network_handoff",
+            "network_checkout",
+            "process_head",
+            "process_checkout",
+            "integration_probes",
+            "subreaper_handoff",
+            "subreaper_checkout",
+            "wrapper_controls_only",
+        ):
+            with (
+                self.subTest(name=name),
+                patch.object(build, "run") as native,
+                self.assertRaisesRegex(ValueError, "excludes"),
+            ):
+                build.boot_admission(self.args(**{name: True}))
+            native.assert_not_called()
+
+    def test_boot_admission_requires_nondebug_export_donor_and_exact_commit(self):
+        for key in ("non_debuggable", "log_report", "native_donor"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "requires"):
+                build.boot_admission(self.args(**{key: None}))
+        with self.assertRaisesRegex(ValueError, "commit mismatch"):
+            build.boot_admission(self.args())
+
+    def test_boot_lease_is_separate_and_does_not_adopt_peer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            build.validate_cache_owner(cache, True)
+            self.assertEqual(
+                json.loads((cache / "lease.json").read_text())["owner"],
+                "apk266-boot-identity",
+            )
+            with self.assertRaises(ValueError):
+                build.validate_cache_owner(cache)
+
+
 if __name__ == "__main__":
     unittest.main()
