@@ -636,6 +636,230 @@ __PRODUCTION__
                 wrong, p, identity, run_id="p1b-01", provenance_sha256="e" * 64
             )
 
+    def test_production_dispatch_prioritizes_original_disk_journal(self):
+        # Production dispatch and journal, with explicit Android/preflight facades.
+        # No Android/native/host boot read. The cold-JVM state is static-slot reset
+        # plus real private fixture files; original record bytes must survive.
+        source = (
+            PATH.parents[1]
+            / "app/src/main/java/development/landmine/schemii/runtimeprobe/BootIdentityProbe.java"
+        ).read_text()
+        production = "\n".join(
+            source[source.index(first) : source.index(after, source.index(first))]
+            for first, after in (
+                ("    private static void require(", "    private static void keys("),
+                (
+                    "    private static void persist(",
+                    "    private static synchronized void export(",
+                ),
+                (
+                    "    // Request/diagnostic helpers:",
+                    "    // End request/diagnostic helpers.",
+                ),
+                ("    static final class Journal {", "    // End diagnostic journal."),
+                ("    static boolean dispatch(Activity a, TextView view)", "\n}\n"),
+            )
+        )
+        prefix = r"""
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.security.MessageDigest;
+import java.util.*;
+import java.util.concurrent.*;
+public class BootIdentityProbe {
+    static final String PACKAGE="development.landmine.schemii.bootidentityprobe", PROFILE="boot-identity-p1b-v1";
+    static Journal retained;
+    static Refusal retainedRefusal;
+    static int preflights=0, forbiddenWork=0;
+    static List<byte[]> sent=new ArrayList<>();
+    static String observe() { forbiddenWork++; throw new AssertionError("native seam forbidden"); }
+    static JSONObject fact(String p,String k) { forbiddenWork++; throw new AssertionError("context read forbidden"); }
+    static void validateRetainedReport(byte[] bytes,JSONObject id,String run,String provenance) throws Exception { throw new IOException("synthetic invalid report"); }
+    static JSONObject preflight(Activity a,JSONObject p,byte[] raw,Request request,Progress progress) {
+        preflights++; progress.admitted=true;
+        return new JSONObject().put("source_commit",request.commit).put("source_sha256",request.source);
+    }
+    static void export(byte[] raw,String run) { synchronized(sent) { sent.add(raw); } }
+    // Test-only Android/value facades: no Android classes, device, JNI, shell or kernel read.
+    static class Bundle extends HashMap<String,Object> { private static final long serialVersionUID=1; }
+    static class Intent { final Bundle values; Intent(Bundle b){values=b;} Bundle getExtras(){return values;} }
+    static class TextView { void setText(String value){} }
+    static class Assets { InputStream open(String p) { return new ByteArrayInputStream("{}".getBytes(StandardCharsets.UTF_8)); } }
+    static class ApplicationInfo { String nativeLibraryDir="x86_64"; int targetSdkVersion=36,minSdkVersion=29; }
+    static class Signature { byte[] toByteArray(){return new byte[0];} }
+    static class SigningInfo { Signature[] getApkContentsSigners(){return new Signature[]{new Signature()};} }
+    static class PackageInfo { SigningInfo signingInfo=new SigningInfo(); }
+    static class PackageManager { static final int GET_SIGNING_CERTIFICATES=1; PackageInfo getPackageInfo(String s,int i){return new PackageInfo();} }
+    static class Activity {
+        final File dir; Intent original; volatile CountDownLatch done=new CountDownLatch(1);
+        Activity(File d,Bundle b){dir=d;original=new Intent(b);}
+        String getPackageName(){return PACKAGE;} Intent getIntent(){return original;}
+        Assets getAssets(){return new Assets();} File getFilesDir(){return dir;}
+        ApplicationInfo getApplicationInfo(){return new ApplicationInfo();} PackageManager getPackageManager(){return new PackageManager();}
+        void runOnUiThread(Runnable r){r.run();done.countDown();}
+        void await() throws Exception { if(!done.await(5,TimeUnit.SECONDS)) throw new AssertionError("dispatch timeout"); done=new CountDownLatch(1); }
+    }
+    static class JSONObject {
+        Map<String,Object> values=new HashMap<>();
+        JSONObject(){} JSONObject(String s){if(!s.equals("{}"))throw new AssertionError("unexpected JSON input");}
+        JSONObject put(String k,Object v){values.put(k,v);return this;}
+        Object get(String k){return values.get(k);} Object opt(String k){return values.get(k);}
+        String getString(String k){return (String)get(k);} int getInt(String k){return (Integer)get(k);}
+        Object getJSONArray(String k){return get(k);}
+    }
+    static class android { static class os { static class Build { static class VERSION { static int SDK_INT=36; } } static class Process { static int myPid(){return 0;} static int myUid(){return 0;} } } }
+"""
+        suffix = r"""
+    static Bundle extras(boolean export){
+        Bundle b=new Bundle();b.put("run_id","p1b-01");b.put("expected_source_commit","c".repeat(40));
+        b.put("expected_source_sha256","d".repeat(64));b.put("expected_native_provenance","e".repeat(64));
+        if(export)b.put("export_report_only",true);return b;
+    }
+    static void print(String name,byte[] raw){System.out.println(name+" "+Base64.getEncoder().encodeToString(raw));}
+    static void emit(String name,Activity a,TextView view,Bundle request) throws Exception {
+        int before; synchronized(sent){before=sent.size();}
+        dispatchExport(a,view,new Intent(request));a.await();
+        synchronized(sent){require(sent.size()==before+1);print(name,sent.get(before));}
+    }
+    static Refusal cache() throws Exception {
+        Progress p=new Progress();p.phase="source-digest";
+        Refusal r=new Refusal(extras(false),p,new IOException("private-original-exception"));r.first=true;return r;
+    }
+    static Journal original(File dir) throws Exception {
+        require(dir.mkdir());Journal j=new Journal(dir,"p1b-01","c".repeat(40),"d".repeat(64),"e".repeat(64));
+        j.run(state->{state.phase("native-load");throw new IOException("private-original-exception");},b->{throw new AssertionError();});
+        return j;
+    }
+    public static void main(String[] args) throws Exception {
+        File root=new File(args[0]);TextView view=new TextView();
+        Journal original=original(new File(root,"original"));
+        byte[] start=Files.readAllBytes(original.file("started").toPath());
+        byte[] terminal=Files.readAllBytes(original.file("terminal.record").toPath());
+        retained=null;retainedRefusal=null; // New JVM, original disk evidence intact.
+        Activity a=new Activity(original.directory,extras(false));
+        dispatch(a,view);a.await();
+        require(retained==null && retainedRefusal!=null && retainedRefusal.first);
+        synchronized(sent){print("replay_refusal",sent.get(0));}
+        int before=preflights;
+        emit("cold_original",a,view,extras(true));
+        require(preflights==before+1 && retained!=null && retained.finished);
+        require(Arrays.equals(start,Files.readAllBytes(original.file("started").toPath())));
+        require(Arrays.equals(terminal,Files.readAllBytes(original.file("terminal.record").toPath())));
+        emit("memory_original",a,view,extras(true));
+        // A foreign run cannot relabel the live OR cold original journal.
+        Bundle foreign=extras(true);foreign.put("run_id","foreign-run");
+        Journal liveOriginal=retained;
+        emit("foreign_live",a,view,foreign);require(retained==liveOriginal);
+        retained=null;
+        emit("foreign_disk",a,view,foreign);require(retained==null);
+        emit("original_after_foreign",a,view,extras(true));require(retained!=null);
+        require(Arrays.equals(start,Files.readAllBytes(original.file("started").toPath())));
+        require(Arrays.equals(terminal,Files.readAllBytes(original.file("terminal.record").toPath())));
+        // A request while the original is still running must not replace it.
+        File ld=new File(root,"live");require(ld.mkdir());
+        Journal live=new Journal(ld,"p1b-01","c".repeat(40),"d".repeat(64),"e".repeat(64));
+        CountDownLatch started=new CountDownLatch(1),release=new CountDownLatch(1);
+        Thread worker=new Thread(()->{try{live.run(j->{j.phase("native-load");started.countDown();require(release.await(5,TimeUnit.SECONDS));throw new IOException("private-original-exception");},b->{throw new AssertionError();});}catch(Exception e){throw new AssertionError(e);}});
+        retained=live;retainedRefusal=null;worker.start();require(started.await(5,TimeUnit.SECONDS));
+        Activity la=new Activity(ld,extras(false));emit("in_flight_refusal",la,view,extras(true));require(retained==live && !live.finished);
+        release.countDown();worker.join(5000);require(!worker.isAlive() && live.finished);
+        emit("live_finished_original",la,view,extras(true));require(retained==live);
+        // Corrupt/partial/nonregular records still take precedence as loss evidence.
+        Journal partial=original(new File(root,"partial"));
+        Files.writeString(partial.file("started").toPath(),"private-corrupt-record");
+        retained=null;retainedRefusal=cache();
+        emit("partial_original",new Activity(partial.directory,extras(false)),view,extras(true));
+        require(Files.readString(partial.file("started").toPath()).equals("private-corrupt-record"));
+        for(String marker:new String[]{"started","terminal.record","report.json","export-loss.record"}){
+            File dir=new File(root,"marker-"+marker);require(dir.mkdir());
+            File file=new File(dir,"boot-identity-"+marker);
+            if(marker.equals("started"))require(file.mkdir());else Files.writeString(file.toPath(),"private-corrupt-record");
+            retained=null;retainedRefusal=cache();
+            emit("marker_"+marker,new Activity(dir,extras(false)),view,extras(true));
+            require(file.exists());
+        }
+        // Failed stat is uncertainty, not proof of absence or eligibility for cache.
+        File uncertain=new File(root,"not-a-directory");Files.writeString(uncertain.toPath(),"private-record");
+        retained=null;retainedRefusal=cache();before=preflights;
+        emit("uncertain_path",new Activity(uncertain,extras(false)),view,extras(true));
+        require(preflights==before+1 && retained==null && Files.readString(uncertain.toPath()).equals("private-record"));
+        // Only positively absent original files permit the RAM-only shortcut.
+        File empty=new File(root,"empty");require(empty.mkdir());
+        retained=null;retainedRefusal=cache();before=preflights;
+        byte[] first=retainedRefusal.envelope();
+        emit("ram_only",new Activity(empty,extras(false)),view,extras(true));
+        synchronized(sent){require(Arrays.equals(first,sent.get(sent.size()-1)));}
+        require(preflights==before && retained==null && empty.list().length==0);
+        require(forbiddenWork==0);
+    }
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "BootIdentityProbe.java").write_text(prefix + production + suffix)
+            for command in (
+                ["javac", "-Xlint:all", str(root / "BootIdentityProbe.java")],
+                ["java", "-cp", str(root), "BootIdentityProbe", str(root)],
+            ):
+                result = subprocess.run(command, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        envelopes = {
+            name: check.loads(base64.b64decode(raw))
+            for name, raw in (line.split(" ", 1) for line in result.stdout.splitlines())
+        }
+        self.assertEqual(len(envelopes), 15)
+        p, identity, _ = fixture()
+        for label, bundle in envelopes.items():
+            run = "foreign-run" if label.startswith("foreign_") else "p1b-01"
+            validator = (
+                check.check_refusal
+                if bundle["kind"] == "boot-identity-refusal-v1"
+                else check.check_diagnostics
+            )
+            inspected = validator(
+                bundle,
+                p,
+                identity,
+                run_id=run,
+                provenance_sha256="e" * 64,
+                signer_sha256="f" * 64,
+                abi="x86_64",
+            )
+            with self.subTest(label=label):
+                self.assertFalse(inspected["observation_complete"])
+                self.assertFalse(inspected["owner_authority"])
+                self.assertFalse(inspected["recovery_acceptance"])
+                self.assertNotIn("private-", json.dumps(bundle))
+                self.assertEqual(
+                    inspected["diagnostic_complete"],
+                    label
+                    in {
+                        "cold_original",
+                        "memory_original",
+                        "original_after_foreign",
+                        "live_finished_original",
+                    },
+                )
+        for label in ("cold_original", "memory_original", "original_after_foreign"):
+            self.assertEqual(
+                envelopes[label]["terminal"]["event"]["phase"], "native-load"
+            )
+        self.assertEqual(
+            envelopes["cold_original"]["start"]["event"],
+            envelopes["original_after_foreign"]["start"]["event"],
+        )
+        for label in (
+            "partial_original",
+            "marker_started",
+            "marker_terminal.record",
+            "marker_report.json",
+            "marker_export-loss.record",
+        ):
+            self.assertEqual(envelopes[label]["kind"], "boot-identity-diagnostics-v1")
+        self.assertEqual(envelopes["uncertain_path"]["phase"], "retained-export")
+        self.assertEqual(envelopes["ram_only"]["phase"], "source-digest")
+
     def test_production_java_journal_failure_and_export_only(self):
         # Compile the exact production pure-Java journal and its four I/O/hash
         # helpers. The Work callback injects failures instead of loading JNI;

@@ -232,6 +232,22 @@ final class BootIdentityProbe {
             return this.run.equals(run) && this.commit.equals(commit) && this.source.equals(source) && this.provenance.equals(provenance);
         }
         File file(String name) { return new File(directory, "boot-identity-" + name); }
+        static boolean mayHaveEvidence(File directory) {
+            try {
+                if (!Files.readAttributes(directory.toPath(), java.nio.file.attribute.BasicFileAttributes.class, java.nio.file.LinkOption.NOFOLLOW_LINKS).isDirectory()) return true;
+            } catch (Exception uncertain) { return true; }
+            for (String name : new String[]{"started", "terminal.record", "report.json", "export-loss.record"}) {
+                try {
+                    Files.readAttributes(new File(directory, "boot-identity-" + name).toPath(), java.nio.file.attribute.BasicFileAttributes.class, java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                    return true;
+                } catch (java.nio.file.NoSuchFileException absent) {
+                    // Only a positively missing entry permits the next check.
+                } catch (Exception uncertain) {
+                    return true; // Unreadable/non-directory is never absence.
+                }
+            }
+            return false;
+        }
         void phase(String value) throws Exception { require(PHASES.contains(value)); phase = value; }
         static String category(Throwable error) {
             if (error instanceof LinkageError) return "native-linkage";
@@ -433,9 +449,10 @@ final class BootIdentityProbe {
                 final Request request = new Request(snapshot, newIntent);
                 if (request.exportOnly) {
                     final Refusal first;
-                    // An in-flight request refusal must never conceal the
-                    // original attempt's later terminal/report diagnostics.
-                    synchronized (BootIdentityProbe.class) { first = retained == null ? retainedRefusal : null; }
+                    // Original evidence takes precedence even in a cold JVM.
+                    // Any existing/uncertain disk entry must go through admitted,
+                    // identity-fenced recovery; never fall back after its failure.
+                    synchronized (BootIdentityProbe.class) { first = retained == null && retainedRefusal != null && !Journal.mayHaveEvidence(a.getFilesDir()) ? retainedRefusal : null; }
                     if (first != null && first.matches(request)) { showRefusal(a, view, first); return; }
                 }
                 progress.phase = "metadata";
