@@ -365,6 +365,94 @@ def test_runtime_roles_cannot_escalate_or_mutate(fixture, collector):
         )
 
 
+@pytest.mark.parametrize("role", ["collector", "reader"])
+@pytest.mark.parametrize("privilege", ["CREATE", "USAGE"])
+def test_direct_runtime_public_schema_grants_refuse_before_writes(
+    fixture, role, privilege
+):
+    actor = fixture[1][role]["user"]
+    with psycopg.connect(**fixture[1]["admin"], autocommit=True) as admin:
+        before = admin.execute(
+            "SELECT * FROM devops_control.migrations ORDER BY version"
+        ).fetchall()
+        admin.execute(
+            sql.SQL("GRANT {} ON SCHEMA public TO {}").format(
+                sql.SQL(privilege), sql.Identifier(actor)
+            )
+        )
+        try:
+            assert admin.execute(
+                "SELECT has_schema_privilege(%s,'public',%s)", (actor, privilege)
+            ).fetchone() == (True,)
+            for action in ("plan", "status", "migrate"):
+                with pytest.raises(storage.Refusal) as error:
+                    operate(fixture, action)
+                assert error.value.reason == "unsafe-runtime-actor"
+            assert (
+                admin.execute(
+                    "SELECT * FROM devops_control.migrations ORDER BY version"
+                ).fetchall()
+                == before
+            )
+        finally:
+            admin.execute(
+                sql.SQL("REVOKE {} ON SCHEMA public FROM {}").format(
+                    sql.SQL(privilege), sql.Identifier(actor)
+                )
+            )
+    assert operate(fixture)["pending_versions"] == []
+
+
+def test_run_status_and_acceptance_preserve_producer_assertions(collector):
+    _batch, run, _command, _attempt = seed(collector)
+    states = {
+        "running": "pending",
+        "pending": "pending",
+        "passed": "complete",
+        "feedback-passed": "partial",
+        "failed": "partial",
+        "cancelled": "cancelled",
+        "incomplete": "partial",
+        "source-changed": "partial",
+    }
+    for index, (outcome, completeness) in enumerate(states.items()):
+        row = run | {
+            "id": uuid.uuid4(),
+            "source_key": f"producer-state-{index}",
+            "mode": "feedback" if outcome == "feedback-passed" else "selected",
+            "outcome": outcome,
+            "completeness": completeness,
+            "acceptance": outcome == "passed",
+        }
+        insert(collector, "ci_runs", row)
+        assert collector.execute(
+            "SELECT outcome,completeness,acceptance FROM devops.v1_ci_runs WHERE id=%s",
+            (row["id"],),
+        ).fetchone() == (outcome, completeness, row["acceptance"])
+    assert collector.execute(
+        "SELECT acceptance FROM devops.v1_ci_runs WHERE id=%s", (run["id"],)
+    ).fetchone() == (None,)
+    for invalid in (
+        {"outcome": "unsupported-state"},
+        {"outcome": "feedback-passed", "acceptance": True},
+        {"outcome": "source-changed", "acceptance": True},
+        {"outcome": "passed", "completeness": "partial", "acceptance": True},
+        {
+            "outcome": "passed",
+            "completeness": "complete",
+            "mode": "feedback",
+            "acceptance": True,
+        },
+        {"outcome": None, "acceptance": True},
+    ):
+        with pytest.raises(psycopg.errors.CheckViolation), collector.transaction():
+            insert(
+                collector,
+                "ci_runs",
+                run | {"id": uuid.uuid4(), "source_key": "rejected-state"} | invalid,
+            )
+
+
 def test_migration_reapply_guards_and_rollback(fixture, monkeypatch):
     assert operate(fixture, "migrate")["applied_versions"] == []
     with psycopg.connect(**fixture[1]["admin"], autocommit=True) as admin:
@@ -566,7 +654,7 @@ def test_private_dump_restore_preserves_history_and_lineage(fixture):
                 "-h",
                 record["socket"],
                 "-p",
-                "5432",
+                str(profiles["maintenance"]["port"]),
                 "-U",
                 profiles["maintenance"]["user"],
                 "-d",
@@ -589,7 +677,7 @@ def test_private_dump_restore_preserves_history_and_lineage(fixture):
             "-h",
             record["socket"],
             "-p",
-            "5432",
+            str(profiles["migrator"]["port"]),
             "-U",
             profiles["migrator"]["user"],
             "-d",
@@ -717,7 +805,7 @@ def test_provision_refuses_reserved_target_before_writes(fixture):
                 "-h",
                 record["socket"],
                 "-p",
-                "5432",
+                str(profiles["admin"]["port"]),
                 "-U",
                 profiles["admin"]["user"],
                 "-d",

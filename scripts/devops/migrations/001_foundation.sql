@@ -77,8 +77,10 @@ CREATE TABLE devops.ci_runs (
     started_at timestamptz,
     finished_at timestamptz,
     duration_ms devops.milliseconds,
-    outcome text CHECK (outcome IN ('running', 'passed', 'failed', 'pending', 'cancelled', 'incomplete')),
+    outcome text CHECK (outcome IN ('running', 'passed', 'feedback-passed', 'failed', 'pending', 'cancelled', 'incomplete', 'source-changed')),
     completeness text NOT NULL CHECK (completeness IN ('unknown', 'complete', 'partial', 'pending', 'cancelled')),
+    acceptance boolean,
+    CHECK (acceptance IS NOT TRUE OR (outcome IS NOT NULL AND outcome = 'passed' AND completeness = 'complete' AND mode IS DISTINCT FROM 'feedback')),
     CHECK (finished_at >= started_at)
 );
 CREATE UNIQUE INDEX ci_runs_source ON devops.ci_runs (repository_id, installation_id, source_key) WHERE revision = 1;

@@ -205,13 +205,13 @@ def preflight(conn: psycopg.Connection, name: str, identity: uuid.UUID) -> None:
         if (
             memberships & {"devops_collector", "devops_reader"}
             and conn.execute(
-                "SELECT has_database_privilege(%s,current_database(),'CREATE') OR has_database_privilege(%s,current_database(),'TEMP')",
-                (actor, actor),
+                "SELECT has_database_privilege(%s,current_database(),'CREATE') OR has_database_privilege(%s,current_database(),'TEMP') OR has_schema_privilege(%s,'public','CREATE') OR has_schema_privilege(%s,'public','USAGE')",
+                (actor, actor, actor, actor),
             ).fetchall()[0][0]
         ):
             refuse(
                 "unsafe-runtime-actor",
-                "Revoke direct runtime login CREATE/TEMP privileges.",
+                "Revoke runtime login database CREATE/TEMP and public-schema CREATE/USAGE privileges.",
             )
         if memberships & {"devops_collector", "devops_reader"} and (
             dangerous or memberships - {"devops_collector", "devops_reader"}
@@ -377,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     result: dict[str, Any] = {"schema": 1, "ok": False, "action": args.action}
     code = 2
+    connection_attempted = False
     try:
         identity = uuid.UUID(args.database_id)
         config = connection_config(args.profile)
@@ -389,6 +390,7 @@ def main(argv: list[str] | None = None) -> int:
         # psycopg/libpq reads these only while opening the synchronous connection.
         ambient = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith("PG")}
         try:
+            connection_attempted = True
             with psycopg.connect(**config, autocommit=True) as conn:
                 detail = operate(conn, args.action, args.database_name, identity)
         finally:
@@ -404,18 +406,20 @@ def main(argv: list[str] | None = None) -> int:
         code = 0
     except Refusal as error:
         result.update(reason=error.reason, next_action=error.next_action)
-    except (ValueError, OSError):
-        result.update(
-            reason="invalid-input",
-            next_action="Check the private profile file and UUID; no target changes committed.",
-        )
-    except psycopg.Error as error:
-        code = 3
-        result.update(
-            reason="database-error",
-            sqlstate=error.sqlstate,
-            next_action="Inspect the private database diagnostics and role/target setup; the transaction was rolled back. Do not retry an uncertain connection without status.",
-        )
+    except (ValueError, OSError, psycopg.Error) as error:
+        if not connection_attempted and not isinstance(error, psycopg.Error):
+            result.update(
+                reason="invalid-input",
+                next_action="Check the private profile file and UUID; no database connection was attempted.",
+            )
+        else:
+            code = 3
+            result.update(
+                reason="database-error",
+                sqlstate=getattr(error, "sqlstate", None),
+                commit_state="unknown",
+                next_action="Preserve the original diagnostics. Commit state is unknown; do not replay migrate. Run status with the same explicit database name and UUID, then reconcile migration versions/checksums with the provisioner before any retry.",
+            )
     result["exit_code"] = code
     if args.json:
         print(json.dumps(result, sort_keys=True))

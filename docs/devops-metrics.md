@@ -74,12 +74,17 @@ The v1 JSON result always contains `schema`, `ok`, `reason`, `next_action` and
 `contract_version`, `database_id`, `schema_version`, `pending_versions`,
 `applied_versions`, `migration_checksums` and integer `server_version`. Exit 0:
 validated status/plan or committed migration; 2: unsafe/invalid input or refused
-contract; 3: database/connection failure (`sqlstate` when available). Errors never
+contract; 3: database/connection failure (`sqlstate` when available and
+`commit_state="unknown"`). Errors never
 include database exception text, SQL payloads, profile contents or credentials.
 For `wrong-target`, reconcile with the provisioner; for `divergent-version` or
 `divergent-schema`, preserve the target and investigate original files/backups.
-For database errors, inspect private diagnostics and status before replaying an
-uncertain connection. A validated status is not application acceptance.
+For database or post-connection errors, preserve the original diagnostics: an
+error during COMMIT acknowledgement or connection closure does not prove rollback.
+Do not replay `migrate`; run `status` with the **same explicit database name and
+UUID**, reconcile versions/checksums with the provisioner, then decide whether a
+retry is safe. Only pre-connection input errors assert that no connection was
+attempted. A validated status is not application acceptance.
 
 ## Tables and identities for #279
 
@@ -155,9 +160,10 @@ its Node/Python/browser reporters; this change does not alter them or acceptance
 - `base_ref` is not a SHA: resolve from authenticated original context only.
   `base_sha`, `policy_sha256`, `inventory_sha256`, `cohort_key` stay NULL when not
   actually emitted/proven. Do not hash a branch label and call it policy/cohort.
-- `profile`, `mode`, run status and run timestamps/duration retain producer meaning.
-  Completeness is separate from outcome and acceptance; feedback pending layers
-  never become success. No acceptance boolean is invented by these datasets.
+- `profile`, `mode`, run timestamps/duration retain producer meaning. Copy the
+  receipt's `status` verbatim into `outcome`, using the complete v1 mapping below.
+  Copy its explicitly emitted boolean `acceptance` into the nullable column;
+  absent means NULL. Never derive acceptance from outcome, completeness or reuse.
 - The indexed `commands` array defines slots, including pending ones. Use a closed
   command key (`python`, `node`, `static`, etc.), project/shard and slot token, never
   raw argv/executed_command. Missing expected inventory counts remain NULL.
@@ -166,6 +172,31 @@ its Node/Python/browser reporters; this change does not alter them or acceptance
   Only observed attempts are imported. Unknown phase values remain NULL; real
   producer-emitted zero remains zero. Wall timestamps and monotonic `duration_ms`
   are different clocks and are not summed/subtracted as interchangeable quantities.
+
+The local-CI v1 receipt mapping is closed and lossless. `completeness` describes
+selected verification coverage, independently of the original execution outcome
+and the producer's acceptance assertion:
+
+| Receipt `status` / stored `outcome` | Stored `completeness` |
+| --- | --- |
+| `running` | `pending` |
+| `pending` | `pending` |
+| `passed` | `complete`, after validating stable source, every selected command and required evidence, and empty pending lists |
+| `feedback-passed` | `partial` when `pending_commands` or `pending_layers` is nonempty; otherwise `complete` after validating the full selected inventory |
+| `failed` | `partial` (the selected verification did not pass) |
+| `cancelled` | `cancelled` |
+| `incomplete` | `partial` |
+| `source-changed` | `partial`; source instability is retained and excludes acceptance/comparable-cohort claims |
+
+For all rows, preserve the actual emitted `acceptance` value, including false;
+unknown remains NULL. A positive assertion is valid only for `passed`/`complete`
+outside feedback mode; SQL refuses contradictory positive assertions. A
+`feedback-passed` row can therefore have complete observed coverage while still
+asserting **no acceptance**. Never normalize it or `source-changed` to `passed`.
+Reject unknown statuses and contradictory receipt fields before inserting; these
+storage checks do not replace #279's original inventory/source/evidence validation
+or establish coordinator acceptance. Command and attempt outcomes have their own
+SQL vocabularies and must not be substituted for run status.
 
 Keys are bounded ASCII tokens; hashes are lowercase 64 hex, Git IDs 40/64 hex,
 ordinals/counts nonnegative, measured milliseconds finite nonnegative numeric(18,3),
