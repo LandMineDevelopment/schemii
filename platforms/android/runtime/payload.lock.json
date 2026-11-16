@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "contract_sha256": "e8eeb47a89308919346579a03fcc283eaf0dad0f1bf148d63585ec0690dd1ee8",
+  "contract_sha256": "025e119ad6498b4719b800502ea1ab423585da7d8b248b0e0c72d258ab9aada3",
   "abi": {
     "arm64-v8a": {
       "base": {
