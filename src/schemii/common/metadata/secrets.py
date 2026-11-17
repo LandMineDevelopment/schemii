@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 from pathlib import Path
 
 
@@ -26,7 +27,7 @@ def read_encryption_key(path: str) -> bytes:
     encoded = read_secret_file(path, "SCHEMII_METADATA_ENCRYPTION_KEY_FILE")
     try:
         key = base64.b64decode(encoded, altchars=b"-_", validate=True)
-    except (ValueError, base64.binascii.Error) as error:
+    except (ValueError, binascii.Error) as error:
         raise ValueError(
             "SCHEMII_METADATA_ENCRYPTION_KEY_FILE must contain a base64 key"
         ) from error

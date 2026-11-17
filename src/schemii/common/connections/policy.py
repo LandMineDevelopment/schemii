@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import ipaddress
-from typing import Protocol
+from typing import Protocol, cast
 
 from psycopg.conninfo import conninfo_to_dict
 
@@ -115,7 +115,8 @@ class MetadataControlPlaneTargetPolicy:
         *,
         host_aliases: tuple[str, ...] = (),
     ) -> "MetadataControlPlaneTargetPolicy":
-        values = conninfo_to_dict(dsn)
+        # Without keyword overrides, libpq's parsed values are decoded strings.
+        values = cast(dict[str, str], conninfo_to_dict(dsn))
         database = values.get("dbname") or values.get("user")
         if not database:
             raise ValueError("metadata DSN must identify a database")
