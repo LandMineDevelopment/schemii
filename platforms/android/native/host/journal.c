@@ -670,8 +670,13 @@ struct journal_result journal_close(struct journal **ptr) {
   }
   struct journal *j = *ptr;
   int thread_error = pthread_key_delete(j->thread_key);
-  if (thread_error)
-    (void)fail(j, JOURNAL_IO, JOURNAL_CLOSE, thread_error);
+  if (thread_error) {
+    if (j->failed) {
+      if (!j->result.cleanup_error)
+        j->result.cleanup_error = thread_error;
+    } else
+      (void)fail(j, JOURNAL_IO, JOURNAL_CLOSE, thread_error);
+  }
   closefd(j, j->dir);
   struct journal_result r = j->result;
   memset(j, 0, sizeof(*j));

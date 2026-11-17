@@ -133,7 +133,7 @@ int __wrap_pthread_setspecific(pthread_key_t key,const void *value) {
 }
 int __wrap_pthread_key_delete(pthread_key_t key) {
   int r=__real_pthread_key_delete(key);
-  return has("key_delete") ? EIO : r;
+  return has("key_delete_secondary") ? EPERM : has("key_delete") ? EIO : r;
 }
 static struct journal_binding binding(void) {
   struct journal_binding b; memset(&b,0,sizeof(b));
@@ -233,6 +233,7 @@ int main(int argc,char **argv) {
       if (fd<0 || __real_write(fd,"x",1)!=1 || __real_close(fd)) abort();
     } else if (!strcmp(argv[3],"mode")) { if (fchmod(dir,0755)) abort(); }
     else if (!strcmp(argv[3],"error")) { arm("read_fail"); }
+    else if (!strcmp(argv[3],"key-delete-after-error")) { arm("read_fail_key_delete_secondary"); }
     print_result(journal_custody_check(j));
     print_result(journal_custody_check(j));
   } else if (!strcmp(argv[2],"concurrent")) {
@@ -282,7 +283,8 @@ int main(int argc,char **argv) {
       if (!strcmp(argv[2],"after_active_validate_fault")) print_result(journal_inspect(j));
     }
   }
-  fault=""; print_result(journal_close(&j));
+  fault=!strcmp(argv[3],"key-delete-after-error") ? "key_delete_secondary" : "";
+  print_result(journal_close(&j));
   if (__real_close(dir)) abort();
   printf("{\"events\":\"%s\"}\n",events); return 0;
 }
@@ -844,3 +846,13 @@ def test_native_thread_binding_failure_has_no_writer_or_state(
     assert first["status"] == 3 and first["stage"] == 4
     assert first["error"] == error and first["cleanup_error"] == cleanup
     assert not list(store.iterdir())
+
+
+def test_tls_close_retains_secondary_error_after_original_read_failure(native, store):
+    rows = run(native, store, "custody", "key-delete-after-error")
+    first, closed = rows[-3], rows[-2]
+    assert first["status"] == 3 and first["error"] == errno.EIO
+    assert first["cleanup_error"] == 0
+    assert closed["status"] == first["status"] and closed["error"] == errno.EIO
+    assert closed["cleanup_error"] == errno.EPERM
+    assert (store / "essential").stat().st_size == 320
