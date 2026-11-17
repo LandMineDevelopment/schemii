@@ -42,10 +42,17 @@ int native_bootstrap_open(const char *apk, const char *module, const char *data,
   cleanup_error(o,custody.secondary_close_error);
   if (!result) {
     o->status.stage=3;
-    o->status.boot=boot_authority_compare(o->authority);
+    struct boot_authority_errors observed={0};
+    o->status.boot=boot_authority_compare_report(o->authority,&observed);
     /* No C/A producer or anchor: strict R/N1 reason ordering unchanged. */
-    result=o->status.boot.error>0 ? o->status.boot.error : 0;
+    /* A pre-R custody failure skips R. Otherwise any observed R error precedes
+     * the post-R custody probe. Publish both before later JNI validation. */
+    native_bootstrap_refuse(o,o->status.boot.error>0 ? o->status.boot.error : 0);
+    native_bootstrap_refuse(o,observed.error);
     cleanup_error(o,o->status.boot.cleanup_error);
+    cleanup_error(o,observed.close_error);
+    cleanup_error(o,observed.secondary_close_error);
+    result=o->status.error;
   }
   native_bootstrap_refuse(o,result);
   return result;

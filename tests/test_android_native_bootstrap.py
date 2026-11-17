@@ -310,12 +310,19 @@ def test_real_native_bootstrap_lease_refusal_and_release(installed, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "mode", ["custody-probe", "two-cleanup-errors", "earlier-error-and-cleanup"]
+    "mode",
+    [
+        "custody-probe",
+        "two-cleanup-errors",
+        "earlier-error-and-cleanup",
+        "custody-then-stale",
+        "reader-then-custody",
+    ],
 )
 def test_jni_close_preserves_disposed_and_retained_reports(tmp_path, mode):
     """Real production JNI close, seeded through a private fixture only.
 
-    Real acquisition/lease/descriptors and disposal run unchanged. Only flock
+    Real acquisition/lease/descriptors and disposal run unchanged. Only openat, flock
     and close outcomes are injected; no Java/framework/C/A admission is claimed.
     """
     data, _, apk, module, pins = specimen(tmp_path, "valid")
@@ -326,10 +333,22 @@ def test_jni_close_preserves_disposed_and_retained_reports(tmp_path, mode):
     wrapper.write_text("""
 #define _GNU_SOURCE
 #include "owner_jni.c"
-static int fail_probe, flock_calls, armed, close_calls;
+#include <fcntl.h>
+#include <stdarg.h>
+#include <unistd.h>
+static int fail_probe, fail_reader, flock_calls, armed, close_calls;
+int __real_openat(int,const char *,int,...);
+int __wrap_openat(int fd,const char *path,int flags,...) {
+  if (fail_reader && !strcmp(path,"/proc")) { errno=EACCES; return -1; }
+  if (flags&O_CREAT) {
+    va_list args; va_start(args,flags); int mode=va_arg(args,int); va_end(args);
+    return __real_openat(fd,path,flags,mode);
+  }
+  return __real_openat(fd,path,flags);
+}
 int __real_flock(int,int);
 int __wrap_flock(int fd,int op) {
-  if (fail_probe && ++flock_calls==2) { errno=EIO; return -1; }
+  if (++flock_calls==fail_probe) { errno=EIO; return -1; }
   return __real_flock(fd,op);
 }
 int __real_close(int);
@@ -343,12 +362,19 @@ int __wrap_close(int fd) {
 int exercise(const char *apk,const char *module,const char *data,
              const struct installed_pin *pins,size_t count,int mode,
              struct native_bootstrap_status *report,int *released) {
-  fail_probe=mode==1;
+  fail_probe=(mode==1 || mode==4) ? 2 : mode==5 ? 3 : 0;
+  fail_reader=mode==5;
   int opened=native_bootstrap_open(apk,module,data,pins,count,&owner);
-  if (opened || !owner) return -1;
+  int expected=(mode==1 || mode==4) ? EIO : mode==5 ? EACCES : 0;
+  if (opened!=expected || !owner) return -1;
   if (mode==3) native_bootstrap_refuse(owner,EACCES);
+  if (mode==4) {
+    int changed=open(apk,O_WRONLY|O_CLOEXEC);
+    if (changed<0 || ftruncate(changed,1) || close(changed)) return -2;
+    if (native_bootstrap_validate(owner,pins,count)!=ESTALE) return -3;
+  }
   reserved=1; busy=0; worker=pthread_self();
-  armed=mode!=1;
+  armed=mode==2 || mode==3;
   int result=Java_development_landmine_schemii_android_host_NativeOwner_close(NULL,NULL);
   *report=snapshot; *released=owner==NULL;
   return result;
@@ -385,6 +411,7 @@ int exercise(const char *apk,const char *module,const char *data,
             str(wrapper),
             "-Wl,--wrap=flock",
             "-Wl,--wrap=close",
+            "-Wl,--wrap=openat",
             "-ldl",
             "-o",
             str(target),
@@ -404,6 +431,8 @@ int exercise(const char *apk,const char *module,const char *data,
         "custody-probe": 1,
         "two-cleanup-errors": 2,
         "earlier-error-and-cleanup": 3,
+        "custody-then-stale": 4,
+        "reader-then-custody": 5,
     }[mode]
     result = lib.exercise(
         bytes(apk),
@@ -416,12 +445,15 @@ int exercise(const char *apk,const char *module,const char *data,
         ctypes.byref(released),
     )
     assert result == errno.EIO
-    assert report.error == (errno.EACCES if number == 3 else errno.EIO)
+    assert report.error == (errno.EACCES if number in (3, 5) else errno.EIO)
     assert report.boot.relation == 2
     assert report.boot.current_admission == report.boot.prior_admission == 1
-    if number == 1:
+    if number in (1, 4, 5):
         assert released.value == 1 and report.retained == 0
         assert report.cleanup == report.secondary_cleanup == 0
+        assert report.secondary == (
+            errno.ESTALE if number == 4 else errno.EIO if number == 5 else 0
+        )
     else:
         assert released.value == 0 and report.retained == 1
         assert (report.cleanup, report.secondary_cleanup) == (errno.EIO, errno.ENOSPC)
