@@ -1,0 +1,172 @@
+--- a/tracee/event.c
++++ b/tracee/event.c
+@@ -0,0 +1,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++#include "actor_channel.h"
++#endif
+@@ -108,0 +112,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++	pid = ac_native_fork(AC_ROOT);
++#else
+@@ -109,0 +116 @@
++#endif
+@@ -115,0 +123,4 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++		{ const int keep[] = {0, 1, 2};
++		  if (ac_child_fds(keep, 3)) _exit(125); }
++#endif
+@@ -420,0 +432,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++				ac_proot_fault(errno);
++#endif
+@@ -424,3 +438,12 @@
+-			break;
+-		}
+-
++#ifdef SCHEMII_MANAGED_ACTORS
++			/* ECHILD is not a closure receipt; retained slots decide. */
++			if (ac_proot_require()) return EXIT_FAILURE;
++#endif
++			break;
++		}
++
++#ifdef SCHEMII_MANAGED_ACTORS
++		/* Registered real children never become guest Tracees. */
++		if (ac_helper_wait(pid, tracee_status)) continue;
++		ac_observe(pid, tracee_status);
++#endif
+@@ -556,0 +580,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++					ac_proot_fault(errno);
++#endif
+@@ -611,0 +638,4 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++					if (!was_sysenter)
++						ac_birth_result(tracee->pid, (long)peek_reg(tracee, CURRENT, SYSARG_RESULT));
++#endif
+@@ -952,0 +983,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++	status = ac_resume(tracee->restart_how, tracee->pid, NULL, (void *)(intptr_t)signal);
++#else
+@@ -953,0 +987 @@
++#endif
+--- a/syscall/enter.c
++++ b/syscall/enter.c
+@@ -0,0 +1,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++#include "actor_channel.h"
++#endif
+@@ -2543,0 +2547,6 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++		status = -ac_clone_policy(0, flags);
++		if (status < 0) break;
++		status = -ac_birth_enter(tracee->pid);
++		if (status < 0) break;
++#endif
+@@ -2556,0 +2566,6 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++		/* No mutable guest-memory read is an admission fence. All forms
++		 * return ENOSYS before kernel entry, permitting libc clone fallback. */
++		status = -ac_clone_policy(1, 0);
++		break;
++#endif
+@@ -2578,0 +2594,4 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++		status = -ac_birth_enter(tracee->pid);
++		if (status < 0) break;
++#endif
+--- a/tracee/tracee.c
++++ b/tracee/tracee.c
+@@ -0,0 +1,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++#include "actor_channel.h"
++#endif
+@@ -431,0 +435,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++	ac_exec(thread->pid, leader->pid);
++#endif
+@@ -720,0 +727,5 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++	/* Register before early-death/proc fallback; loss stays UNKNOWN. */
++	if (ac_task(parent->pid, pid, (clone_flags & CLONE_THREAD) != 0))
++		return -EIO;
++#endif
+--- a/tracee/mem.c
++++ b/tracee/mem.c
+@@ -0,0 +1,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++#include "actor_channel.h"
++#endif
+@@ -151,0 +155,5 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++			if (ac_resume(PTRACE_CONT, tracee->pid, 0, 0) < 0 ||
++			    ac_target_wait(tracee->pid, &wstatus, 0, 0) != tracee->pid)
++				return -1; /* Keep error/loss; never interpret fabricated status. */
++#else
+@@ -153,0 +162 @@
++#endif
+--- a/cli/cli.c
++++ b/cli/cli.c
+@@ -0,0 +1,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++#include "actor_channel.h"
++#endif
+@@ -449,0 +453,6 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++	/* Native in-memory attachment must precede parse_config/F2FS/helper paths.
++	 * No CLI, environment variable or inherited FD number can attach it.
++	 * Current APK exec entry is therefore unconditionally closed. */
++	if (ac_proot_require()) return EXIT_FAILURE;
++#endif
+--- a/path/f2fs-bug.c
++++ b/path/f2fs-bug.c
+@@ -0,0 +1,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++#include "actor_channel.h"
++#endif
+@@ -72,0 +76,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++	pid_t pid = ac_native_fork(AC_F2FS);
++#else
+@@ -73,0 +80 @@
++#endif
+@@ -74,0 +82,4 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++		const int keep[] = {0, 1, 2};
++		if (ac_child_fds(keep, 3)) _exit(125);
++#endif
+@@ -88,0 +100,4 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++		if (ac_target_wait(pid, &wstatus, 0, 1) != pid)
++			goto end_delete_temp_files;
++#else
+@@ -89,0 +105 @@
++#endif
+--- a/extension/sysvipc/sysvipc_shm.c
++++ b/extension/sysvipc/sysvipc_shm.c
+@@ -0,0 +1,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++#include "actor_channel.h"
++#endif
+@@ -141,0 +145,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++		pid_t forked = ac_native_fork(AC_SYSVIPC);
++#else
+@@ -142,0 +149 @@
++#endif
+@@ -143,0 +151,13 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++			const int keep[] = {0, 1, 2, pipe_proot2helper[0], pipe_helper2proot[1]};
++			if (ac_child_fds(keep, 5)) _exit(125);
++			if (dup2(pipe_proot2helper[0], 0) < 0 || dup2(pipe_helper2proot[1], 1) < 0) _exit(125);
++			const int service[] = {0, 1, 2};
++			int secondary = 0;
++			if (ac_close_fds(service, 3, &secondary)) _exit(125);
++			if (fcntl(0, F_SETFL, 0) < 0 || fcntl(1, F_SETFL, 0) < 0) _exit(125);
++			/* Same production service, direct parent, no exec/detach. EOF is
++			 * service input only; event_loop owns the exact terminal wait. */
++			sysvipc_shm_helper_main();
++			_exit(126);
++#else
+@@ -164,0 +185 @@
++#endif

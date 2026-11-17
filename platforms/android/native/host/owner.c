@@ -15,7 +15,7 @@
 #include <unistd.h>
 
 struct apk_owner {
-    int dirfd, sockets[2];
+    int dirfd, sockets[2], actors[2];
     pthread_t worker;
     pthread_mutex_t lock;
     atomic_int busy, cancel, finished;
@@ -85,14 +85,19 @@ int apk_owner_open(int borrowed,struct apk_owner **out) {
     if (socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,o->sockets)<0) {
         int e=errno; close(dir); free(o); return e;
     }
+    /* Distinct private producer endpoints, created before the owner worker.
+     * Neither is exported to Java/Python/PRoot: C/A and launch remain absent. */
+    if (socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC|SOCK_NONBLOCK,0,o->actors)<0) {
+        int e=errno; close(o->sockets[0]); close(o->sockets[1]); close(dir); free(o); return e;
+    }
     int e=pthread_mutex_init(&o->lock,NULL);
-    if (e) { close(o->sockets[0]); close(o->sockets[1]); close(dir); free(o); return e; }
+    if (e) { close(o->actors[0]); close(o->actors[1]); close(o->sockets[0]); close(o->sockets[1]); close(dir); free(o); return e; }
     o->status.boot_relation=BOOT_COMPARE_UNKNOWN;
     o->status.boot_reason=BOOT_COMPARE_CALLER_UNPROVED;
     o->status.journal_status=-1; /* Not observed; never JOURNAL_OK. */
     o->status.journal_effect=0; /* NOT_ATTEMPTED; no durable ACK invented. */
     e=pthread_create(&o->worker,NULL,serve,o);
-    if (e) { pthread_mutex_destroy(&o->lock); close(o->sockets[0]); close(o->sockets[1]); close(dir); free(o); return e; }
+    if (e) { close(o->actors[0]); close(o->actors[1]); pthread_mutex_destroy(&o->lock); close(o->sockets[0]); close(o->sockets[1]); close(dir); free(o); return e; }
     *out=o; return 0;
 }
 int apk_owner_request(struct apk_owner *o,uint32_t operation) {
@@ -122,7 +127,10 @@ int apk_owner_close(struct apk_owner **owner) {
         if (send(o->sockets[0],&frame,sizeof(frame),MSG_DONTWAIT|MSG_NOSIGNAL)!=(ssize_t)sizeof(frame)) return errno?errno:EIO;
     }
     int e=pthread_join(o->worker,NULL); if (e) return e;
-    for (int i=0;i<2;i++) if (close(o->sockets[i])<0 && !e) e=errno;
+    for (int i=0;i<2;i++) {
+        if (close(o->actors[i])<0) { if (!e) e=errno; }
+        if (close(o->sockets[i])<0) { if (!e) e=errno; }
+    }
     if (close(o->dirfd)<0 && !e) e=errno;
     pthread_mutex_destroy(&o->lock); memset(o,0,sizeof(*o)); free(o); *owner=NULL; return e;
 }

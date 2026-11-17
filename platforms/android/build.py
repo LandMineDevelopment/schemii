@@ -167,6 +167,50 @@ def bootstrap(cache):
     )
 
 
+def actor_inputs():
+    """Exact source-only producer recipe, independently parity checked."""
+    lock = json.loads((HERE / "runtime/payload.lock.json").read_text())[
+        "actor_producer"
+    ]
+    for name, expected in lock["inputs"].items():
+        if digest(ROOT / name) != expected:
+            raise ValueError("Actor producer input drift: " + name)
+    return lock
+
+
+def prepare_actor_source(cache, destination):
+    """Only modifies the caller-owned build copy; donor bytes stay immutable."""
+    lock = actor_inputs()
+    donor = cache / "proot-src"
+    if (
+        subprocess.check_output(
+            ["git", "-C", str(donor), "rev-parse", "HEAD"], text=True
+        ).strip()
+        != lock["proot_commit"]
+    ):
+        raise ValueError("Actor producer PRoot pin drift")
+    for name, expected in lock["donor_inputs"].items():
+        original = subprocess.check_output(
+            ["git", "-C", str(donor), "show", lock["proot_commit"] + ":src/" + name]
+        )
+        if (
+            hashlib.sha256(original).hexdigest() != expected
+            or original != (donor / "src" / name).read_bytes()
+        ):
+            raise ValueError("Actor producer donor drift: " + name)
+    run(
+        "patch",
+        "--batch",
+        "--fuzz=0",
+        "-p1",
+        "-i",
+        HERE / "native/proot-actor-channel.patch",
+        cwd=destination,
+    )
+    for name in ("actor_channel.c", "actor_channel.h"):
+        shutil.copyfile(HERE / "native/host" / name, destination / name)
+
+
 def native(cache, out, abi):
     tc = cache / "sdk/android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin"
     cc = tc / (ABI_TRIPLES[abi] + "-clang")
@@ -198,10 +242,13 @@ def native(cache, out, abi):
     )
     run(tc / "llvm-ar", "rcs", build / "libtalloc.a", build / "talloc.o")
     env = os.environ.copy()
-    env["CPPFLAGS"] = "-I" + str(talloc) + " -DARG_MAX=131072"
+    env["CPPFLAGS"] = "-I" + str(talloc) + " -DARG_MAX=131072 -DSCHEMII_MANAGED_ACTORS"
     env["LDFLAGS"] = "-L" + str(build) + " -Wl,-z,max-page-size=16384"
     proot_build = build / "proot-src"
     shutil.copytree(cache / "proot-src/src", proot_build)
+    prepare_actor_source(cache, proot_build)
+    with (proot_build / "GNUmakefile").open("a") as recipe:
+        recipe.write("\nOBJECTS += actor_channel.o\n")
     # Upstream ashmem_memfd.c omits string.h; keep the adaptation source-visible.
     run(
         "patch", "-p1", "-i", HERE / "native/proot-string-header.patch", cwd=proot_build
@@ -231,7 +278,8 @@ def native_recipe(source):
         for node in tree.body
         if (
             isinstance(node, ast.FunctionDef)
-            and node.name in {"native", "run", "digest"}
+            and node.name
+            in {"native", "run", "digest", "actor_inputs", "prepare_actor_source"}
         )
         or (
             isinstance(node, ast.Assign)
@@ -240,7 +288,18 @@ def native_recipe(source):
             )
         )
     ]
-    if len(selected) != 4:
+    functions = [node.name for node in selected if isinstance(node, ast.FunctionDef)]
+    # Historical unmanaged recipes can still be fingerprinted for comparison;
+    # they cannot equal the new managed recipe or satisfy its source inputs.
+    if (
+        len(functions) != len(set(functions))
+        or set(functions)
+        not in (
+            {"native", "run", "digest"},
+            {"native", "run", "digest", "actor_inputs", "prepare_actor_source"},
+        )
+        or len(selected) != len(functions) + 1
+    ):
         raise ValueError("Native build recipe is missing or ambiguous")
     return hashlib.sha256(
         "\n".join(
@@ -298,6 +357,10 @@ def reuse_native(donor_path, out, abis, expected_receipt_sha256):
             "native/runtime_probe.c",
             "native/replace.h",
             "native/proot-string-header.patch",
+            "native/proot-actor-channel.patch",
+            "native/host/actor_channel.c",
+            "native/host/actor_channel.h",
+            "native/host/actor-channel-v1.json",
         ]:
             if donor["adapter_sources"]["platforms/android/" + name] != digest(
                 HERE / name
@@ -572,6 +635,7 @@ def connected_native(cache, out, abis):
                 HERE / "native/host" / name
                 for name in (
                     "owner.c",
+                    "actor_channel.c",
                     "owner_jni.c",
                     "boot_compare.c",
                     "boot_identity.c",
@@ -783,6 +847,7 @@ def build(args, cache):
             raise ValueError("Integration network source identity drift")
     elif args.subreaper_handoff or args.subreaper_checkout:
         raise ValueError("Subreaper requires the bounded integration profile")
+    actor_inputs()
     adapter_before = adapter_sources()
     if packaged_inputs is not None and adapter_before != packaged_inputs:
         raise ValueError("Packaged committed adapter inputs changed before build")

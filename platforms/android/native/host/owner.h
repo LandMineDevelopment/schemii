@@ -3,7 +3,8 @@
 #include <stdint.h>
 /* Source-only connected owner. No API imports C/A, freshness or closure claims.
  * Directory is borrowed for the call; an independent CLOEXEC description is
- * retained. No child inherits control/journal FDs. No managed birth is currently
+ * retained. Private actor endpoints are reserved before the worker starts;
+ * no endpoint is exported and no child launch API exists. No managed birth is currently
  * admitted by the production comparator or pinned PRoot helper inventory. */
 struct apk_owner;
 enum apk_owner_phase { APK_IDLE, APK_PENDING, APK_REFUSED, APK_CLOSING };

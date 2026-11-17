@@ -701,3 +701,85 @@ private origins or user operations enter those events. Android FGS eligibility,
 actual selected-storage durability/DE/pre-PIN, native peer/network fencing,
 complete correlated diagnostics, both-PG SQL/integrity, device and release gates
 remain separately pending. No Direct Boot receiver is added.
+
+### Finite native actor/FD source producer (#266, refs #263)
+
+The managed PRoot source recipe now applies `native/proot-actor-channel.patch`
+against immutable upstream `52d65a4dc140ca554d241a1438ddd4f6b00c9813`.
+`payload.lock.json.actor_producer` binds the eight consumed donor leaves (including
+fingerprinted, CLI-disabled ashmem), the patch, producer C/header and fixed wire
+contract. Build preparation checks Git bytes and writes only a build copy. Old
+native donors do not match this recipe; old APK/static evidence is not current.
+This is source instrumentation with finite host controls, not Android proof.
+
+`native/host/actor-channel-v1.json` is the cross-language byte/FD contract:
+224-byte big-endian private seqpackets, strict per-direction sequence starting at
+one, source/contract/run/generation/profile and owner/task/process/creator
+incarnations. All reserved bytes are zero. Unexpected ancillary data is refused;
+received SCM_RIGHTS descriptors are closed once, even on malformed frames.
+Nonblocking pressure, loss, wrap, bad sequence/binding/incarnation and exhausted
+128-slot tables latch uncertainty. No reconnect, eviction of unresolved evidence,
+replacement owner or positive ACK erases it. Records contain fixed scalar facts,
+no raw boot identity, pathname, credentials, journal handles or operation data.
+No telemetry persistence/export or durable journal protocol is introduced here.
+
+The actual native owner reserves a separate socketpair before its worker starts,
+while retaining its sole selected-directory lease and responsive Stop flag. The
+pair is deliberately unexported. Java SCH1 control envelopes and Python's FD3 JSON
+refusal adapter are **different, disconnected protocols**. A future actual native
+custodian must create/transfer only the designated guest lease and perform an
+explicit versioned conversion after genuine C/A and durable admission. No parsed
+JSON, Java flag, signer/UID, environment FD number or `ac_proot_bind` source fixture
+provides C/A or changes production admission. Managed executable `main` refuses
+before parsing configuration or reaching any F2FS/helper/root launch path; no
+public CLI or environment option attaches the in-memory source producer.
+
+Managed `clone` refuses `CLONE_UNTRACED` with **EPERM before kernel resume**;
+normal legacy fork/vfork/clone/thread paths retain existing translation. Every
+managed `clone3` form returns **ENOSYS**, without reading mutable guest arguments,
+so libc may fall back to legacy clone. Safe scratch/translation custody for exact
+kernel clone3 bytes remains a later requirement. No namespace/untraced flag is
+silently removed by the new policy. Existing namespace emulation is unchanged.
+
+Root/native births publish an intent before fork and a correlated failure or
+observed PID result afterward. A send failure after the real birth retains the
+live slot and unresolved intent. Guest entry intents bind attach-child identity;
+child stops arriving before creator events are held in a bounded local table and
+exported only after attachment. Lost/truncated chronology remains UNKNOWN.
+Direct real-parent helper waits are dispatched **before** guest Tracee creation.
+The SysVIPC managed helper is a direct child running the same production service
+without the detached second fork/exec. Its pipe EOF is service shutdown input;
+only its exact parent wait is terminal proof. F2FS closes unrelated FDs before its
+fork-only work and uses a checked targeted wait. The ARM64 workaround uses checked
+raw resume/targeted-wait wrappers; host compilation/extraction is not ARM64 target
+execution. Raw failure fences further managed resume/birth and preserves uncertainty.
+
+Guest ptrace terminal observation remains distinct from the guest's real-parent
+wait: it retains an unresolved wait slot. Nonleader exec records the remap and
+retains displaced same-process task waits, refusing cross-process identity
+collisions with ESTALE rather than manufacturing terminal evidence. Complete task retirement and guest real-parent
+wait consumption remain integration gates. `ac_highwater` is only a local finite
+actor observation: no pending intent/early event/loss/live actor/task/helper/wait
+and every sent record receipt-ACKed. It is never a durable journal ACK, CLEAN,
+process-closure grant or network closure; #268 owns flow/epoch closure separately.
+
+FD allowlists apply **before** TRACEME, noexec service/probe work and failed exec:
+root/F2FS retain only standard streams; SysVIPC initially retains two service pipe
+ends, then only its standard streams. The producer channel/private state are
+closed in children; child copies cannot write the parent's sequence. Future
+PRoot admission must additionally close the native owner's journal, selected
+lease, Java control and other private descriptors before transfer, retaining only
+its designated actor channel and intentional mount inputs. Future Python receives
+only its own guest lease and must close it in subprocesses. There is no current
+native-to-PRoot or Python FD transfer. Close operations are never retried after an
+ambiguous result; first and secondary errors are retained in the producer boundary.
+
+All production APK births, C/A and classifier/admission remain REFUSED. Connected
+journal actor/terminal/new-run/retry transitions, actual source-bound transfer,
+complete guest wait/exec closure, writer/receipt Stop integration, Android target
+and real device/lifecycle/recovery/network acceptance remain pending independent
+review. Final safe no-reboot recovery stays OPEN under #263/#266. Experimental
+owner-loss recovery preserves/refuses until a USER-performed, separately verified
+new kernel and guarded existing-only BOTH-PG recovery; no automatic reboot,
+force-stop, adoption, forced cleanup, PID-file deletion or reset is introduced.
+Healthy fully proved Stop/Start remains graceful.

@@ -2525,5 +2525,26 @@
       "size": 2246083,
       "origin": "https://deb.debian.org/debian-security/"
     }
-  ]
+  ],
+  "actor_producer": {
+    "schema": 1,
+    "profile": "source-only-managed-actors-refused",
+    "proot_commit": "52d65a4dc140ca554d241a1438ddd4f6b00c9813",
+    "inputs": {
+      "platforms/android/native/host/actor_channel.c": "d14c5f59395464d1ad0904c16a26546c12e7a5874c10a48f9113149485a3c5a9",
+      "platforms/android/native/host/actor_channel.h": "a53acdcea161fbef2264d1fda11e10b7ea14cc3d860f0291a4e318a9fb46bea9",
+      "platforms/android/native/host/actor-channel-v1.json": "f20eddb41ed559719f2407591b91e16665696b2a36594895a1dd4f9b5e0cd3a2",
+      "platforms/android/native/proot-actor-channel.patch": "46711b14691d186b245f4b9dc1a19d9ea1dc60917606c0cb334b375f8fd3ab0a"
+    },
+    "donor_inputs": {
+      "tracee/event.c": "a0ff3803895b6c3cf9a631fd80c535c5233e5dca4c8d52e44f5b61a2329d858e",
+      "tracee/tracee.c": "1a1e0e3e887d47b3474bae91ebd0e1a6962a2079c991590531f7053285d3958d",
+      "syscall/enter.c": "833bc1d32b1d747d577418d3abc73eac7a36374d1b138ba75df810029bb45d60",
+      "tracee/mem.c": "340fbe2a3c980b32169e43b2a7150aaa0a593d9b9dfdec8a7af45d15031cd8be",
+      "cli/cli.c": "6905f787bc3f0b31b426220ad9f67a61d67c38983d611ae029aef7b6da6399bf",
+      "extension/sysvipc/sysvipc_shm.c": "69a0fe94b7d00c44157b03b59595fbe9e1e9f5326975499e1638083f5b3cadd4",
+      "path/f2fs-bug.c": "63bf1d6de4f34d6c224024c8f53a3180021d87901d987d6a45372f49faded147",
+      "extension/ashmem_memfd/ashmem_memfd.c": "5cc4d36eecb7ab8cea7af5317f2114282f12d8fd29cc11429ef012c2453bef38"
+    }
+  }
 }
