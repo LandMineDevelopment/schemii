@@ -27,7 +27,13 @@ Redirect it only into an approved private destination.
 ## Explicit candidate intake contract
 
 An intake owner must approve one private input root and an exact v1 manifest.
-No manifest is discovered or created by ingestion. Keep the manifest and original
+No manifest is discovered or created by ingestion. `--manifest` may name a relative
+file inside `--input-root`, or an explicit absolute manifest outside that root.
+The latter permits a successor manifest without modifying immutable input copies.
+Both forms use bounded regular-file reads with no symlink components and are
+revalidated at apply; their combined bytes/file count share the input budget.
+All receipt/telemetry paths remain relative to the original input root, without
+escapes. Keep the manifest and original
 files outside Git, including the durable invocation/installation UUID mapping.
 For each actual invocation assign one UUID once, bound to its original receipt
 directory. Keep that mapping across copies/replays. Do not assign different UUIDs
@@ -70,8 +76,10 @@ scoped inventory validator. Failed, cancelled and partial streams are validated
 structurally without requiring success. A malformed/truncated JSON record refuses;
 valid streams without an end record remain incomplete. No prefix salvage occurs.
 
-V1 supports current `scripts/ci/local_ci.py` schema 1, the exact recipes emitted
+V1 defaults to current `scripts/ci/local_ci.py` schema 1, the exact recipes emitted
 by `scripts/ci/test_selection.py`, and the optional exact native-document prefix.
+The separately reviewed historical full recipe requires explicit producer selection
+as described below; it is never inferred from a shortened command array.
 Unknown schemas, commands, receipt fields and telemetry fields refuse. Known
 private fields (`executed_command`, classification details, raw reason,
 deployment details, browser credential filename, base-ref label) are discarded
@@ -113,6 +121,51 @@ source/terminal/summary remain distinct via original outcomes, nullable fields,
 coverage and explicit gap codes. A run's producer assertion does not establish
 coordinator acceptance. A collection with any gap publishes as `partial`, including
 a successfully reconstructed stream whose saved summary was lost.
+
+### Historical producer selection
+
+For a supported archived full recipe, add a `producer` object to that run's
+manifest selection. `schema` discovers the accepted version and exact public
+source-file SHA-256 contract; `plan`, `dry-run`, `explain` and `export` report the
+selected `producer_contracts` consistently. The only historical version currently
+supported is `local-ci-full-pre-parity-v1`: its complete frozen recipe has 22
+original slots, starting with Node unit tests and ending with backup verification.
+It is independent of current recipe generation. It contains no runtime-parity
+command, and admission never adds a pass, slot or duration for that later check.
+
+The object has exactly `recipe`, `source_sha` and `files`. `files` must match all
+three public source hashes advertised by `schema` for this version:
+`local_ci.py`, `test_selection.py` and `test-changes.py` under their full repository
+paths. `source_sha` is the original receipt's unchanged clean-source commit.
+Only the full profile with `source.dirty=false` is supported for this historical
+contract. It accepts no extra native-document prefix. Other profiles, dirty or
+missing source, mismatched provenance, unknown versions, omissions, additions,
+reordering, mixed recipes and arbitrary argv refuse. Default/current selection
+continues to require its complete current recipe, including runtime-parity for
+full. An explicit `producer: {"recipe": "current"}` is equivalent to omission.
+
+Before selecting historical support, the curator must independently inspect the
+original source archive at the recorded commit, verify all three files against
+the advertised hashes, verify that the planner generated the entire selected
+recipe, and bind the original receipt/timing bytes and stable identity mapping.
+Archived producer source is evidence to read, never executable input. A copied
+SHA or matching command array alone is not authentication of an execution.
+
+The importer verifies the exact declared version/file-hash contract, its clean
+source-SHA equality to the receipt, and every original command in order. It does
+not fetch Git objects, execute old source, authenticate the curator, or prove
+that the declared source actually ran. The returned
+`verification="curator-asserted-archive"` states this trust boundary explicitly.
+This is an assertion by the already trusted intake curator, not a signature or
+acceptance decision. Untrusted/event-provided provenance must not authorize intake.
+
+Only this allowlisted provenance is bound into the historical run's evidence
+digest and selected plan. It does not replace source identity, original outcome,
+acceptance, timestamps, pending coverage or unknown phase measurements. Existing
+current manifests keep their fact/plan digests. To select a version for a retained
+candidate, write a successor private manifest with lineage to the original;
+preserve the original files, identities, revision and `observed_at`. Selecting a
+compatible recipe does not grant DB/operation authority or complete intake acceptance.
 
 ### Reuse and revisions
 

@@ -37,6 +37,15 @@ STATES = {
 }
 NEXT = "Inspect explain/status with the same operation ID; preserve original evidence."
 
+# Reviewed public source contracts, not receipt IDs or execution authentication.
+# The curator must independently verify these archived bytes at source_sha.
+HISTORICAL_RECIPE = "local-ci-full-pre-parity-v1"
+HISTORICAL_FILES = {
+    "scripts/ci/local_ci.py": "6a3e9faa630da5b66b885c07a2247afcda86836f1eb942bc37d7ea6fb77c37a4",
+    "scripts/ci/test_selection.py": "ccd62e46f35f7b5f168c3b82d1d5695bfaa65d53021c1f481ab879b4da35a4f2",
+    "scripts/test-changes.py": "0ec5cca0a1167a948f2aefe4763874a94225738a758a75bcb1fbc21e05b6d176",
+}
+
 
 def require(condition: Any, reason: str = "invalid-evidence") -> None:
     if not condition:
@@ -111,6 +120,7 @@ class Inputs:
     root: Path
     snapshots: dict[str, tuple[int, int, int, int, str]]
     total: int = 0
+    manifest_input: Inputs | None = None
 
     def read(self, relative: str) -> bytes:
         require(isinstance(relative, str) and 0 < len(relative) <= 240, "unsafe-path")
@@ -185,7 +195,16 @@ class Inputs:
                 else:
                     self.total += len(raw)
                     require(
-                        self.total <= MAX_TOTAL and len(self.snapshots) < 512,
+                        self.total
+                        + (self.manifest_input.total if self.manifest_input else 0)
+                        <= MAX_TOTAL
+                        and len(self.snapshots)
+                        + (
+                            len(self.manifest_input.snapshots)
+                            if self.manifest_input
+                            else 0
+                        )
+                        < 512,
                         "input-budget",
                     )
                     self.snapshots[relative] = signature
@@ -196,6 +215,8 @@ class Inputs:
             os.close(fd)
 
     def revalidate(self) -> None:
+        if self.manifest_input is not None:
+            self.manifest_input.revalidate()
         for relative in list(self.snapshots):
             self.read(relative)
 
@@ -226,6 +247,70 @@ def safe_root(root: Path) -> Path:
 
 def registry(profile: str, base: str) -> list[list[str]]:
     return test_selection.commands(profile, base)
+
+
+def historical_commands(base: str) -> list[list[str]]:
+    """Frozen full recipe from the reviewed archive; never slice current policy."""
+    return [
+        ["npm", "test"],
+        ["python", "scripts/check_python_quality.py", base],
+        ["python", "scripts/ci/python-tests.py"],
+        ["python", "-m", "compileall", "-q", "src", "tests", "testing"],
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "scripts.ci.pytest_timing",
+            "tests/integration",
+        ],
+        ["npm", "ci"],
+        ["node", "--test", "tests/browser-infrastructure/shards.test.mjs"],
+        ["./start.sh"],
+        *[
+            [
+                "node",
+                "scripts/ci/run-browser-shard.mjs",
+                f"--project={project}",
+                f"--shard={shard}/6",
+                "--profile=full",
+            ]
+            for project in ("desktop-chromium", "android-chromium")
+            for shard in range(1, 7)
+        ],
+        ["./start.sh", "--backup", ".schemii/test-selection/recovery"],
+        ["./start.sh", "--verify-backup", ".schemii/test-selection/recovery"],
+    ]
+
+
+def producer_contract(selection: dict, receipt: dict) -> dict | None:
+    """Check an explicit curator assertion; never infer provenance from commands."""
+    if "producer" not in selection:
+        return None  # Existing current-recipe behavior, including plan digests.
+    producer = selection["producer"]
+    fields(producer, {"recipe"}, {"source_sha", "files"})
+    if producer == {"recipe": "current"}:
+        return None
+    require(producer.get("recipe") == HISTORICAL_RECIPE, "unsupported-producer")
+    fields(producer, {"recipe", "source_sha", "files"})
+    require(producer["files"] == HISTORICAL_FILES, "unsupported-producer-provenance")
+    source = receipt["source"]
+    require(
+        receipt["profile"] == "full"
+        and isinstance(source, dict)
+        and source.get("dirty") is False
+        and isinstance(producer["source_sha"], str)
+        and re.fullmatch(r"[0-9a-f]{40}", producer["source_sha"])
+        and producer["source_sha"] == source.get("commit"),
+        "unsupported-producer-context",
+    )
+    return dict(
+        recipe=HISTORICAL_RECIPE,
+        source_sha=producer["source_sha"],
+        files=dict(HISTORICAL_FILES),
+        verification="curator-asserted-archive",
+    )
 
 
 def command_identity(argv: list[str]) -> tuple[str, str | None, int | None]:
@@ -278,7 +363,15 @@ def plan(root: Path, manifest: str, database_name: str, database_id: str) -> dic
         "wrong-target",
     )
     inputs = Inputs(safe_root(root), {})
-    m = json_value(inputs.read(manifest))
+    manifest_path = Path(manifest)
+    if manifest_path.is_absolute():
+        # Explicit selection outside an immutable input root; this grants no
+        # escape to receipt/telemetry paths, which still use inputs.root only.
+        inputs.manifest_input = Inputs(safe_root(manifest_path.parent), {})
+        raw_manifest = inputs.manifest_input.read(manifest_path.name)
+    else:
+        raw_manifest = inputs.read(manifest)
+    m = json_value(raw_manifest)
     fields(m, {"schema", "repository", "installation_id", "runs"}, {"reuse"})
     require(type(m["schema"]) is int and m["schema"] == 1, "unsupported-schema")
     fields(m["repository"], {"id", "provider", "repository_key", "display_name"})
@@ -300,6 +393,7 @@ def plan(root: Path, manifest: str, database_name: str, database_id: str) -> dic
     rows: dict[str, list[dict]] = {table: [] for table in TABLES}
     gaps: set[str] = set()
     selections: dict[str, list[dict]] = {}
+    producer_contracts = []
     run_keys = set()
     receipt_keys = set()
     for selection in m["runs"]:
@@ -314,7 +408,7 @@ def plan(root: Path, manifest: str, database_name: str, database_id: str) -> dic
                 "change_kind",
                 "observed_at",
             },
-            {"revisions"},
+            {"revisions", "producer"},
         )
         invocation = identifier(selection["invocation_id"])
         require(invocation not in run_keys, "identity-conflict")
@@ -420,7 +514,12 @@ def plan(root: Path, manifest: str, database_name: str, database_id: str) -> dic
             and r["classification"].get("profile") == r["profile"]
             and type(r["classification"].get("valid")) is bool
         )
-        expected = registry(r["profile"], r["base_ref"])
+        contract = producer_contract(selection, r)
+        expected = (
+            historical_commands(r["base_ref"])
+            if contract
+            else registry(r["profile"], r["base_ref"])
+        )
         cmds = r["commands"]
         require(isinstance(cmds, list) and 0 < len(cmds) <= 64)
         selected = [c.get("command") for c in cmds if isinstance(c, dict)]
@@ -441,7 +540,10 @@ def plan(root: Path, manifest: str, database_name: str, database_id: str) -> dic
         ]
         require(
             selected == expected
-            or any(selected == prefix + expected for prefix in prefixes),
+            or (
+                contract is None
+                and any(selected == prefix + expected for prefix in prefixes)
+            ),
             "unsupported-command",
         )
         source = r["source"]
@@ -513,7 +615,11 @@ def plan(root: Path, manifest: str, database_name: str, database_id: str) -> dic
                 acceptance=acceptance,
             ),
         )
-        run["evidence_sha256"] = digest({"fact": run, "producer_run_id": r["run_id"]})
+        evidence = {"fact": run, "producer_run_id": r["run_id"]}
+        if contract is not None:
+            evidence["producer_contract"] = contract
+            producer_contracts.append(dict(run_id=run["id"], **contract))
+        run["evidence_sha256"] = digest(evidence)
         if complete != "complete":
             gaps.add("incomplete-source")
         require(
@@ -751,6 +857,8 @@ def plan(root: Path, manifest: str, database_name: str, database_id: str) -> dic
         rows=rows,
         gaps=sorted(gaps),
     )
+    if producer_contracts:
+        body["producer_contracts"] = producer_contracts
     # Input byte digests remain transient, never persisted/exported (raw receipts
     # may contain private argv/diagnostics). Persist only the allowlisted projection.
     return dict(body=body, plan_id=digest(body), inputs=inputs)

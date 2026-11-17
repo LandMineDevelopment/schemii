@@ -699,3 +699,308 @@ def test_no_numeric_rounding_or_overflow(tmp_path, invalid):
     write(tmp_path / "run/receipt.json", r)
     with pytest.raises(storage.Refusal):
         selected(tmp_path)
+
+
+def historical_fixture(root, *, current=False):
+    """Synthetic original-like observations; never read retained user evidence."""
+    manifest, receipt, node_records = fixture_input(root)
+    # Independently spell the reviewed archive recipe, including exact topology.
+    recipe = [
+        ["npm", "test"],
+        ["python", "scripts/check_python_quality.py", "origin/main"],
+        ["python", "scripts/ci/python-tests.py"],
+        ["python", "-m", "compileall", "-q", "src", "tests", "testing"],
+        [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "scripts.ci.pytest_timing",
+            "tests/integration",
+        ],
+        ["npm", "ci"],
+        ["node", "--test", "tests/browser-infrastructure/shards.test.mjs"],
+        ["./start.sh"],
+        *[
+            [
+                "node",
+                "scripts/ci/run-browser-shard.mjs",
+                f"--project={project}",
+                f"--shard={shard}/6",
+                "--profile=full",
+            ]
+            for project in ("desktop-chromium", "android-chromium")
+            for shard in range(1, 7)
+        ],
+        ["./start.sh", "--backup", ".schemii/test-selection/recovery"],
+        ["./start.sh", "--verify-backup", ".schemii/test-selection/recovery"],
+    ]
+    if current:
+        recipe.insert(0, ["python", "scripts/check_runtime_parity.py"])
+    node_slot, python_slot = (1, 3) if current else (0, 2)
+    entries = [
+        dict(
+            command=argv,
+            status="passed" if i < python_slot + 2 else "pending",
+            duration_ms=12.5 if i < python_slot + 2 else None,
+        )
+        for i, argv in enumerate(recipe)
+    ]
+    receipt.update(
+        profile="full",
+        classification=dict(profile="full", valid=True),
+        mode="feedback",
+        status="feedback-passed",
+        acceptance=False,
+        commands=entries,
+        pending_commands=list(range(python_slot + 2, len(recipe))),
+        pending_layers=["browser", "node", "postgres"],
+    )
+    receipt["source"]["dirty"] = False
+    selection = manifest["runs"][0]
+    selection.update(telemetry=[], summaries=[])
+    # Node plan count is genuinely unmeasured. Pytest's skipped call is a
+    # placeholder zero; passing phase zeros are real measurements.
+    node_records[0]["planned"] = None
+    python_records = [dict(v, lane="python") for v in node_records]
+    python_records[0]["planned"] = 2
+    python_records.insert(2, dict(python_records[1], test_id="c" * 64))
+    skipped = dict(
+        python_records[-2],
+        test_id="c" * 64,
+        outcome="skipped",
+        skip="declared-or-runtime",
+        setup_ms=1,
+        execution_ms=0,
+        teardown_ms=1,
+    )
+    python_records.insert(-1, skipped)
+    for slot, records in ((node_slot, node_records), (python_slot, python_records)):
+        timing = f"command-{slot:02d}/timing.jsonl"
+        entries[slot]["timing_evidence"] = timing
+        path = root / "run" / timing
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(v) + "\n" for v in records))
+        saved = path.with_suffix(".summary.json")
+        write(saved, summary.summarize(records))
+        selection["telemetry"].append(dict(slot=slot, file=str(path.relative_to(root))))
+        selection["summaries"].append(
+            dict(slot=slot, file=str(saved.relative_to(root)))
+        )
+    if not current:
+        selection["producer"] = dict(
+            recipe=importer.HISTORICAL_RECIPE,
+            source_sha=receipt["source"]["commit"],
+            files=dict(importer.HISTORICAL_FILES),
+        )
+    write(root / "manifest.json", manifest)
+    write(root / "run/receipt.json", receipt)
+    return manifest, receipt
+
+
+@pytest.mark.parametrize("current", [False, True])
+def test_versioned_recipes_preserve_original_slots_and_unknowns(
+    tmp_path, current, monkeypatch
+):
+    historical_fixture(tmp_path, current=current)
+    monkeypatch.setattr(
+        importer.psycopg, "connect", lambda **kw: pytest.fail("offline connected")
+    )
+    p = selected(tmp_path)
+    body = p["body"]
+    run = body["rows"]["ci_runs"][0]
+    commands = body["rows"]["commands"]
+    assert len(commands) == (23 if current else 22)
+    assert [c["slot_key"] for c in commands] == list(map(str, range(len(commands))))
+    assert commands[0]["command_key"] == ("runtime-parity" if current else "node-unit")
+    assert commands[0]["duration_ms"] == 12.5
+    assert all(
+        c["duration_ms"] is None and c["outcome"] is None
+        for c in commands
+        if c["disposition"] == "pending"
+    )
+    assert (
+        run["outcome"] == "feedback-passed"
+        and run["acceptance"] is False
+        and run["completeness"] == "partial"
+    )
+    attempts = body["rows"]["test_attempts"]
+    node = next(
+        a for a in attempts if a["command_id"] == commands[1 if current else 0]["id"]
+    )
+    assert node["setup_ms"] is node["teardown_ms"] is None and node["call_ms"] == 1.5
+    skipped = next(a for a in attempts if a["outcome"] == "skipped")
+    assert (
+        skipped["call_ms"] is None
+        and skipped["setup_ms"] == skipped["teardown_ms"] == 1
+    )
+    passed = next(
+        a
+        for a in attempts
+        if a["command_id"] == commands[3 if current else 2]["id"]
+        and a["outcome"] == "passed"
+    )
+    assert passed["setup_ms"] == passed["teardown_ms"] == 0
+    assert all(a["attempt_number"] == 0 and a["revision"] == 1 for a in attempts)
+    if current:
+        assert "producer_contracts" not in body
+    else:
+        assert (
+            body["producer_contracts"][0]["verification"] == "curator-asserted-archive"
+        )
+        assert all(c["command_key"] != "runtime-parity" for c in commands)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-selection",
+        "unknown-version",
+        "missing-provenance",
+        "wrong-source",
+        "dirty",
+        "changed-file",
+        "unknown-field",
+        "wrong-profile",
+        "truncated",
+        "reordered",
+        "duplicated",
+        "mixed-current",
+        "arbitrary",
+        "native-prefix",
+    ],
+)
+def test_historical_recipe_refuses_unproven_or_ambiguous_inputs(tmp_path, mutation):
+    m, r = historical_fixture(tmp_path)
+    selected_run = m["runs"][0]
+    producer = selected_run["producer"]
+    if mutation == "missing-selection":
+        selected_run.pop("producer")
+    elif mutation == "unknown-version":
+        producer["recipe"] = "SECRET_SENTINEL"
+    elif mutation == "missing-provenance":
+        producer.pop("files")
+    elif mutation == "wrong-source":
+        producer["source_sha"] = "f" * 40
+    elif mutation == "dirty":
+        r["source"]["dirty"] = True
+    elif mutation == "changed-file":
+        producer["files"]["scripts/ci/local_ci.py"] = "0" * 64
+    elif mutation == "unknown-field":
+        producer["secret"] = "SECRET_SENTINEL"
+    elif mutation == "wrong-profile":
+        r.update(profile="native", classification=dict(profile="native", valid=True))
+    elif mutation == "truncated":
+        r["commands"].pop()
+    elif mutation == "reordered":
+        r["commands"][1], r["commands"][2] = r["commands"][2], r["commands"][1]
+    elif mutation == "duplicated":
+        r["commands"][4] = deepcopy(r["commands"][5])
+    elif mutation == "mixed-current":
+        r["commands"].insert(
+            0,
+            dict(
+                command=["python", "scripts/check_runtime_parity.py"],
+                status="pending",
+                duration_ms=None,
+            ),
+        )
+    elif mutation == "arbitrary":
+        r["commands"][4]["command"] = ["python", "SECRET_SENTINEL.py"]
+    elif mutation == "native-prefix":
+        r["commands"].insert(
+            0,
+            dict(
+                command=[
+                    "python3",
+                    "scripts/ci/validate_reports.py",
+                    "--native-documents",
+                    test_selection.NATIVE_SKILL,
+                    "--output",
+                    ".schemii/test-selection/native-documents.json",
+                ],
+                status="passed",
+                duration_ms=1,
+            ),
+        )
+    write(tmp_path / "manifest.json", m)
+    write(tmp_path / "run/receipt.json", r)
+    with pytest.raises(storage.Refusal):
+        selected(tmp_path)
+
+
+def test_current_recipe_selection_keeps_plan_identity_and_never_falls_back(tmp_path):
+    m, r = historical_fixture(tmp_path, current=True)
+    before = selected(tmp_path)
+    m["runs"][0]["producer"] = {"recipe": "current"}
+    write(tmp_path / "manifest.json", m)
+    assert selected(tmp_path)["plan_id"] == before["plan_id"]
+    r["commands"].pop(0)
+    write(tmp_path / "run/receipt.json", r)
+    with pytest.raises(storage.Refusal) as error:
+        selected(tmp_path)
+    assert error.value.reason == "unsupported-command"
+
+
+def test_historical_recipe_is_independent_of_current_policy(tmp_path, monkeypatch):
+    historical_fixture(tmp_path)
+    before = selected(tmp_path)
+    monkeypatch.setattr(
+        test_selection,
+        "commands",
+        lambda *args: pytest.fail("historical recipe depended on current"),
+    )
+    assert selected(tmp_path)["plan_id"] == before["plan_id"]
+
+
+def test_explicit_external_manifest_preserves_data_boundary_and_revalidates(tmp_path):
+    root = tmp_path / "original"
+    root.mkdir()
+    m, r = historical_fixture(root)
+    before = {
+        str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()
+    }
+    external = tmp_path / "successor.json"
+    write(external, m)
+    p = importer.plan(root, str(external), NAME, DB_ID)
+    assert p["plan_id"] == selected(root)["plan_id"]
+    assert before == {
+        str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()
+    }
+    external.write_text(external.read_text() + " ")
+    with pytest.raises(storage.Refusal) as error:
+        p["inputs"].revalidate()
+    assert error.value.reason == "changed-input"
+
+
+@pytest.mark.parametrize(
+    "escape", ["manifest-symlink", "parent-symlink", "data-escape", "shared-budget"]
+)
+def test_external_manifest_does_not_enable_unselected_reads(
+    tmp_path, monkeypatch, escape
+):
+    root = tmp_path / "original"
+    root.mkdir()
+    m, _ = historical_fixture(root)
+    external = tmp_path / "successor.json"
+    write(external, m)
+    if escape == "manifest-symlink":
+        external = tmp_path / "alias.json"
+        external.symlink_to(root / "manifest.json")
+    elif escape == "parent-symlink":
+        alias = tmp_path / "alias"
+        alias.symlink_to(tmp_path, target_is_directory=True)
+        external = alias / "successor.json"
+    elif escape == "data-escape":
+        m["runs"][0]["receipt"] = "../successor.json"
+        write(external, m)
+    elif escape == "shared-budget":
+        # Each side fits alone; the combined explicitly selected budget does not.
+        monkeypatch.setattr(
+            importer,
+            "MAX_TOTAL",
+            external.stat().st_size + (root / "run/receipt.json").stat().st_size - 1,
+        )
+    with pytest.raises((storage.Refusal, OSError)):
+        importer.plan(root, str(external), NAME, DB_ID)
