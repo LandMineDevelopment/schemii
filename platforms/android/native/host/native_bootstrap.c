@@ -1,0 +1,73 @@
+#include "native_bootstrap.h"
+#include <errno.h>
+#include <stdlib.h>
+struct native_bootstrap {
+  struct installed_objects *objects;
+  struct boot_authority *authority;
+  struct native_bootstrap_status status;
+};
+void native_bootstrap_refuse(struct native_bootstrap *o, int e) {
+  if (o && e) {
+    if (!o->status.error) o->status.error=e;
+    else if (e!=o->status.error && !o->status.secondary) o->status.secondary=e;
+  }
+}
+int native_bootstrap_open(const char *apk, const char *module, const char *data,
+                          const struct installed_pin *pins, size_t count,
+                          struct native_bootstrap **out) {
+  if (!out) return EINVAL;
+  *out=calloc(1,sizeof(**out));
+  if (!*out) return ENOMEM;
+  struct native_bootstrap *o=*out;
+  o->status.retained=1; o->status.stage=1;
+  o->status.boot=(struct boot_compare_result){BOOT_COMPARE_UNKNOWN,BOOT_COMPARE_CALLER_UNPROVED,
+    -1,-1,0,0,BOOT_COMPARE_UNPROVED,BOOT_COMPARE_UNPROVED,BOOT_COMPARE_CONTINUITY_UNPROVED};
+  struct installed_errors e={0};
+  int result=installed_open(apk,module,data,&o->objects,&e);
+  if (!result) result=installed_validate(o->objects,pins,count);
+  struct boot_authority_errors custody={0};
+  if (!result) {
+    o->status.stage=2;
+    result=boot_authority_open(installed_selected(o->objects),&o->authority,&custody);
+  }
+  o->status.cleanup=e.cleanup ? e.cleanup : custody.close_error;
+  o->status.secondary_cleanup=e.secondary_cleanup ? e.secondary_cleanup : custody.secondary_close_error;
+  if (!result) {
+    o->status.stage=3;
+    o->status.boot=boot_authority_compare(o->authority);
+    /* No C/A producer or anchor: strict R/N1 reason ordering unchanged. */
+    result=o->status.boot.error>0 ? o->status.boot.error : 0;
+    if (!o->status.cleanup) o->status.cleanup=o->status.boot.cleanup_error>0 ? o->status.boot.cleanup_error : 0;
+  }
+  native_bootstrap_refuse(o,result);
+  return result;
+}
+int native_bootstrap_validate(struct native_bootstrap *o, const struct installed_pin *pins, size_t count) {
+  if (!o) return EINVAL;
+  int e=installed_validate(o->objects,pins,count);
+  native_bootstrap_refuse(o,e); return e;
+}
+struct native_bootstrap_status native_bootstrap_status(struct native_bootstrap *o) {
+  if (o) return o->status;
+  struct native_bootstrap_status s={0}; return s;
+}
+int native_bootstrap_close(struct native_bootstrap **ptr) {
+  if (!ptr || !*ptr) return 0;
+  struct native_bootstrap *o=*ptr;
+  struct boot_authority_errors b={0};
+  int e=o->authority ? boot_authority_close(&o->authority,&b) : 0;
+  if (e && o->authority) { native_bootstrap_refuse(o,e); return e; }
+  if (b.close_error && !o->status.cleanup) o->status.cleanup=b.close_error;
+  if (b.secondary_close_error && !o->status.secondary_cleanup) o->status.secondary_cleanup=b.secondary_close_error;
+  struct installed_errors i={0};
+  e=o->objects ? installed_close(&o->objects,&i) : 0;
+  if (i.cleanup && !o->status.cleanup) o->status.cleanup=i.cleanup;
+  if (i.secondary_cleanup && !o->status.secondary_cleanup) o->status.secondary_cleanup=i.secondary_cleanup;
+  if (e || o->status.cleanup) return e ? e : o->status.cleanup;
+  free(o); *ptr=NULL; return 0;
+}
+
+int native_bootstrap_mapping(struct native_bootstrap *o, uintptr_t address, uintptr_t base) {
+  int e=o ? installed_mapping(o->objects,address,base) : EINVAL;
+  native_bootstrap_refuse(o,e); return e;
+}

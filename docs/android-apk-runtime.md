@@ -874,3 +874,97 @@ admitted A view. Exact-source Android caller/CE-DE/lease and filesystem proof mu
 be scheduled separately. Actor endpoint transfer, versioned Python guest lease,
 journal actor/terminal/newrun/retry, connected writer/receipt Stop, guest real-parent
 and all-task closure, network epochs and recovery remain dependent open gates.
+
+### Closed connected-host entry profile (source, no admission)
+
+`build.py build --closed-connected-host --abi arm64-v8a --non-debuggable
+--expected-adapter-commit COMMIT --connected-host-signer-sha256 PUBLIC_CERT_SHA256
+--build-id UNIQUE` selects a separate finite prerequisite-check product. The
+commit must bind every adapter input through the existing actual Git-object
+comparison; hidden index changes and unknown files cannot bypass it. This profile
+rejects diagnostic, peer, payload and donor combinations before staging. Output
+is **unsigned**, with no signing-key access or installation. Diagnostic profiles
+retain their separate manifest, products and native safeguards.
+
+The literal selected Java inputs are HostActivity, HostService, StorageProfile,
+InstalledSource and NativeOwner (including their nested and generated lambda
+classes). This five-source variant retains InstalledSource solely for its fixed
+public-PackageManager observation edge and SHA formatting; it emits **no
+HostAnchors**. No mutable Java maps are pins. The old pathname-based compose API
+and privateDir are unreachable from the selected entry: no source tree, directory,
+lineage or journal is created. The literal native inputs are owner, owner_jni,
+native_bootstrap, installed_provenance, boot_authority, boot_compare and
+boot_identity. The accepted owner is retained without actor_channel: no ac_*
+reference exists, and the entry JNI request always refuses. No journal, actor,
+boot-diagnostic, PRoot, talloc, probe, network or Go product is selected.
+
+The selected manifest is a separate literal in build.py, not a transformation of
+the diagnostic manifest. It declares the default framework Application/component
+factory/classloader, one exported HostActivity and one nonexported specialUse
+HostService in the default package process. Only FOREGROUND_SERVICE,
+FOREGROUND_SERVICE_SPECIAL_USE and POST_NOTIFICATIONS are requested. Backup,
+restore-any-version, debug and cleartext are disabled. There are no receivers,
+providers, instrumentation, custom application/factory, profileable declaration,
+code splits, network callback or dynamic loader. Framework permission/FGS behavior
+and effective installed settings still need target verification.
+
+Before/concurrent app callbacks are Activity onCreate/onResume and its three fixed
+click handlers, Service onCreate/onStartCommand/onDestroy/onBind, and the sole
+reserved executor runnable. Intent extras and saved state select no implementation
+or authority. Service class initialization creates its monitor/status scalars;
+construction allocates an executor, which starts a thread only on dispatch.
+Operation/Acquisition capture immutable service/application/worker references.
+Activity has no class initializer. StorageProfile and InstalledSource have only
+compile-time constants and no loader or worker initializer. NativeOwner alone
+loads schemii_owner in its static initializer. Native globals are the owner,
+scalar snapshot, mutex and worker/reservation state; no JNI_OnLoad or application
+C constructor exists. Toolchain CRT init/fini and platform libc/libdl dependencies
+remain part of actual ELF readback, not an inferred Android observation. No Go
+runtime or other application-controlled loader is included.
+
+Build order is acyclic: exact source/contract/profile/public signer -> binary
+manifest and exact Java/DEX -> native expectation header -> owner ELF -> stored
+APK. Native pins cover every ordinary member except its own owner member. The
+owner member must instead equal the held extracted module byte-for-byte; this
+**does not independently seal the owner or whole signed product**. Native checks
+local/central ZIP agreement, stored members, exact ordered inventory, content
+hashes, no extra DEX/assets/libraries, and only recognized v2/v3 signing-block IDs
+and zero padding. Stock PackageManager verifies the current public signer; no
+historical signer or native self/final-APK hash cycle substitutes for independent
+source/build/sign/install/process observations. The separate build receipt binds
+module and unsigned APK hashes externally. Signing must preserve the member
+inventory (no v1 META-INF entries or extra source-stamp/provenance blocks).
+
+JNI open has no arguments and calls the two fixed nonpublic HostService accessors
+synchronously on the sole reserving Java worker. It owns one local frame, no
+global/weak references, no attachment and no escaped JNIEnv. Repeated pair checks
+and a second framework snapshot bracket held acquisition and scalar publication.
+Stop/destroy/replacement revokes subsequent borrows; an already returned reference
+is never mistaken for revocation. No application context/FD/trust/digest/receipt
+setter exists. JNI checks the current module via dladdr, ELF executable-offset and
+own-process proc mapping device/inode correlation; dl_iterate_phdr rejects other
+application ELFs and treats /system and /apex dependencies as the stock-OS boundary.
+These current observations do not attest executable memory or tracing history.
+
+Native retains the no-follow base APK, extracted module, selected CE control root
+and the original native authority lease. Validation compares content and object
+metadata before/after acquisition and before publication, refusing replacement,
+mutation, missing pins, splits, loaders and unknown content. Paths are never
+retargeted to consume replacement bytes. Intermediate opens and verification
+probes are bounded and disposed once. SDK/filesystem/native work runs outside the
+short lifecycle/status locks. Stop/status/destroy never close or interrupt pending
+I/O. Cleanup EBUSY/error retains the reservation and any unresolved resource or
+close-error tombstone; Linux close errors are not retried. Primary, secondary and
+cleanup scalar errors remain separate; no raw private path or exception escapes.
+
+The strict R reader and N1 UNKNOWN reason ordering remain unchanged. The consumer
+can acquire/check held current objects, but has **no positive C/A constructor**,
+prior anchor, freshness/history producer, journal initialization, endpoint transfer
+or managed birth. The precise next gate is independent current-head source/local
+review, then separately owned current build/sign/install/process/native observations
+for this exact five-Java/seven-native interface. Historical A still requires a
+reviewed selected-state/install/data-generation/history and uninterrupted-custody
+producer; empty directories, signer/path/FD/object equality and parseable journal
+bytes cannot provide it. Android C/A, real runtime, recovery and release remain
+unproved. No usable-stack or device acceptance follows from host fixtures or a
+successful API36 class compile/API29 native link.

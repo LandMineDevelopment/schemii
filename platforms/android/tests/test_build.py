@@ -142,6 +142,8 @@ class BuildControls(unittest.TestCase):
                 {
                     "owner.c",
                     "owner_jni.c",
+                    "native_bootstrap.c",
+                    "installed_provenance.c",
                     "actor_channel.c",
                     "boot_compare.c",
                     "boot_authority.c",
@@ -398,6 +400,176 @@ class BootOnlyControls(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 build.validate_cache_owner(cache)
+
+
+class ClosedHostControls(unittest.TestCase):
+    def test_closed_exact_sources_and_manifest(self):
+        import xml.etree.ElementTree as ET
+
+        manifest = ET.fromstring(build.closed_manifest())
+        ns = "{http://schemas.android.com/apk/res/android}"
+        self.assertEqual(manifest.attrib["package"], build.CLOSED_PACKAGE)
+        app = manifest.find("application")
+        self.assertEqual(app.attrib[ns + "debuggable"], "false")
+        self.assertEqual(app.attrib[ns + "allowBackup"], "false")
+        self.assertNotIn(ns + "name", app.attrib)
+        self.assertNotIn(ns + "appComponentFactory", app.attrib)
+        self.assertEqual([e.tag for e in app], ["service", "activity"])
+        self.assertEqual(
+            app.find("activity").attrib[ns + "name"],
+            "development.landmine.schemii.android.host.HostActivity",
+        )
+        self.assertEqual(len(build.CLOSED_JAVA), 5)
+        self.assertEqual(len(build.CLOSED_NATIVE), 7)
+        self.assertFalse(
+            any(
+                "Probe" in p or "Diagnostics" in p or "Go" in p
+                for p in build.CLOSED_JAVA + build.CLOSED_NATIVE
+            )
+        )
+        self.assertIn(
+            ".ProbeActivity", (HERE / "app/src/main/AndroidManifest.xml").read_text()
+        )
+
+    def test_closed_non_circular_pins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            entries = {
+                "AndroidManifest.xml": b"binary manifest",
+                "classes.dex": b"compiled dex",
+                "assets/closed-build.json": b"bindings",
+            }
+            target = build.closed_pins(out, entries, "a" * 64, {"commit": "b" * 40})
+            text = target.read_text()
+            self.assertIn(hashlib.sha256(entries["classes.dex"]).hexdigest(), text)
+            self.assertIn('{"lib/arm64-v8a/libschemii_owner.so",NULL}', text)
+            self.assertNotIn("HostAnchors", text)
+
+    def test_closed_refuses_extensions_before_tools(self):
+        base = dict(
+            closed_connected_host=True,
+            non_debuggable=True,
+            abi=["arm64-v8a"],
+            connected_host_signer_sha256="a" * 64,
+            expected_adapter_commit="b" * 40,
+            packaged_shared_runtime=False,
+            guest_payload=None,
+            guest_manifest_sha256=None,
+            native_donor=None,
+            native_donor_receipt_sha256=None,
+            network_handoff=None,
+            network_checkout=None,
+            process_head=None,
+            process_checkout=None,
+            subreaper_handoff=None,
+            subreaper_checkout=None,
+            integration_probes=False,
+            boot_identity_only=False,
+            wrapper_controls_only=False,
+            log_report=False,
+        )
+        for name, value in [
+            ("non_debuggable", False),
+            ("abi", ["x86_64"]),
+            ("connected_host_signer_sha256", None),
+            ("expected_adapter_commit", None),
+            ("guest_payload", ["payload"]),
+            ("network_checkout", "peer"),
+            ("integration_probes", True),
+            ("native_donor", "donor"),
+        ]:
+            with (
+                self.subTest(name=name),
+                patch.object(
+                    build,
+                    "committed_adapter_sources",
+                    side_effect=AssertionError("must refuse before source/tools"),
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    build.closed_admission(SimpleNamespace(**{**base, name: value}))
+
+    def test_closed_build_recipe_has_no_implicit_or_peer_inputs(self):
+        # Explicit compiler/SDK/source-edge doubles; recipe ordering only, NOT
+        # committed admission, real SDK products, signed installation or C/A.
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            calls = []
+            bindings = {"fixture": "a" * 64}
+            args = SimpleNamespace(
+                build_id="recipe",
+                expected_adapter_commit="b" * 40,
+                connected_host_signer_sha256="a" * 64,
+            )
+
+            def compile_edge(*argv):
+                calls.append(argv)
+                tool = Path(argv[0]).name
+                if tool == "aapt2":
+                    with zipfile.ZipFile(argv[argv.index("-o") + 1], "w") as apk:
+                        apk.writestr("AndroidManifest.xml", b"fixture manifest")
+                elif tool == "javac":
+                    (Path(argv[argv.index("-d") + 1]) / "Fixture.class").write_bytes(
+                        b"fixture class"
+                    )
+                elif tool == "d8":
+                    (
+                        Path(argv[argv.index("--output") + 1]) / "classes.dex"
+                    ).write_bytes(b"fixture dex")
+                else:
+                    Path(argv[argv.index("-o") + 1]).write_bytes(b"fixture module")
+
+            actual_digest = build.digest
+
+            def sdk_digest(path):
+                for item in build.LOCK["archives"]:
+                    if Path(path).name == item["url"].rsplit("/", 1)[-1]:
+                        return item["sha256"]
+                return actual_digest(path)
+
+            with (
+                patch.object(build, "run", compile_edge),
+                patch.object(build, "digest", sdk_digest),
+                patch.object(build, "verify_extracted_archive"),
+                patch.object(build, "committed_adapter_sources", return_value=bindings),
+            ):
+                out = build.closed_build(args, cache, bindings)
+                with self.assertRaises(FileExistsError):
+                    build.closed_build(args, cache, bindings)  # no stale classes reuse
+            self.assertEqual(len(calls), 4)
+            javac = calls[1]
+            self.assertEqual(
+                {
+                    str(p.relative_to(HERE))
+                    for p in javac
+                    if isinstance(p, Path) and p.suffix == ".java"
+                },
+                set(build.CLOSED_JAVA),
+            )
+            self.assertIn("-implicit:none", javac)
+            self.assertIn("-sourcepath", javac)
+            self.assertEqual(
+                {
+                    str(p.relative_to(HERE))
+                    for p in calls[3]
+                    if isinstance(p, Path) and p.suffix == ".c"
+                },
+                set(build.CLOSED_NATIVE),
+            )
+            self.assertNotIn("HostAnchors", (out / "closed_pins.h").read_text())
+            with zipfile.ZipFile(out / "unsigned.apk") as apk:
+                self.assertEqual(
+                    apk.namelist(),
+                    [
+                        "AndroidManifest.xml",
+                        "classes.dex",
+                        "assets/closed-build.json",
+                        "lib/arm64-v8a/libschemii_owner.so",
+                    ],
+                )
+                self.assertTrue(
+                    all(p.compress_type == zipfile.ZIP_STORED for p in apk.infolist())
+                )
 
 
 if __name__ == "__main__":
