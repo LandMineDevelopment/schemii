@@ -88,6 +88,7 @@ def owner_fault_control(tmp_path_factory):
             "-I",
             str(HOST),
             str(HOST / "owner.c"),
+            str(HOST / "boot_authority.c"),
             str(HOST / "boot_compare.c"),
             str(HOST / "boot_identity.c"),
             str(ROOT / "platforms/android/native/tests/actor_control.c"),
