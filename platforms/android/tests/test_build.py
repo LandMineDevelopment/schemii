@@ -39,7 +39,120 @@ def elf(machine=183, alignment=16384, flags=5):
     return bytes(result)
 
 
+HISTORICAL_NATIVE = "906fc49667a4ac103d403e376c061fde110cf9c5"
+
+
+def synthetic_native_donor(root, commit):
+    """Immutable Git inputs plus synthetic ELF bytes; never runtime provenance.
+
+    The production guard reads the actual committed builder itself. No mocked
+    source lookup, recipe comparison, hash guard or ELF inspection is used.
+    """
+
+    def git_bytes(name):
+        return subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(build.ROOT),
+                "show",
+                commit + ":platforms/android/" + name,
+            ]
+        )
+
+    inputs = [
+        "build.py",
+        "native/runtime_probe.c",
+        "native/replace.h",
+        "native/proot-string-header.patch",
+    ]
+    if commit != HISTORICAL_NATIVE:
+        inputs += [
+            "native/proot-actor-channel.patch",
+            "native/host/actor_channel.c",
+            "native/host/actor_channel.h",
+            "native/host/actor-channel-v1.json",
+        ]
+    native = {
+        "adapter_dirty": False,
+        "compile_sdk": 36,
+        "target_sdk": 36,
+        "min_sdk": 29,
+        "toolchain_lock_sha256": hashlib.sha256(
+            git_bytes("toolchain.lock.json")
+        ).hexdigest(),
+        "source_commit": commit,
+        "abis": ["arm64-v8a"],
+        "native_files": {},
+        "adapter_sources": {
+            "platforms/android/" + name: hashlib.sha256(git_bytes(name)).hexdigest()
+            for name in inputs
+        },
+    }
+    files = {
+        "lib/arm64-v8a/" + name: elf()
+        for name in ["libproot.so", "libproot_loader.so", "libruntime_probe.so"]
+    }
+    apk, receipt = root / "donor.apk", root / "receipt.json"
+
+    def rebind():
+        native["native_files"] = {
+            k: hashlib.sha256(v).hexdigest() for k, v in files.items()
+        }
+        encoded = json.dumps(native).encode()
+        with zipfile.ZipFile(apk, "w") as z:
+            z.writestr("assets/runtime/native-provenance.json", encoded)
+            for k, v in files.items():
+                z.writestr(k, v)
+        receipt.write_text(
+            json.dumps(
+                {
+                    "apk": str(apk),
+                    "apk_sha256": build.digest(apk),
+                    "native_provenance_sha256": hashlib.sha256(encoded).hexdigest(),
+                    "native": native,
+                }
+            )
+        )
+
+    rebind()
+    return native, files, apk, receipt, rebind
+
+
 class BuildControls(unittest.TestCase):
+    def test_connected_owner_recipe_includes_custodian_once(self):
+        # Recipe control only: synthetic ELF output, NOT Android link evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = []
+
+            def compile_fixture(*arguments):
+                calls.append(arguments)
+                target = Path(arguments[-1])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(elf())
+
+            with patch.object(build, "run", compile_fixture):
+                result = build.connected_native(root / "tools", root, ["arm64-v8a"])
+            self.assertEqual(len(calls), 1)
+            units = [Path(arg).name for arg in calls[0] if str(arg).endswith(".c")]
+            self.assertEqual(units.count("boot_authority.c"), 1)
+            self.assertEqual(
+                set(units),
+                {
+                    "owner.c",
+                    "owner_jni.c",
+                    "native_bootstrap.c",
+                    "installed_provenance.c",
+                    "actor_channel.c",
+                    "boot_compare.c",
+                    "boot_authority.c",
+                    "boot_identity.c",
+                },
+            )
+            self.assertIn("-Wl,-z,defs", calls[0])
+            self.assertEqual(set(result), {"lib/arm64-v8a/libschemii_owner.so"})
+
     def test_native_reuse_recipe_binds_flags_and_abi_mapping(self):
         source = "ABI_TRIPLES = {'x': 'triple'}\ndef run(): pass\ndef digest(): pass\ndef native(cache, out, abi):\n return ['-fPIE']\n"
         self.assertEqual(
@@ -60,6 +173,14 @@ class BuildControls(unittest.TestCase):
                 source.replace("def run(): pass", "def run(): return 1")
             ),
         )
+
+        managed = (HERE / "build.py").read_text()
+        for before, after in [("--fuzz=0", "--fuzz=1"), ("return lock", "return {}")]:
+            self.assertIn(before, managed)
+            self.assertNotEqual(
+                build.native_recipe(managed),
+                build.native_recipe(managed.replace(before, after)),
+            )
 
     def test_native_reuse_requires_unambiguous_recipe(self):
         for source in [
@@ -90,65 +211,10 @@ class BuildControls(unittest.TestCase):
             patch.dict(sys.modules, {"verify_apk": verify}),
         ):
             root = Path(directory)
-            source = subprocess.check_output(
-                [
-                    "git",
-                    "-C",
-                    str(build.ROOT),
-                    "show",
-                    "906fc49667a4ac103d403e376c061fde110cf9c5:platforms/android/build.py",
-                ]
-            )
-            native = {
-                "adapter_dirty": False,
-                "compile_sdk": 36,
-                "target_sdk": 36,
-                "min_sdk": 29,
-                "toolchain_lock_sha256": build.digest(HERE / "toolchain.lock.json"),
-                "source_commit": "906fc49667a4ac103d403e376c061fde110cf9c5",
-                "abis": ["arm64-v8a"],
-                "native_files": {},
-                "adapter_sources": {
-                    "platforms/android/build.py": hashlib.sha256(source).hexdigest()
-                },
-            }
-            for name in [
-                "native/runtime_probe.c",
-                "native/replace.h",
-                "native/proot-string-header.patch",
-            ]:
-                native["adapter_sources"]["platforms/android/" + name] = build.digest(
-                    HERE / name
-                )
-            files = {
-                "lib/arm64-v8a/" + name: elf()
-                for name in ["libproot.so", "libproot_loader.so", "libruntime_probe.so"]
-            }
-            apk, receipt = root / "donor.apk", root / "receipt.json"
-
-            def rebind():
-                native["native_files"] = {
-                    k: hashlib.sha256(v).hexdigest() for k, v in files.items()
-                }
-                encoded = json.dumps(native).encode()
-                with zipfile.ZipFile(apk, "w") as z:
-                    z.writestr("assets/runtime/native-provenance.json", encoded)
-                    for k, v in files.items():
-                        z.writestr(k, v)
-                receipt.write_text(
-                    json.dumps(
-                        {
-                            "apk": str(apk),
-                            "apk_sha256": build.digest(apk),
-                            "native_provenance_sha256": hashlib.sha256(
-                                encoded
-                            ).hexdigest(),
-                            "native": native,
-                        }
-                    )
-                )
-
-            rebind()
+            commit = subprocess.check_output(
+                ["git", "-C", str(build.ROOT), "rev-parse", "HEAD"], text=True
+            ).strip()
+            native, files, apk, receipt, rebind = synthetic_native_donor(root, commit)
             anchor = build.digest(
                 receipt
             )  # Selected before the supplied donor changes.
@@ -170,6 +236,39 @@ class BuildControls(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "independently selected receipt"):
                 build.reuse_native(receipt, root / "rebound", ["arm64-v8a"], anchor)
             self.assertFalse((root / "rebound").exists())
+
+    def test_historical_unpatched_native_donor_is_refused(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(sys.modules, {"verify_apk": verify}),
+        ):
+            root = Path(directory)
+            _, _, _, receipt, _ = synthetic_native_donor(root, HISTORICAL_NATIVE)
+            with self.assertRaisesRegex(ValueError, "compiler recipe drift"):
+                build.reuse_native(
+                    receipt, root / "refused", ["arm64-v8a"], build.digest(receipt)
+                )
+            self.assertFalse((root / "refused").exists())
+
+    def test_managed_native_donor_protocol_input_drift_is_refused(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(sys.modules, {"verify_apk": verify}),
+        ):
+            root = Path(directory)
+            commit = subprocess.check_output(
+                ["git", "-C", str(build.ROOT), "rev-parse", "HEAD"], text=True
+            ).strip()
+            native, _, _, receipt, rebind = synthetic_native_donor(root, commit)
+            native["adapter_sources"][
+                "platforms/android/native/host/actor-channel-v1.json"
+            ] = "0" * 64
+            rebind()
+            with self.assertRaisesRegex(ValueError, "source input drift"):
+                build.reuse_native(
+                    receipt, root / "refused", ["arm64-v8a"], build.digest(receipt)
+                )
+            self.assertFalse((root / "refused").exists())
 
     def test_sdk_unix_link_preserved(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -301,6 +400,235 @@ class BootOnlyControls(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 build.validate_cache_owner(cache)
+
+
+class ClosedHostControls(unittest.TestCase):
+    # Captured empty resources.arsc emitted by the pinned aapt2 for this
+    # resource-free closed manifest. Recipe tools remain explicit edge doubles.
+    RESOURCE_TABLE = bytes.fromhex(
+        "02000c00280000000000000001001c001c000000"
+        "0000000000000000000100001c00000000000000"
+    )
+
+    def test_closed_exact_sources_and_manifest(self):
+        import xml.etree.ElementTree as ET
+
+        manifest = ET.fromstring(build.closed_manifest())
+        ns = "{http://schemas.android.com/apk/res/android}"
+        self.assertEqual(manifest.attrib["package"], build.CLOSED_PACKAGE)
+        app = manifest.find("application")
+        self.assertEqual(app.attrib[ns + "debuggable"], "false")
+        self.assertEqual(app.attrib[ns + "allowBackup"], "false")
+        self.assertNotIn(ns + "name", app.attrib)
+        self.assertNotIn(ns + "appComponentFactory", app.attrib)
+        self.assertEqual([e.tag for e in app], ["service", "activity"])
+        self.assertEqual(
+            app.find("activity").attrib[ns + "name"],
+            "development.landmine.schemii.android.host.HostActivity",
+        )
+        self.assertEqual(len(build.CLOSED_JAVA), 5)
+        self.assertEqual(len(build.CLOSED_NATIVE), 7)
+        self.assertFalse(
+            any(
+                "Probe" in p or "Diagnostics" in p or "Go" in p
+                for p in build.CLOSED_JAVA + build.CLOSED_NATIVE
+            )
+        )
+        self.assertIn(
+            ".ProbeActivity", (HERE / "app/src/main/AndroidManifest.xml").read_text()
+        )
+
+    def test_closed_non_circular_pins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            entries = {
+                "AndroidManifest.xml": b"binary manifest",
+                "resources.arsc": self.RESOURCE_TABLE,
+                "classes.dex": b"compiled dex",
+                "assets/closed-build.json": b"bindings",
+            }
+            target = build.closed_pins(out, entries, "a" * 64, {"commit": "b" * 40})
+            text = target.read_text()
+            for content in entries.values():
+                self.assertIn(hashlib.sha256(content).hexdigest(), text)
+            self.assertIn('#define SCHEMII_OBSERVATION_SOURCE "' + "b" * 40 + '"', text)
+            self.assertIn('{"lib/arm64-v8a/libschemii_owner.so",NULL}', text)
+            self.assertNotIn("HostAnchors", text)
+
+    def test_closed_pins_require_resources_and_refuse_unknown_members(self):
+        # Explicit compiler-edge bytes: full actual aapt/DEX proof is separate.
+        entries = {
+            "AndroidManifest.xml": b"binary manifest",
+            "resources.arsc": self.RESOURCE_TABLE,
+            "classes.dex": b"compiled dex",
+            "assets/closed-build.json": b"bindings",
+        }
+        cases = {
+            "missing-resource-table": {
+                k: v for k, v in entries.items() if k != "resources.arsc"
+            },
+            **{
+                "extra-" + name: {**entries, name: b"unselected"}
+                for name in (
+                    "classes2.dex",
+                    "res/unselected.bin",
+                    "lib/arm64-v8a/libschemii_owner.so",
+                )
+            },
+        }
+        for case, content in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                out = Path(directory)
+                with self.assertRaisesRegex(
+                    ValueError, "Closed content inventory refused"
+                ):
+                    build.closed_pins(out, content, "a" * 64, {"commit": "b" * 40})
+                self.assertFalse((out / "closed_pins.h").exists())
+
+    def test_closed_observation_identity_requires_fixed_commit(self):
+        entries = {
+            "AndroidManifest.xml": b"manifest",
+            "resources.arsc": self.RESOURCE_TABLE,
+            "classes.dex": b"dex",
+            "assets/closed-build.json": b"binding",
+        }
+        for commit in (None, "mutable", "a" * 64):
+            with (
+                self.subTest(commit=commit),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                out = Path(directory)
+                with self.assertRaisesRegex(ValueError, "immutable source identity"):
+                    build.closed_pins(out, entries, "a" * 64, {"commit": commit or ""})
+                self.assertFalse((out / "closed_pins.h").exists())
+
+    def test_closed_refuses_extensions_before_tools(self):
+        base = dict(
+            closed_connected_host=True,
+            non_debuggable=True,
+            abi=["arm64-v8a"],
+            connected_host_signer_sha256="a" * 64,
+            expected_adapter_commit="b" * 40,
+            packaged_shared_runtime=False,
+            guest_payload=None,
+            guest_manifest_sha256=None,
+            native_donor=None,
+            native_donor_receipt_sha256=None,
+            network_handoff=None,
+            network_checkout=None,
+            process_head=None,
+            process_checkout=None,
+            subreaper_handoff=None,
+            subreaper_checkout=None,
+            integration_probes=False,
+            boot_identity_only=False,
+            wrapper_controls_only=False,
+            log_report=False,
+        )
+        for name, value in [
+            ("non_debuggable", False),
+            ("abi", ["x86_64"]),
+            ("connected_host_signer_sha256", None),
+            ("expected_adapter_commit", None),
+            ("guest_payload", ["payload"]),
+            ("network_checkout", "peer"),
+            ("integration_probes", True),
+            ("native_donor", "donor"),
+        ]:
+            with (
+                self.subTest(name=name),
+                patch.object(
+                    build,
+                    "committed_adapter_sources",
+                    side_effect=AssertionError("must refuse before source/tools"),
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    build.closed_admission(SimpleNamespace(**{**base, name: value}))
+
+    def test_closed_build_recipe_has_no_implicit_or_peer_inputs(self):
+        # Explicit compiler/SDK/source-edge doubles; recipe ordering only, NOT
+        # committed admission, real SDK products, signed installation or C/A.
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            calls = []
+            bindings = {"fixture": "a" * 64}
+            args = SimpleNamespace(
+                build_id="recipe",
+                expected_adapter_commit="b" * 40,
+                connected_host_signer_sha256="a" * 64,
+            )
+
+            def compile_edge(*argv):
+                calls.append(argv)
+                tool = Path(argv[0]).name
+                if tool == "aapt2":
+                    with zipfile.ZipFile(argv[argv.index("-o") + 1], "w") as apk:
+                        apk.writestr("AndroidManifest.xml", b"fixture manifest")
+                        apk.writestr("resources.arsc", self.RESOURCE_TABLE)
+                elif tool == "javac":
+                    (Path(argv[argv.index("-d") + 1]) / "Fixture.class").write_bytes(
+                        b"fixture class"
+                    )
+                elif tool == "d8":
+                    (
+                        Path(argv[argv.index("--output") + 1]) / "classes.dex"
+                    ).write_bytes(b"fixture dex")
+                else:
+                    Path(argv[argv.index("-o") + 1]).write_bytes(b"fixture module")
+
+            actual_digest = build.digest
+
+            def sdk_digest(path):
+                for item in build.LOCK["archives"]:
+                    if Path(path).name == item["url"].rsplit("/", 1)[-1]:
+                        return item["sha256"]
+                return actual_digest(path)
+
+            with (
+                patch.object(build, "run", compile_edge),
+                patch.object(build, "digest", sdk_digest),
+                patch.object(build, "verify_extracted_archive"),
+                patch.object(build, "committed_adapter_sources", return_value=bindings),
+            ):
+                out = build.closed_build(args, cache, bindings)
+                with self.assertRaises(FileExistsError):
+                    build.closed_build(args, cache, bindings)  # no stale classes reuse
+            self.assertEqual(len(calls), 4)
+            javac = calls[1]
+            self.assertEqual(
+                {
+                    str(p.relative_to(HERE))
+                    for p in javac
+                    if isinstance(p, Path) and p.suffix == ".java"
+                },
+                set(build.CLOSED_JAVA),
+            )
+            self.assertIn("-implicit:none", javac)
+            self.assertIn("-sourcepath", javac)
+            self.assertEqual(
+                {
+                    str(p.relative_to(HERE))
+                    for p in calls[3]
+                    if isinstance(p, Path) and p.suffix == ".c"
+                },
+                set(build.CLOSED_NATIVE),
+            )
+            self.assertNotIn("HostAnchors", (out / "closed_pins.h").read_text())
+            with zipfile.ZipFile(out / "unsigned.apk") as apk:
+                self.assertEqual(
+                    apk.namelist(),
+                    [
+                        "AndroidManifest.xml",
+                        "resources.arsc",
+                        "classes.dex",
+                        "assets/closed-build.json",
+                        "lib/arm64-v8a/libschemii_owner.so",
+                    ],
+                )
+                self.assertTrue(
+                    all(p.compress_type == zipfile.ZIP_STORED for p in apk.infolist())
+                )
 
 
 if __name__ == "__main__":

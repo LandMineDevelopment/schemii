@@ -103,6 +103,8 @@ def _key(value: str) -> str:
 
 
 class _Encryption:
+    _cipher: CredentialCipher
+
     def _encrypt(self, provider_id: str, credential: dict[str, Any]) -> EncryptedCredential:
         _provider(provider_id)
         if not isinstance(credential, dict) or not credential:
@@ -245,13 +247,13 @@ class MemoryInstanceAiProviderStore(_Encryption):
                      connection_id: str | None = None, *, provider_id: str = _PROVIDER,
                      model_id: str = "gpt-6-luna", reasoning_effort: str = "default") -> dict[str, Any]:
         scope = _grant(user_id, product, connection_owner_id, connection_id)
-        model_id, reasoning_effort = _policy(provider_id, model_id, reasoning_effort)
-        grant = (_provider(provider_id), *scope, model_id, reasoning_effort)
+        selected_model, selected_effort = _policy(provider_id, model_id, reasoning_effort)
+        grant = (_provider(provider_id), *scope, selected_model, selected_effort)
         with self._lock:
             for key in self._direct_keys(provider_id, scope):
                 del self._grants[key]
             self._grant_revision += 1
-            value = {"modelId": model_id, "reasoningEffort": reasoning_effort,
+            value = {"modelId": selected_model, "reasoningEffort": selected_effort,
                      "revision": self._grant_revision}
             self._grants[grant] = value
             return self._grant_public(grant, value)
@@ -471,7 +473,7 @@ class PostgresInstanceAiProviderStore(_Encryption):
                      connection_id: str | None = None, *, provider_id: str = _PROVIDER,
                      model_id: str = "gpt-6-luna", reasoning_effort: str = "default") -> dict[str, Any]:
         grant = _grant(user_id, product, connection_owner_id, connection_id)
-        model_id, reasoning_effort = _policy(provider_id, model_id, reasoning_effort)
+        selected_model, selected_effort = _policy(provider_id, model_id, reasoning_effort)
         conflict = ("(provider_id, user_id, product) WHERE connection_id IS NULL AND provider_id = 'opencode'"
                     if connection_id is None else
                     "(provider_id, user_id, product, connection_owner_id, connection_id) "
@@ -487,7 +489,7 @@ class PostgresInstanceAiProviderStore(_Encryption):
                      model_id, reasoning_effort) VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING user_id, product, connection_owner_id, connection_id,
                               model_id, reasoning_effort, revision""",
-                    (provider_id, *grant, model_id, reasoning_effort))
+                    (provider_id, *grant, selected_model, selected_effort))
             else:
                 cursor.execute(f"""INSERT INTO metadata.ai_instance_provider_grants
                     (provider_id, user_id, product, connection_owner_id, connection_id,
@@ -497,7 +499,7 @@ class PostgresInstanceAiProviderStore(_Encryption):
                     DO UPDATE SET revision = nextval('metadata.ai_instance_provider_grant_revision_seq')
                     RETURNING user_id, product, connection_owner_id, connection_id,
                               model_id, reasoning_effort, revision""",
-                    (_provider(provider_id), *grant, model_id, reasoning_effort))
+                    (_provider(provider_id), *grant, selected_model, selected_effort))
             row = cursor.fetchone()
         return self._grant_public(row, provider_id)
 

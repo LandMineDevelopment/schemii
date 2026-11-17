@@ -1885,3 +1885,113 @@ def test_legacy_initdb_rescue_refuses_unproven_or_initialized_processes(
         assert original_identity(probe["pid"])
     finally:
         _finish_process_fixture(process)
+
+
+@pytest.mark.parametrize(
+    "profile,ports",
+    [
+        ("termux", (5433, 5434, 4097, 8000, 8001)),
+        ("apk", (15433, 15434, 14097, 18000, 18443)),
+    ],
+)
+def test_closed_endpoint_profile_reaches_generated_consumers(tmp_path, profile, ports):
+    instance = android.Runtime(
+        tmp_path / "state", MODULE_PATH.parents[2], profile=profile
+    )
+    assert tuple(instance.endpoints) == ports
+    instance._prepare()
+    config = {"hostname": "profile.example.ts.net", "tailnet_ip": "100.64.0.2"}
+    env = instance._environment(config)
+    assert f"port={ports[0]} " in env["SCHEMII_METADATA_DSN"]
+    assert env["SCHEMII_PI_PORT"] == str(ports[2])
+    assert env["SCHEMII_PI_PROTOTYPE_URL"] == f"http://127.0.0.1:{ports[2]}"
+    assert f"https://localhost:{ports[4]}" in env["SCHEMII_TRUSTED_ORIGINS"]
+    instance._write_runtime_config(config)
+    nginx = (instance.state / "run/nginx.conf").read_text()
+    assert f"listen 127.0.0.1:{ports[4]} ssl;" in nginx
+    assert nginx.count(f"proxy_pass http://127.0.0.1:{ports[3]};") == 2
+    assert ("listen 100.64.0.2:" in nginx) == (profile == "termux")
+
+
+def test_apk_never_falls_back_to_termux_process_or_recovery_policy(
+    tmp_path, monkeypatch
+):
+    instance = android.Runtime(tmp_path / "state", profile="apk")
+    monkeypatch.setattr(
+        android.subprocess, "Popen", lambda *a, **k: pytest.fail("unadmitted birth")
+    )
+    monkeypatch.setattr(
+        android, "process_identity", lambda *a, **k: pytest.fail("proc adoption")
+    )
+    for action in (
+        instance.run,
+        instance.stop,
+        instance.assert_stopped,
+        instance._assert_startable,
+        lambda: instance._spawn("app", ["no"]),
+        lambda: instance._helper(["no"]),
+    ):
+        with pytest.raises(android.RuntimeFailure):
+            action()
+    assert instance.status()["ownership"] == "UNKNOWN"
+    assert not instance.state.exists()
+
+
+@pytest.mark.parametrize(
+    "profile,configured,native_present,expected_verified",
+    [
+        ("apk", True, True, False),
+        ("apk", False, True, False),
+        ("termux", True, True, True),
+        ("termux", True, False, False),
+        ("termux", False, True, False),
+    ],
+)
+def test_doctor_keeps_native_identity_verification_within_termux_profile(
+    tmp_path, monkeypatch, profile, configured, native_present, expected_verified
+):
+    instance = android.Runtime(tmp_path / "state", profile=profile)
+    monkeypatch.setattr(
+        instance, "tailnet_config", lambda: {"synthetic": True} if configured else {}
+    )
+    legacy_calls = []
+
+    def legacy_identity():
+        assert profile == "termux", "APK doctor must not use the legacy resolver"
+        legacy_calls.append(True)
+        return {"pid": 123} if native_present else None
+
+    monkeypatch.setattr(instance, "_native_tailnet_identity", legacy_identity)
+    monkeypatch.setattr(
+        android, "process_identity", lambda *a, **k: pytest.fail("proc inference")
+    )
+    result = instance.doctor()
+    assert result["native_tailnet_verified"] is expected_verified
+    assert len(legacy_calls) == int(profile == "termux" and configured)
+    if profile == "apk":
+        assert result["status"]["ownership"] == "UNKNOWN"
+        assert result["status"]["ready"] is False
+    assert not instance.state.exists()
+
+
+def test_endpoint_conflict_preserves_uninitialized_state(tmp_path):
+    import socket
+
+    instance = android.Runtime(tmp_path / "state", profile="apk")
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        # Synthetic ephemeral endpoint only exercises the actual bind preflight;
+        # no production per-port override or authority is introduced.
+        instance.endpoints = android.EndpointProfile(
+            occupied.getsockname()[1], 15434, 14097, 18000, 18443
+        )
+        with pytest.raises(android.RuntimeFailure, match="Cannot bind"):
+            instance._check_endpoints({})
+    assert not instance.state.exists()
+
+
+@pytest.mark.parametrize("profile", ["", "APK", "termux:15433", "other"])
+def test_endpoint_profile_has_no_unknown_or_empty_fallback(tmp_path, profile):
+    with pytest.raises(android.RuntimeFailure, match="endpoint profile"):
+        android.Runtime(tmp_path / "state", profile=profile)
+    assert not (tmp_path / "state").exists()

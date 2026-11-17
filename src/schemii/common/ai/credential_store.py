@@ -28,6 +28,8 @@ def _metadata(row: dict[str, Any]) -> dict[str, Any]:
 
 
 class _Encryption:
+    _cipher: CredentialCipher
+
     def _encrypt(self, owner: str, credential_id: str, provider_id: str,
                  credential: dict[str, Any]) -> EncryptedCredential:
         if not isinstance(credential, dict) or not credential:

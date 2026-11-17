@@ -639,3 +639,338 @@ Private build logs/receipts and emulator reports live in the owned cache.
 coordinator schedules it. Focused native/package controls do not waive that plan.
 GitHub Actions stays disabled. Keep issue264 and its draft PR open with Refs to
 264/263; no release or merge is authorized here.
+
+## Connected installed-source boundary (issue 266)
+
+The packaged shared-runtime build now includes a private foreground-service
+adapter, a native directory/control lease and compiled source/native/payload
+expectations. This is a **source refusal boundary**, not an executable server
+release. Start verifies the installed nondebuggable target36 package and public
+signer pin, composes the exact committed `assets/shared/` and
+`assets/runtime-source/` inventories into a fresh read-only source tree, selects
+CE state/control roots, then requests native admission. A missing signer pin,
+changed/missing/unknown/linked/aliased member, competing lease or unavailable
+storage refuses. Partial trees and diagnostic failures are retained. A different
+attempt never repairs or silently reuses a failed tree.
+
+`build.py build --packaged-shared-runtime` accepts
+`--connected-host-signer-sha256` for an independently supplied **public certificate
+SHA256**, and checks that the eventual package signer agrees. Omitting it keeps
+installed host admission closed. It is not a signing key, a C/A trust flag or
+runtime execution authorization. Native owner libraries are new compiled leaves;
+PRoot donor reuse remains separate and source-bound. No new APK build/install or
+signing has been performed for this source change.
+
+The canonical shared `Runtime` has closed `termux` and `apk` endpoint profiles.
+Termux retains metadata5433/target5434/Pi4097/app8000/ingress8001. APK selects
+15433/15434/14097/18000/18443, loopback only. Shared DSNs, role/bootstrap helpers,
+metadata fencing, Pi listener/URL, app bind/readiness, target credentials and nginx
+rendering use the same profile. Conflicts refuse before secrets/initdb/service
+initialization; no alternate ports. `EndpointProfile.backend` is the selected
+loopback upstream for the separately owned native tailnet integration; that peer
+is not wired or accepted by this source slice.
+
+The current production comparator still has no source-backed C/A producer.
+The native control worker therefore returns UNKNOWN/refusal, never initializes
+or advances the accepted single-run journal, never forks a managed process, and
+never grants the Python launch consumer. APK `run`, service/helper launch,
+external stop and recovery reject Termux `/proc/task/children`, process-group
+and stale-pidfile policy. Native status and Stop remain responsive while its
+observer is pending; the selected lease cannot be replaced. No journal ACK,
+CLEAN_STOPPED, complete actor inventory, graceful whole-stack stop, healthy
+Stop/Start, kernel transition or PostgreSQL recovery is claimed here.
+
+The concrete next dependency is a reviewed native caller/custody producer and
+pinned PRoot interface covering the child-birth/export gap, traced tasks,
+sysvipc double-fork helpers, conditional F2FS helpers, exact real-parent waits and
+flow closure. Live export/ACK or direct tracer exit cannot close that gap.
+Extending journal actor/terminal/later-run/recovery schemas without those actual
+producers would fabricate authority, so those changes remain pending. There is
+no public flag, environment value, signer pin or test constructor to unlock it.
+The experimental recovery fallback remains a **user-performed**, separately
+verified new kernel boot and actual existing-only two-cluster recovery. The
+current x86 guest is not given the Termux ARM64 physical recovery identity.
+Final safe recovery without reboot remains open under issues263/266.
+
+Control diagnostics use fixed scalar fields and private essential append-only
+records, bounded at16MiB with pressure refusal. Their snapshot exporter preserves
+exact bytes/length/SHA256 and marks unknown crash loss and incomplete run closure.
+It exports only this control scope; it is not the full promised actor/service
+support bundle. No stdout, commands, credentials, DSNs, UUIDs, admission tokens,
+private origins or user operations enter those events. Android FGS eligibility,
+actual selected-storage durability/DE/pre-PIN, native peer/network fencing,
+complete correlated diagnostics, both-PG SQL/integrity, device and release gates
+remain separately pending. No Direct Boot receiver is added.
+
+### Finite native actor/FD source producer (#266, refs #263)
+
+The managed PRoot source recipe now applies `native/proot-actor-channel.patch`
+against immutable upstream `52d65a4dc140ca554d241a1438ddd4f6b00c9813`.
+`payload.lock.json.actor_producer` binds the eight consumed donor leaves (including
+fingerprinted, CLI-disabled ashmem), the patch, producer C/header and fixed wire
+contract. Build preparation checks Git bytes and writes only a build copy. Old
+native donors do not match this recipe; old APK/static evidence is not current.
+This is source instrumentation with finite host controls, not Android proof.
+
+`native/host/actor-channel-v1.json` is the cross-language byte/FD contract:
+224-byte big-endian private seqpackets, strict per-direction sequence starting at
+one, source/contract/run/generation/profile and owner/task/process/creator
+incarnations. All reserved bytes are zero. Unexpected ancillary data is refused;
+received SCM_RIGHTS descriptors are closed once, even on malformed frames.
+Nonblocking pressure, loss, wrap, bad sequence/binding/incarnation and exhausted
+128-slot tables latch uncertainty. No reconnect, eviction of unresolved evidence,
+replacement owner or positive ACK erases it. Records contain fixed scalar facts,
+no raw boot identity, pathname, credentials, journal handles or operation data.
+No telemetry persistence/export or durable journal protocol is introduced here.
+
+The actual native owner reserves a separate socketpair before its worker starts,
+while retaining its sole selected-directory lease and responsive Stop flag. The
+pair is deliberately unexported. Java calls JNI scalar methods; the native
+internal pair carries four native-endian uint32 fields. Python's FD3 refusal
+adapter uses 16-byte big-endian SCH1 frames (`struct.Struct("!4sIII")`), while
+the actor channel uses 224-byte big-endian SCA1 frames. These are **disconnected
+protocols**. A future actual native custodian must create/transfer only the
+designated guest lease and perform an
+explicit versioned conversion after genuine C/A and durable admission. No parsed
+JSON, Java flag, signer/UID, environment FD number or `ac_proot_bind` source fixture
+provides C/A or changes production admission. Managed executable `main` refuses
+before parsing configuration or reaching any F2FS/helper/root launch path; no
+public CLI or environment option attaches the in-memory source producer.
+
+Managed `clone` refuses `CLONE_UNTRACED` with **EPERM before kernel resume**;
+normal legacy fork/vfork/clone/thread paths retain existing translation. Every
+managed `clone3` form returns **ENOSYS**, without reading mutable guest arguments,
+so libc may fall back to legacy clone. Safe scratch/translation custody for exact
+kernel clone3 bytes remains a later requirement. No namespace/untraced flag is
+silently removed by the new policy. Existing namespace emulation is unchanged.
+
+Root/native births publish an intent before fork and a correlated failure or
+observed PID result afterward. A send failure after the real birth retains the
+live slot and unresolved intent. Guest entry reserves a slot and unique child
+incarnation before kernel resume; competing creators share the same finite budget.
+Both channel ends derive reservations in intent sequence order. Attachment uses
+the exact reservation even when children attach in a different order. Only an
+observed negative birth result releases a reservation; loss retains it. Guest
+entry intents bind attach-child identity;
+child stops arriving before creator events are held in a bounded local table and
+exported only after attachment. Lost/truncated chronology remains UNKNOWN.
+Direct real-parent helper waits are dispatched **before** guest Tracee creation.
+The SysVIPC managed helper is a direct child running the same production service
+without the detached second fork/exec. Its pipe EOF is service shutdown input;
+only its exact parent wait is terminal proof. F2FS closes unrelated FDs before its
+fork-only work and uses a checked targeted wait. The ARM64 workaround uses checked
+raw resume/targeted-wait wrappers; host compilation/extraction is not ARM64 target
+execution. Raw failure fences further managed resume/birth and preserves uncertainty.
+
+Guest ptrace terminal observation remains distinct from the guest's real-parent
+wait: it retains an unresolved wait slot. Nonleader exec records the remap and
+retains displaced same-process task waits, refusing cross-process identity
+collisions with ESTALE before changing relatives or task identities, rather than
+manufacturing terminal evidence. Complete task retirement and guest real-parent
+wait consumption remain integration gates. `ac_highwater` is only a local finite
+actor observation: no pending intent/early event/loss/live actor/task/helper/wait
+and every sent record receipt-ACKed. It is never a durable journal ACK, CLEAN,
+process-closure grant or network closure; #268 owns flow/epoch closure separately.
+
+FD allowlists apply **before** TRACEME, noexec service/probe work and failed exec:
+root/F2FS retain only standard streams; SysVIPC initially retains two service pipe
+ends, then only its standard streams. The producer channel/private state are
+closed in children; child copies cannot write the parent's sequence. Future
+PRoot admission must additionally close the native owner's journal, selected
+lease, Java control and other private descriptors before transfer, retaining only
+its designated actor channel and intentional mount inputs. Future Python receives
+only its own guest lease and must close it in subprocesses. There is no current
+native-to-PRoot or Python FD transfer. Close operations are never retried after an
+ambiguous result; first and secondary errors are retained in the producer boundary.
+
+All production APK births, C/A and classifier/admission remain REFUSED. Connected
+journal actor/terminal/new-run/retry transitions, actual source-bound transfer,
+complete guest wait/exec closure, writer/receipt Stop integration, Android target
+and real device/lifecycle/recovery/network acceptance remain pending independent
+review. Final safe no-reboot recovery stays OPEN under #263/#266. Experimental
+owner-loss recovery preserves/refuses until a USER-performed, separately verified
+new kernel and guarded existing-only BOTH-PG recovery; no automatic reboot,
+force-stop, adoption, forced cleanup, PID-file deletion or reset is introduced.
+Healthy fully proved Stop/Start remains graceful.
+
+The R293-02 successor controls link complete pinned PRoot translation units into
+an isolated host fixture. Real native fork, vfork, clone, thread and nonleader
+exec generate production ptrace events; the fixture waits only its captured child
+and kernel-event TID identities. The nonleader-exec transport passes native
+filesystem/loader syscalls through without guest translation, while birth entry,
+attachment, remap and event/wait handling remain production code. Separate
+explicit register/event injections cover early child stop/death and cross-process
+exec collision. A collision now stops before PRoot mutates task identities.
+
+The full event loop also consumes real SysVIPC service terminals before and after
+native fixture events. Failed readiness/pipe EOF cannot replace a helper while
+its exact parent wait remains outstanding. An observer fixture proves a native
+helper can stay live in the actual service's blocking accept after its real
+parent/tracer dies. Its later observer ptrace wait is deliberately **not** a
+real-parent receipt and cannot clear the channel's retained loss or helper wait.
+This test-only observer does not provide a production recovery/adoption path.
+
+Managed terminal observations no longer trigger another resume of the terminated
+task. Wait errors, invalid statuses, ECHILD with live local obligations, failed
+initial stop/options, raw ARM64 mask/register/resume/wait/restore failures and
+secondary cleanup errors preserve uncertainty. The whole raw workaround is
+exercised under explicit host syscall injections and compiled by the actual
+ARM64/API29 production link; it is not Android execution. Fixed scalar channel
+records replace the managed raw workaround's memory-address/value debug dump.
+Owner allocation/thread/close controls additionally retain primary and two close
+errors through private diagnostic variants; existing JNI control remains unchanged.
+
+Both 128-entry task and early-observation bounds, incarnation/sequence wrap,
+critical intent/birth/export/receipt loss, descriptor allowlists and same-lease
+pending observation/Stop are finite controls. No connected writer/receipt Stop
+proof is implied: endpoints remain unexported and actual native C/A, guest-lease
+conversion, journal transitions and authoritative guest real-parent waits remain
+OPEN integration dependencies. The current draft's source milestone and fresh
+production native link still require independent exact-head acceptance.
+
+### Native custody prerequisites and remaining C/A boundary (issue 266)
+
+`boot_authority_open` now owns the native selected-directory lease used by the
+control worker. It opens an independent CLOEXEC description, validates private
+0700 directory ownership and inode identity, and checks cooperative exclusive
+custody before and after the unchanged strict R observation. A detected gap is
+latched; the owner never reacquires it. Cancellation revokes continuation without
+closing an in-flight operation. Close waits for the worker and retains first and
+secondary native errors. The constructor creates no directory, anchor or journal.
+An inherited process cannot compare through the parent's custodian or unlock the
+parent by closing its inherited copy. These are native storage/lifetime
+prerequisites, not proof of an untraced approved caller.
+
+`journal_custody_check` checks the original acknowledged initial-run handle,
+process and opening-thread TLS lifetime (not a reusable numeric TID), cooperative
+lock, original anchor/essential inodes, complete
+checked bytes and retained prefix tip. It returns only the existing safe scalar
+journal result. Inspection, cancellation, detected loss or failure fences that
+handle; reopening and matching a prefix cannot restore its observed commitment.
+The journal's supplied binding fields remain claims. This check issues no
+`boot_anchor_view` and does not establish original prebirth C, installed-source
+admission, selected CE/DE lineage, historical custody or antirollback. Host
+filesystem controls and fault injections do not establish Android durability.
+
+**Positive C/A construction remains blocked at concrete source interfaces.**
+`NativeOwner.open(int fd)` transfers only a borrowed descriptor. Java's separate
+installed-source verification is not a native provenance/custody transfer, and
+the descriptor cannot prove CE/default versus explicit opt-in DE lineage. No
+owned native seam establishes the owner's birth outside the PRoot trace path;
+PID, thread ID, TracerPid, signer and R's proc observations are insufficient.
+Consequently the production comparator continues UNKNOWN/CALLER_UNPROVED (or
+the earlier storage/R failure). It ignores arbitrary incoming anchor pointers,
+and neither constructor allocation nor an empty selected directory is classified
+as NO_PRIOR_FRESH. No production journal initialization or managed birth occurs.
+
+The next consuming interface needs independently verified installed-source/build
+provenance and the actual approved Android native-owner birth/call/storage
+boundary, retained in the sole custodian. A positive fresh initializer must create
+and own an explicitly new namespace under that boundary, derive its immutable
+source/install/state/run/generation and CE/DE bindings natively, and preserve
+R+C through anchor/ACTIVE publication before birth. Missing anchors in existing
+namespaces remain refusal. Only then can uninterrupted committed history lend an
+admitted A view. Exact-source Android caller/CE-DE/lease and filesystem proof must
+be scheduled separately. Actor endpoint transfer, versioned Python guest lease,
+journal actor/terminal/newrun/retry, connected writer/receipt Stop, guest real-parent
+and all-task closure, network epochs and recovery remain dependent open gates.
+
+### Closed connected-host entry profile (source, no admission)
+
+`build.py build --closed-connected-host --abi arm64-v8a --non-debuggable
+--expected-adapter-commit COMMIT --connected-host-signer-sha256 PUBLIC_CERT_SHA256
+--build-id UNIQUE` selects a separate finite prerequisite-check product. The
+commit must bind every adapter input through the existing actual Git-object
+comparison; hidden index changes and unknown files cannot bypass it. This profile
+rejects diagnostic, peer, payload and donor combinations before staging. Output
+is **unsigned**, with no signing-key access or installation. Diagnostic profiles
+retain their separate manifest, products and native safeguards.
+
+The literal selected Java inputs are HostActivity, HostService, StorageProfile,
+InstalledSource and NativeOwner (including their nested and generated lambda
+classes). This five-source variant retains InstalledSource solely for its fixed
+public-PackageManager observation edge and SHA formatting; it emits **no
+HostAnchors**. No mutable Java maps are pins. The old pathname-based compose API
+and privateDir are unreachable from the selected entry: no source tree, directory,
+lineage or journal is created. The literal native inputs are owner, owner_jni,
+native_bootstrap, installed_provenance, boot_authority, boot_compare and
+boot_identity. The accepted owner is retained without actor_channel: no ac_*
+reference exists, and the entry JNI request always refuses. No journal, actor,
+boot-diagnostic, PRoot, talloc, probe, network or Go product is selected.
+
+The selected manifest is a separate literal in build.py, not a transformation of
+the diagnostic manifest. It declares the default framework Application/component
+factory/classloader, one exported HostActivity and one nonexported specialUse
+HostService in the default package process. Only FOREGROUND_SERVICE,
+FOREGROUND_SERVICE_SPECIAL_USE and POST_NOTIFICATIONS are requested. Backup,
+restore-any-version, debug and cleartext are disabled. There are no receivers,
+providers, instrumentation, custom application/factory, profileable declaration,
+code splits, network callback or dynamic loader. Framework permission/FGS behavior
+and effective installed settings still need target verification.
+
+Before/concurrent app callbacks are Activity onCreate/onResume and its three fixed
+click handlers, Service onCreate/onStartCommand/onDestroy/onBind, and the sole
+reserved executor runnable. Intent extras and saved state select no implementation
+or authority. Service class initialization creates its monitor/status scalars;
+construction allocates an executor, which starts a thread only on dispatch.
+Operation/Acquisition capture immutable service/application/worker references.
+Activity has no class initializer. StorageProfile and InstalledSource have only
+compile-time constants and no loader or worker initializer. NativeOwner alone
+loads schemii_owner in its static initializer. Native globals are the owner,
+scalar snapshot, mutex and worker/reservation state; no JNI_OnLoad or application
+C constructor exists. Toolchain CRT init/fini and platform libc/libdl dependencies
+remain part of actual ELF readback, not an inferred Android observation. No Go
+runtime or other application-controlled loader is included.
+
+Build order is acyclic: exact source/contract/profile/public signer -> binary
+manifest, compiled resource table and exact Java/DEX -> native expectation
+header -> owner ELF -> stored APK. The exact ordinary-content set includes
+AndroidManifest.xml, resources.arsc, classes.dex and assets/closed-build.json;
+every byte of the compiled resource table is pinned alongside the other content.
+Native pins cover every ordinary member except its own owner member. The
+owner member must instead equal the held extracted module byte-for-byte; this
+**does not independently seal the owner or whole signed product**. Native checks
+local/central ZIP agreement, stored members, exact ordered inventory, content
+hashes, no extra DEX/assets/libraries, and only recognized v2/v3 signing-block IDs
+and zero-valued padding pairs. A signing block may follow only the minimal zero
+prefix (fewer than 4096 bytes) needed for its 4KiB boundary, as emitted by pinned
+apksigner; footer/header framing and all member pins remain mandatory. No other
+post-member gap is accepted. Stock PackageManager verifies the current public signer; no
+historical signer or native self/final-APK hash cycle substitutes for independent
+source/build/sign/install/process observations. The separate build receipt binds
+module and unsigned APK hashes externally. Signing must preserve the member
+inventory (no v1 META-INF entries or extra source-stamp/provenance blocks).
+
+JNI open has no arguments and calls the two fixed nonpublic HostService accessors
+synchronously on the sole reserving Java worker. It owns one local frame, no
+global/weak references, no attachment and no escaped JNIEnv. Repeated pair checks
+and a second framework snapshot bracket held acquisition and scalar publication.
+Stop/destroy/replacement revokes subsequent borrows; an already returned reference
+is never mistaken for revocation. No application context/FD/trust/digest/receipt
+setter exists. JNI checks the current module via dladdr, ELF executable-offset and
+own-process proc mapping device/inode correlation; dl_iterate_phdr rejects other
+application ELFs and treats /system and /apex dependencies as the stock-OS boundary.
+These current observations do not attest executable memory or tracing history.
+
+Native retains the no-follow base APK, extracted module, selected CE control root
+and the original native authority lease. Validation compares content and object
+metadata before/after acquisition and before publication, refusing replacement,
+mutation, missing pins, splits, loaders and unknown content. Paths are never
+retargeted to consume replacement bytes. Intermediate opens and verification
+probes are bounded and disposed once. SDK/filesystem/native work runs outside the
+short lifecycle/status locks. Stop/status/destroy never close or interrupt pending
+I/O. Cleanup EBUSY/error retains the reservation and any unresolved resource or
+close-error tombstone; Linux close errors are not retried. Primary, secondary and
+cleanup scalar errors remain separate; no raw private path or exception escapes.
+
+The strict R reader and N1 UNKNOWN reason ordering remain unchanged. The consumer
+can acquire/check held current objects, but has **no positive C/A constructor**,
+prior anchor, freshness/history producer, journal initialization, endpoint transfer
+or managed birth. The precise next gate is independent current-head source/local
+review, then separately owned current build/sign/install/process/native observations
+for this exact five-Java/seven-native interface. Historical A still requires a
+reviewed selected-state/install/data-generation/history and uninterrupted-custody
+producer; empty directories, signer/path/FD/object equality and parseable journal
+bytes cannot provide it. Android C/A, real runtime, recovery and release remain
+unproved. No usable-stack or device acceptance follows from host fixtures or a
+successful API36 class compile/API29 native link.

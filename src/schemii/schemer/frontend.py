@@ -12,6 +12,6 @@ def install_schemer_frontend(application: FastAPI) -> None:
     web = Path(__file__).resolve().parent / "web"
     application.mount("/schemer-assets", StaticFiles(directory=web), name="schemer-assets")
 
-    @application.api_route("/schemer", methods=("GET", "HEAD"), include_in_schema=False)
+    @application.api_route("/schemer", methods=["GET", "HEAD"], include_in_schema=False)
     async def report_page() -> FileResponse:
         return FileResponse(web / "index.html", media_type="text/html")

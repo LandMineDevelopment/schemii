@@ -11,6 +11,15 @@ const statuses = { invalid_request: 400, unauthorized: 401, not_found: 404,
   busy: 429, body_too_large: 413, internal_error: 500 };
 const digest = value => createHash('sha256').update(value).digest();
 
+export function listenerPort(environment = process.env) {
+  if (environment.SCHEMII_PI_PORT === undefined) return 4097;
+  const value = environment.SCHEMII_PI_PORT;
+  if (typeof value !== 'string' || !/^[1-9][0-9]{0,4}$/.test(value) || Number(value) > 65535) {
+    throw new Error('SCHEMII_PI_PORT must be a TCP port from 1 to 65535');
+  }
+  return Number(value);
+}
+
 export function listenerHost(environment = process.env) {
   const host = environment.SCHEMII_PI_HOST ?? '0.0.0.0';
   if (!['127.0.0.1', '0.0.0.0'].includes(host)) {
@@ -110,7 +119,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     server.requestTimeout = 15_000;
     server.headersTimeout = 10_000;
     server.on('error', () => { process.stderr.write('Pi sidecar failed to start.\n'); process.exitCode = 1; });
-    server.listen(4097, listenerHost());
+    server.listen(listenerPort(), listenerHost());
   } catch {
     process.stderr.write('Pi sidecar configuration could not be loaded.\n');
     process.exitCode = 1;

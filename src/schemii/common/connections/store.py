@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import secrets
 import threading
 from datetime import datetime, timezone
@@ -93,7 +94,7 @@ class ConnectionMutationGuardRegistrar(Protocol):
 class ConnectionRepository(Protocol):
     def list(self, owner_id: str) -> list[PostgresConnectionProfile]: ...
 
-    def list_for_owners(self, owner_ids: tuple[str, ...]) -> list[PostgresConnectionProfile]: ...
+    def list_for_owners(self, owner_ids: tuple[str, ...]) -> builtins.list[PostgresConnectionProfile]: ...
 
     def get(self, owner_id: str, connection_id: str) -> PostgresConnectionProfile: ...
 
@@ -139,7 +140,7 @@ class InMemoryConnectionRepository:
             profiles = [record.profile.model_copy(deep=True) for record in records.values()]
         return sorted(profiles, key=lambda profile: (profile.name.casefold(), profile.id))
 
-    def list_for_owners(self, owner_ids: tuple[str, ...]) -> list[PostgresConnectionProfile]:
+    def list_for_owners(self, owner_ids: tuple[str, ...]) -> builtins.list[PostgresConnectionProfile]:
         """Read selected owners' metadata together, without resolving passwords."""
         with self._lock:
             profiles = [record.profile.model_copy(deep=True)
@@ -238,7 +239,7 @@ class InMemoryConnectionRepository:
             raise ConnectionNotFoundError("PostgreSQL connection was not found") from error
 
     @staticmethod
-    def _metadata(profile: PostgresConnectionProfile) -> dict[str, object]:
+    def _metadata(profile: PostgresConnectionProfile) -> dict[str, Any]:
         return {
             field: getattr(profile, field)
             for field in PostgresConnectionMetadata.model_fields

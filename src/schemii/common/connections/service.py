@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import threading
 from contextlib import contextmanager
 from typing import Any, Iterator, Protocol, runtime_checkable
@@ -123,7 +124,7 @@ class ConnectionService:
         """Read only explicitly selected owners for one inventory request."""
         return ConnectionMetadataSnapshot(self._repository.list_for_owners(owner_ids))
 
-    def list_schemii_owned(self) -> list[PostgresConnectionProfile]:
+    def list_schemii_owned(self) -> builtins.list[PostgresConnectionProfile]:
         """Inventory the application-owned pool, never a person's private profiles."""
         return self._repository.list(SCHEMII_CONNECTION_OWNER_ID)
 
@@ -298,11 +299,11 @@ class ProductConnectionAccess:
 
     def list_from_snapshot(
         self, actor_id: str, authority: Any, metadata: ConnectionMetadataSnapshot,
-    ) -> list[PostgresConnectionProfile]:
+    ) -> builtins.list[PostgresConnectionProfile]:
         """Use the same product visibility policy with fresh detached metadata."""
         return self._listed_profiles(actor_id, self._authority(actor_id, authority), metadata)
 
-    def _listed_profiles(self, actor_id: str, auth: Any, metadata: Any) -> list[PostgresConnectionProfile]:
+    def _listed_profiles(self, actor_id: str, auth: Any, metadata: Any) -> builtins.list[PostgresConnectionProfile]:
         profiles = {
             profile.id: profile.model_copy(update={"owner_id": actor_id})
             for profile in metadata.list(actor_id)

@@ -653,6 +653,19 @@ public final class ProbeActivity extends Activity {
 
     private TextView bootStatus;
 
+    // Legacy diagnostic products use the host panel only when their own
+    // packaged-runtime anchors exist. The closed host has a direct Activity
+    // and keeps this diagnostic reflection out of its selected Java sources.
+    private static boolean hostControlsAvailable() {
+        try {
+            Class.forName("development.landmine.schemii.android.host.HostAnchors")
+                .getField("COMMIT").get(null);
+            return true;
+        } catch (Exception | LinkageError error) {
+            return false;
+        }
+    }
+
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         if (BootIdentityProbe.PACKAGE.equals(getPackageName()) && bootStatus != null) {
@@ -664,6 +677,25 @@ public final class ProbeActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        if (development.landmine.schemii.android.host.HostService.available() && hostControlsAvailable()) {
+            android.widget.LinearLayout panel = new android.widget.LinearLayout(this);
+            panel.setOrientation(android.widget.LinearLayout.VERTICAL); panel.setPadding(24,48,24,24);
+            TextView status = new TextView(this);
+            status.setText(development.landmine.schemii.android.host.HostService.status());
+            status.setAccessibilityLiveRegion(android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE);
+            panel.addView(status);
+            for (String action : new String[]{"start","stop","status"}) {
+                android.widget.Button button = new android.widget.Button(this);
+                button.setText(action.substring(0,1).toUpperCase(java.util.Locale.ROOT)+action.substring(1));
+                button.setOnClickListener(v -> {
+                    if (!action.equals("status")) startForegroundService(new Intent(this,
+                        development.landmine.schemii.android.host.HostService.class).setAction(action));
+                    status.postDelayed(() -> status.setText(development.landmine.schemii.android.host.HostService.status()),300);
+                });
+                panel.addView(button);
+            }
+            setContentView(panel); return;
+        }
         TextView view = new TextView(this);
         view.setPadding(24, 40, 24, 24);
         view.setText("Running disposable native execution controls…");

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "status": "provisional-feasibility-only",
+  "status": "connected-source-refusal; execution-not-admitted",
   "application_id": "development.landmine.schemii.runtimeprobe",
   "compile_sdk": 36,
   "target_sdk": 36,
@@ -21,16 +21,17 @@
     "environment": {
       "PROOT_NO_SECCOMP": "1",
       "PROOT_DONT_SHARE_LIBANDROID_SHMEM": "1"
-    }
+    },
+    "composed_source": "verified assets/shared + assets/runtime-source; compiled independent inventories"
   },
   "storage": {
     "default": "credential-protected",
     "probe_relative_root": "probe-v1",
     "device_protected": "not-implemented; opt-in owner267",
-    "state_and_control_roots": "host supplies selected roots; no fallback or reset"
+    "state_and_control_roots": "selected CE default; explicit source API DE selection, no receiver or pre-PIN acceptance"
   },
   "endpoints": {
-    "status": "consumed-by-disposable-guest-probe; shared-supervisor-pending",
+    "status": "shared-Runtime-and-Pi-listener-profile; execution-not-admitted",
     "host": "127.0.0.1",
     "metadata_postgres": 15433,
     "target_postgres": 15434,
@@ -41,16 +42,43 @@
     "conflicts": "refuse before init; no automatic alternate port"
   },
   "control": {
-    "supervisor": "reuse canonical Python lifecycle; adapter parameterization pending ownership",
+    "supervisor": "canonical dev/android/runtime.py; production APK admission refused before initialization",
     "operations": [
       "run-attached",
       "stop",
       "status"
     ],
     "owner_identity": "pid + start_ticks + boot_id; never pid alone",
-    "descendant_identity": "blocked: task/children unavailable in API36 emulator app",
+    "descendant_identity": "UNKNOWN; pinned PRoot birth/export race and native helpers not closed",
     "shutdown": "bounded graceful stop; no forced PostgreSQL cleanup",
-    "ready": false
+    "ready": false,
+    "native_owner": "FGS + private native AF_UNIX control; native selected-directory custodian; R-only observation; C/A UNKNOWN; no birth or journal grant",
+    "actor_producer": {
+      "profile": "source-only-managed-actors-refused",
+      "contract": "platforms/android/native/host/actor-channel-v1.json",
+      "proot_commit": "52d65a4dc140ca554d241a1438ddd4f6b00c9813",
+      "admission": "REFUSED",
+      "guest_wait_closure": "pending actual real-parent guest wait producer; ptrace terminal alone retains wait uncertainty",
+      "native_attachment": "source-only in-memory, no CLI/env/Java/FD-number or Python handshake"
+    }
   },
-  "runtime_acceptance": "pending"
+  "runtime_acceptance": "pending",
+  "closed_connected_host": {
+    "profile": "closed-connected-host-v1",
+    "application_id": "development.landmine.schemii.connectedhost",
+    "entry": "HostActivity + nonexported HostService; default framework Application/factory; no providers/receivers/instrumentation",
+    "java": "five fixed host classes only; no HostAnchors, diagnostics, peer Java or dynamic loaders",
+    "native": "seven fixed owner/JNI/bootstrap/installed/authority/comparator/reader units; platform libc/libdl; accepted owner retained dormant; no actor/Go/PRoot",
+    "build_order": [
+      "exact committed adapter + public signer",
+      "API36 Java/DEX, binary manifest and compiled resource table",
+      "native content pins",
+      "owner module",
+      "stored-only unsigned APK",
+      "separate reviewed signing/install/process proof"
+    ],
+    "admission": "R unchanged; C/A UNPROVED; journal/births REFUSED",
+    "composition": "InstalledSource.compose pathname API unreachable from selected entry; no source/state creation",
+    "history": "held current objects do not establish historical A"
+  }
 }

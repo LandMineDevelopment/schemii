@@ -19,6 +19,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+from typing import NamedTuple
 import re
 import secrets
 import signal
@@ -50,6 +51,30 @@ SECRET_NAMES = (
     "account_setup_token",
     "opencode_password",
 )
+
+
+class EndpointProfile(NamedTuple):
+    """Closed shared profiles; no ambient per-port overrides or fallback."""
+
+    metadata: int
+    target: int
+    pi: int
+    app: int
+    ingress: int
+
+    @property
+    def backend(self) -> str:
+        return f"http://127.0.0.1:{self.app}"
+
+    @classmethod
+    def selected(cls, name: str) -> EndpointProfile:
+        profiles = {
+            "termux": cls(5433, 5434, 4097, 8000, 8001),
+            "apk": cls(15433, 15434, 14097, 18000, 18443),
+        }
+        if name not in profiles:
+            raise RuntimeFailure("Unknown Android endpoint profile")
+        return profiles[name]
 
 
 class RuntimeFailure(RuntimeError):
@@ -290,7 +315,19 @@ def append_log(path: Path, chunk: bytes, maximum: int = 1024 * 1024) -> None:
 
 
 class Runtime:
-    def __init__(self, state: Path | None = None, source: Path | None = None):
+    def __init__(
+        self,
+        state: Path | None = None,
+        source: Path | None = None,
+        *,
+        profile: str | None = None,
+    ):
+        self.profile = (
+            profile
+            if profile is not None
+            else os.environ.get("SCHEMII_ANDROID_PROFILE", "termux")
+        )
+        self.endpoints = EndpointProfile.selected(self.profile)
         self.state = Path(
             state or os.environ.get("SCHEMII_ANDROID_STATE") or DEFAULT_STATE
         )
@@ -426,6 +463,8 @@ class Runtime:
         timeout: float = 120,
     ) -> int:
         """Run one owned startup helper with responsive cancellation and a deadline."""
+        if self.profile == "apk":
+            raise RuntimeFailure("APK helper ownership is unproved; launch refused")
         if self.shutdown.is_set():
             raise RuntimeFailure("Startup interrupted; retained data was not reset")
         with tempfile.TemporaryFile() as input_stream:
@@ -684,7 +723,11 @@ class Runtime:
                 "internal-bootstrap",
                 name,
             ],
-            env={**os.environ, "SCHEMII_ANDROID_STATE": str(self.state)},
+            env={
+                **os.environ,
+                "SCHEMII_ANDROID_STATE": str(self.state),
+                "SCHEMII_ANDROID_PROFILE": self.profile,
+            },
             timeout=180,
         )
         if name == "target":
@@ -797,7 +840,7 @@ class Runtime:
                 "PATH": f"/opt/node/bin:/opt/schemii-venv/bin:{PG_BIN}:/usr/bin:/bin",
                 "PYTHONUNBUFFERED": "1",
                 "PYTHONDONTWRITEBYTECODE": "1",
-                "SCHEMII_METADATA_DSN": "host=127.0.0.1 port=5433 dbname=schemii user=schemii_metadata_app",
+                "SCHEMII_METADATA_DSN": f"host=127.0.0.1 port={self.endpoints.metadata} dbname=schemii user=schemii_metadata_app",
                 "SCHEMII_METADATA_PASSWORD_FILE": str(secret / "metadata_app_password"),
                 "SCHEMII_METADATA_ENCRYPTION_KEY_FILE": str(
                     secret / "metadata_encryption_key"
@@ -806,15 +849,16 @@ class Runtime:
                 "SCHEMII_METADATA_TARGET_HOST_ALIASES": "localhost,127.0.0.1,::1",
                 "SCHEMII_ALLOWED_TARGET_HOSTS": "127.0.0.1,localhost",
                 "SCHEMII_CONFIG_FILE": str(self.state / "run/schemii.toml"),
-                "SCHEMII_PI_PROTOTYPE_URL": "http://127.0.0.1:4097",
+                "SCHEMII_PI_PROTOTYPE_URL": f"http://127.0.0.1:{self.endpoints.pi}",
+                "SCHEMII_PI_PORT": str(self.endpoints.pi),
                 "SCHEMII_PI_PASSWORD_FILE": str(secret / "opencode_password"),
                 "SCHEMII_PI_HOST": "127.0.0.1",
                 "SCHEMII_TRUSTED_ORIGINS": ",".join(
                     (
-                        "https://localhost:8001",
-                        "https://127.0.0.1:8001",
-                        f"https://{config['hostname']}:8001",
-                        f"https://{config['tailnet_ip']}:8001",
+                        f"https://localhost:{self.endpoints.ingress}",
+                        f"https://127.0.0.1:{self.endpoints.ingress}",
+                        f"https://{config['hostname']}:{self.endpoints.ingress}",
+                        f"https://{config['tailnet_ip']}:{self.endpoints.ingress}",
                     )
                 ),
             }
@@ -1020,6 +1064,14 @@ class Runtime:
             ("STATE", str(self.state)),
             ("TAILNET_IP", config["tailnet_ip"]),
             ("HOSTNAME", config["hostname"]),
+            ("INGRESS_PORT", str(self.endpoints.ingress)),
+            ("APP_PORT", str(self.endpoints.app)),
+            (
+                "TAILNET_LISTEN",
+                ""
+                if self.profile == "apk"
+                else f"listen {config['tailnet_ip']}:{self.endpoints.ingress} ssl;",
+            ),
         ):
             template = template.replace(f"@{key}@", value)
         write_private(self.state / "run/nginx.conf", template)
@@ -1050,6 +1102,8 @@ class Runtime:
         )
 
     def _spawn(self, name: str, command: list[str], env: dict | None = None) -> None:
+        if self.profile == "apk":
+            raise RuntimeFailure("APK service ownership is unproved; launch refused")
         process = subprocess.Popen(
             command,
             cwd=self.source,
@@ -1111,11 +1165,16 @@ class Runtime:
 
     def _ready(self, config: dict) -> bool:
         legacy_ready = (
-            self._request("https://localhost:8001/api/v1/readiness", tls=True)
-            and self._request(
-                f"https://{config['tailnet_ip']}:8001/api/v1/readiness", tls=True
+            self._request(
+                f"https://localhost:{self.endpoints.ingress}/api/v1/readiness", tls=True
             )
-            and self._request("http://127.0.0.1:4097/health", token=True)
+            and self._request(
+                f"https://{config['tailnet_ip']}:{self.endpoints.ingress}/api/v1/readiness",
+                tls=True,
+            )
+            and self._request(
+                f"http://127.0.0.1:{self.endpoints.pi}/health", token=True
+            )
         )
         if not legacy_ready or not self.tailnet_config():
             return legacy_ready
@@ -1184,7 +1243,32 @@ class Runtime:
         finally:
             connection.close()
 
+    def _check_endpoints(self, config: dict) -> None:
+        addresses = [("127.0.0.1", port) for port in self.endpoints]
+        if self.profile == "termux":
+            addresses.insert(0, (config["tailnet_ip"], self.endpoints.ingress))
+        for address, port in addresses:
+            with socket.socket() as probe:
+                try:
+                    probe.bind((address, port))
+                except OSError as error:
+                    raise RuntimeFailure(
+                        f"Cannot bind {address}:{port}; check existing listeners"
+                    ) from error
+
     def run(self) -> None:
+        if self.profile == "apk":
+            # The inherited channel is custody, not a public admission switch.
+            # Production owner currently refuses absent C/A and complete helper
+            # accounting, before this consumer can initialize or spawn anything.
+            try:
+                from apk_owner import require_launch
+
+                require_launch()
+            except (ImportError, OSError, ValueError) as error:
+                raise RuntimeFailure(
+                    "APK native owner admission unavailable"
+                ) from error
         with self._file_lock("supervisor", blocking=False):
             for sig in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(sig, lambda _signum, _frame: self.shutdown.set())
@@ -1216,22 +1300,7 @@ class Runtime:
                             raise RuntimeFailure(
                                 f"Missing runtime dependency: {binary}; run Android install"
                             )
-                    # Bind validation proves VPN startup order without widening interfaces.
-                    for address, port in (
-                        (config["tailnet_ip"], 8001),
-                        ("127.0.0.1", 8001),
-                        ("127.0.0.1", 8000),
-                        ("127.0.0.1", 4097),
-                        ("127.0.0.1", 5433),
-                        ("127.0.0.1", 5434),
-                    ):
-                        with socket.socket() as probe:
-                            try:
-                                probe.bind((address, port))
-                            except OSError as error:
-                                raise RuntimeFailure(
-                                    f"Cannot bind {address}:{port}; connect Tailscale and check existing listeners"
-                                ) from error
+                    self._check_endpoints(config)
                     self._supervising = True
                     self._stage("secrets")
                     self._secrets()
@@ -1240,15 +1309,20 @@ class Runtime:
                 with self.recovery_lock(), self.lock():
                     self._stage("runtime configuration")
                     self._write_runtime_config(config)
-                    self._cluster("metadata", 5433)
+                    self._cluster("metadata", self.endpoints.metadata)
                     self._bootstrap(
                         "metadata",
-                        5433,
+                        self.endpoints.metadata,
                         "schemii_metadata_app",
                         "metadata_app_password",
                     )
-                    self._cluster("target", 5434)
-                    self._bootstrap("target", 5434, "schemii_target", "target_password")
+                    self._cluster("target", self.endpoints.target)
+                    self._bootstrap(
+                        "target",
+                        self.endpoints.target,
+                        "schemii_target",
+                        "target_password",
+                    )
                     environment = self._environment(config)
                     self._stage("Pi sidecar start")
                     self._spawn(
@@ -1258,7 +1332,7 @@ class Runtime:
                     )
                     self._wait(
                         lambda: self._request(
-                            "http://127.0.0.1:4097/health", token=True
+                            f"http://127.0.0.1:{self.endpoints.pi}/health", token=True
                         ),
                         "pi",
                     )
@@ -1273,13 +1347,15 @@ class Runtime:
                             "--host",
                             "127.0.0.1",
                             "--port",
-                            "8000",
+                            str(self.endpoints.app),
                             "--no-access-log",
                         ],
                         environment,
                     )
                     self._wait(
-                        lambda: self._request("http://127.0.0.1:8000/api/v1/readiness"),
+                        lambda: self._request(
+                            self.endpoints.backend + "/api/v1/readiness"
+                        ),
                         "app",
                     )
                     self._stage("HTTPS configuration")
@@ -1459,6 +1535,10 @@ class Runtime:
                 )
 
     def stop(self, timeout: float = 90) -> dict:
+        if self.profile == "apk":
+            raise RuntimeFailure(
+                "Use the attached native owner; APK process ownership is UNKNOWN"
+            )
         # A starting supervisor owns lifecycle/recovery while initializing.
         # Signal that validated owner before asking for either lock. An older
         # preview may remain inside an unbounded helper; never hide this behind
@@ -1504,6 +1584,10 @@ class Runtime:
             return {"state": "stopped", "ready": False}
 
     def assert_stopped(self, *, include_native: bool = True) -> None:
+        if self.profile == "apk":
+            raise RuntimeFailure(
+                "APK stopped ownership is UNKNOWN; retained state preserved"
+            )
         if include_native:
             native = read_json(self.state / "run/native-tailnet.json")
             if any(is_current(native.get(name)) for name in ("owner", "proxy")):
@@ -1528,6 +1612,10 @@ class Runtime:
 
     def _assert_startable(self) -> None:
         """Admit PostgreSQL's own stale-lock/WAL recovery only with ownership proof."""
+        if self.profile == "apk":
+            raise RuntimeFailure(
+                "APK recovery requires native C/A and existing two-cluster identity"
+            )
         status = read_json(self.state / "run/status.json")
         identities = [
             status.get("supervisor"),
@@ -1568,6 +1656,16 @@ class Runtime:
             # own stale lock and performs normal WAL recovery during startup.
 
     def status(self) -> dict:
+        if self.profile == "apk":
+            return {
+                "schema": 1,
+                "state": "admission-blocked",
+                "ownership": "UNKNOWN",
+                "ready": False,
+                "device_acceptance": "pending",
+                "services": {},
+                "reason": "Use native owner status; no proc/group inference",
+            }
         value = read_json(self.state / "run/status.json")
         if not value:
             return {
@@ -1649,7 +1747,7 @@ class Runtime:
             "physical_device_acceptance": "pending",
             "security_profile": "trusted-owner",
             "native_tailnet_verified": bool(self._native_tailnet_identity())
-            if self.tailnet_config()
+            if self.profile == "termux" and self.tailnet_config()
             else False,
             "pending": [
                 "authenticated API family acceptance",
@@ -1680,7 +1778,7 @@ class Runtime:
             "account_setup_token": self._secret("account_setup_token"),
             "target_connection": {
                 "host": "127.0.0.1",
-                "port": 5434,
+                "port": self.endpoints.target,
                 "database": "schemii",
                 "username": "schemii_target",
                 "password": self._secret("target_password"),
@@ -1697,7 +1795,7 @@ class Runtime:
         def connect():
             return psycopg.connect(
                 host="127.0.0.1",
-                port=5433,
+                port=self.endpoints.metadata,
                 dbname="schemii",
                 user="schemii_metadata_app",
                 password=self._secret("metadata_app_password"),
@@ -1868,11 +1966,17 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "internal-bootstrap":
             if args.cluster == "metadata":
                 runtime._bootstrap_database(
-                    "metadata", 5433, "schemii_metadata_app", "metadata_app_password"
+                    "metadata",
+                    runtime.endpoints.metadata,
+                    "schemii_metadata_app",
+                    "metadata_app_password",
                 )
             else:
                 runtime._bootstrap_database(
-                    "target", 5434, "schemii_target", "target_password"
+                    "target",
+                    runtime.endpoints.target,
+                    "schemii_target",
+                    "target_password",
                 )
             result = {"bootstrap": args.cluster, "completed": True}
         elif args.command == "status":
