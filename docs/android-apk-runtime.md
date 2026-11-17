@@ -725,9 +725,12 @@ No telemetry persistence/export or durable journal protocol is introduced here.
 
 The actual native owner reserves a separate socketpair before its worker starts,
 while retaining its sole selected-directory lease and responsive Stop flag. The
-pair is deliberately unexported. Java SCH1 control envelopes and Python's FD3 JSON
-refusal adapter are **different, disconnected protocols**. A future actual native
-custodian must create/transfer only the designated guest lease and perform an
+pair is deliberately unexported. Java calls JNI scalar methods; the native
+internal pair carries four native-endian uint32 fields. Python's FD3 refusal
+adapter uses 16-byte big-endian SCH1 frames (`struct.Struct("!4sIII")`), while
+the actor channel uses 224-byte big-endian SCA1 frames. These are **disconnected
+protocols**. A future actual native custodian must create/transfer only the
+designated guest lease and perform an
 explicit versioned conversion after genuine C/A and durable admission. No parsed
 JSON, Java flag, signer/UID, environment FD number or `ac_proot_bind` source fixture
 provides C/A or changes production admission. Managed executable `main` refuses

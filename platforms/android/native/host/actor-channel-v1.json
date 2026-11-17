@@ -32,5 +32,5 @@
     "future_python": "0,1,2 plus designated guest lease only; no actor, journal, predecessor or owner controls; subprocesses close guest lease"
   },
   "authority": "NONE: source producer only, APK C/A and all production births unconditionally refused",
-  "conversion": "Java SCH1 control envelopes and Python FD3 refusal JSON are disconnected. Future native custodian must perform an explicit guest-lease versioned conversion after actual C/A/journal admission; no current handshake"
+  "conversion": "Java uses JNI scalar methods; the native internal pair carries four native-endian uint32 fields. Python FD3 uses 16-byte big-endian SCH1 frames (!4sIII); actor frames use 224-byte big-endian SCA1. These protocols are disconnected and production launch remains REFUSED. Future native custody requires an explicit versioned guest-lease conversion after genuine C/A and durable journal admission; no current handshake"
 }

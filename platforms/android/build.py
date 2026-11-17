@@ -247,8 +247,10 @@ def native(cache, out, abi):
     proot_build = build / "proot-src"
     shutil.copytree(cache / "proot-src/src", proot_build)
     prepare_actor_source(cache, proot_build)
-    with (proot_build / "GNUmakefile").open("a") as recipe:
-        recipe.write("\nOBJECTS += actor_channel.o\n")
+    recipe = proot_build / "GNUmakefile"
+    # GNU Make expands proot's prerequisites while parsing the target. Add the
+    # actor object before that expansion so the real $^ link inputs include it.
+    recipe.write_text("OBJECTS += actor_channel.o\n" + recipe.read_text())
     # Upstream ashmem_memfd.c omits string.h; keep the adaptation source-visible.
     run(
         "patch", "-p1", "-i", HERE / "native/proot-string-header.patch", cwd=proot_build

@@ -100,6 +100,61 @@ def compile_control(tmp_path, source):
     subprocess.run([str(output)], check=True, timeout=10)
 
 
+def test_native_recipe_actor_link_inputs(patched, tmp_path, monkeypatch):
+    """Parse the actual prepared pinned Makefile; never compile or run a guest."""
+    spec = importlib.util.spec_from_file_location(
+        "actor_recipe_build", ROOT / "platforms/android/build.py"
+    )
+    assert spec and spec.loader
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    original_run = builder.run
+    observed = []
+
+    def inspect_run(*args, **kwargs):
+        if str(args[0]) == "patch":
+            return original_run(*args, **kwargs)
+        if str(args[0]) != "make":
+            return None  # NDK compiler and archiver are outside this graph control.
+        directory = kwargs["cwd"]
+        with (directory / "GNUmakefile").open("a") as output:
+            output.write("\n.PHONY: actor_graph_query\nactor_graph_query: ;\n")
+        result = subprocess.run(
+            [
+                "make",
+                "-qp",
+                "-rR",
+                "actor_graph_query",
+                "CC=true",
+                "LD=true",
+                "GIT=true",
+                "PROOT_UNBUNDLE_LOADER=/nonexistent",
+            ],
+            cwd=directory,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        assert result.returncode == 0, result.stderr
+        target = [
+            line for line in result.stdout.splitlines() if line.startswith("proot:")
+        ]
+        assert len(target) == 1
+        assert target[0].split().count("actor_channel.o") == 1
+        # GNU Make expands the real recipe's $^ from these target prerequisites.
+        makefile = (directory / "GNUmakefile").read_text()
+        assert "$(LINK)" in makefile and "$^" in makefile
+        observed.append(target[0])
+        (directory / "proot").write_bytes(b"graph-control-only")
+        (directory / "loader/loader").write_bytes(b"graph-control-only")
+        return None
+
+    monkeypatch.setattr(builder, "run", inspect_run)
+    donor = Path(os.environ["SCHEMII_ACTOR_DONOR"])
+    builder.native(donor.parent, tmp_path / "native-out", "x86_64")
+    assert len(observed) == 1
+
+
 def test_actual_clone_entry_cases(patched, tmp_path):
     text = (patched / "syscall/enter.c").read_text()
     cases = text[

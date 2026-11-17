@@ -2533,7 +2533,7 @@
     "inputs": {
       "platforms/android/native/host/actor_channel.c": "d14c5f59395464d1ad0904c16a26546c12e7a5874c10a48f9113149485a3c5a9",
       "platforms/android/native/host/actor_channel.h": "a53acdcea161fbef2264d1fda11e10b7ea14cc3d860f0291a4e318a9fb46bea9",
-      "platforms/android/native/host/actor-channel-v1.json": "f20eddb41ed559719f2407591b91e16665696b2a36594895a1dd4f9b5e0cd3a2",
+      "platforms/android/native/host/actor-channel-v1.json": "065e7c4c75ff8d04b6156b116f8c0d29404ae4be2f5c32f80993dc34fa6f441e",
       "platforms/android/native/proot-actor-channel.patch": "46711b14691d186b245f4b9dc1a19d9ea1dc60917606c0cb334b375f8fd3ab0a"
     },
     "donor_inputs": {
