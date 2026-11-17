@@ -387,19 +387,43 @@ schemii enable-boot
 
 Use `schemii disable-boot` to remove only Schemii's own boot script. Enable Tailscale's
 always-on VPN and exempt **both Termux and Tailscale** from battery optimization
-using the phone's Settings. Boot startup needs the phone's first unlock and a
-ready VPN. The generated script runs `schemii wait-network`, which waits up to
-120 seconds for the configured Tailscale IPv4 address to become bindable, then
-calls `schemii start` once. It uses the existing `configure` network settings in
-the retained userland; no separate boot address is needed. A timeout or invalid
-configuration stops before starting services. Inspect the Termux:Boot failure,
-connect Tailscale and run `schemii start`; startup failures are not retried.
-After upgrading, rerun `schemii enable-boot` to refresh an existing owned script.
+using the phone's Settings. After upgrading, rerun `schemii enable-boot` to refresh
+an existing owned script. The generated script runs `schemii wait-network`, which
+waits up to 120 seconds for the configured Tailscale IPv4 address to become
+bindable, then calls `schemii start --foreground` once. The gate uses the existing
+`configure` network settings. On gate failure, the task exits nonzero before
+starting services. Complete initial configuration and any tailnet enrollment
+before relying on boot startup.
 
-Termux:Boot dispatches scripts independently, so filename sorting does not
-guarantee one script finishes before another. Schemii's script owns its VPN gate
-and start sequence. First unlock remains required; this is not pre-unlock or
-unattended-reboot acceptance.
+Previously the boot task exited after launching the backend. Termux can stop
+its foreground service when it has no tasks, sessions or wake lock. After verified
+readiness, the updated boot task stays attached to the Schemii supervisor it
+started, so Termux has a running task when the screen locks or the UI closes.
+This path does not request a wake lock. The task reports attachment or an
+already-ready backend. Attachment and the supervisor's eventual exit status
+are recorded in the private `~/.local/share/schemii-android/launcher.log`.
+Use `schemii status` for current service readiness, `schemii logs` for component
+diagnostics, and `schemii stop` for graceful shutdown. Use
+`schemii start --foreground` from an open Termux session to see the task output
+directly during a controlled startup. Startup and supervisor failures are
+surfaced without retrying. A running backend started by another command is
+left in place. [Termux foreground service lifecycle](https://github.com/termux/termux-app/blob/master/app/src/main/java/com/termux/app/TermuxService.java)
+
+Termux:Boot dispatches scripts independently. A site-specific SSH boot hook
+should continue to use its own VPN readiness gate and existing tailnet-only,
+key-authenticated configuration. The Schemii boot task keeps their shared
+Termux service active while its own supervisor is running, but does not
+supervise the SSH daemon. Check pinned SSH reachability and Schemii HTTPS
+separately. Successful SSH startup alone does not establish backend readiness.
+[Termux:Boot dispatch](https://github.com/termux/termux-boot/blob/master/app/src/main/java/com/termux/boot/BootReceiver.java)
+
+### First unlock and ordinary screen lock
+
+After a reboot, the PIN is required once before Android makes Termux's private
+credential-encrypted files available and dispatches regular boot startup. An
+ordinary screen lock after that leaves these files available. This configuration
+cannot start SSH or Schemii before the first unlock after a reboot.
+[Android Direct Boot and credential-encrypted storage](https://developer.android.com/privacy-and-security/direct-boot)
 
 After an interrupted run, the guest verifies each retained PostgreSQL lock
 against that cluster's exact guest path and previously captured, now-dead PID.
@@ -407,9 +431,12 @@ PostgreSQL keeps responsibility for removing its own stale lock and recovering
 WAL. Unknown, live or symlinked locks are refused with retained files preserved;
 do not delete locks to force startup.
 
-A wake lock or process supervisor cannot guarantee that Android keeps the
-backend alive. Doze, memory pressure and firmware process limits still need
-device testing. Begin with a small personal workload, keep connection/concurrency
+The foreground task is subject to Android process and network restrictions.
+Verify startup after first unlock with the Termux UI closed, then check SSH and
+trusted HTTPS during ordinary relock, extended idle, and VPN reconnection.
+Confirm graceful `schemii stop` also ends the attached boot task. Android
+force-stop and complete Termux process loss are outside this boot task's recovery
+path. Begin with a small personal workload, keep connection and concurrency
 budgets bounded, and measure memory, temperature, storage and battery behavior
 before relying on unattended availability.
 
