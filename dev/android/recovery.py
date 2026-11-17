@@ -1,8 +1,8 @@
-"""Private cold snapshots for the Debian 13/ARM64 Android preview.
+"""Private cold snapshots for Android and a separate logical transfer contract.
 
-This is a physical PostgreSQL 17 backup, not a portable SQL export.  Verification
-checks integrity and safe contents; it is deliberately not a database-restore
-acceptance claim.  Never restore a backup from an untrusted source.
+The cold snapshot requires the matching Debian 13/ARM64 PostgreSQL 17 runtime.
+Logical transfers use native PostgreSQL dumps independently of the cold format.
+File verification checks integrity, without executing any input SQL.
 """
 
 from __future__ import annotations
@@ -24,6 +24,11 @@ import tempfile
 from typing import Any, ContextManager, Protocol
 
 FORMAT = "schemii-android-cold-backup-v1"
+PORTABLE_FORMAT = "schemii-portable-logical-v1"
+PORTABLE_POSTGRES_MAJOR = 17
+PORTABLE_CLUSTERS = ("metadata", "target")
+PORTABLE_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
+MAINTENANCE_DATABASES = frozenset({"postgres", "template0", "template1"})
 PROFILE = "debian13-postgresql17-v1"
 ARCHIVE = "state.tar.gz"
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -739,3 +744,163 @@ def restore(runtime: RecoveryRuntime, bundle: Path | str) -> dict[str, object]:
         result = _summary(root, manifest)
         result.update({"restored_state": str(state), "runtime_stopped": True})
         return result
+
+
+def _portable_paths(clusters: object) -> dict[str, set[str]]:
+    if not isinstance(clusters, dict) or set(clusters) != set(PORTABLE_CLUSTERS):
+        raise RecoveryError(
+            "Portable backup requires separate metadata and target clusters"
+        )
+    paths = {"secrets": set(SECRETS)}
+    for cluster in PORTABLE_CLUSTERS:
+        identity = clusters[cluster]
+        if not isinstance(identity, dict) or set(identity) != {
+            "bootstrap_user",
+            "app_user",
+            "primary_database",
+            "databases",
+        }:
+            raise RecoveryError("Invalid portable cluster identity")
+        databases = identity["databases"]
+        if not isinstance(databases, list) or not 1 <= len(databases) <= 32:
+            raise RecoveryError("Invalid portable database inventory")
+        bootstrap = identity["bootstrap_user"]
+        app_user = identity["app_user"]
+        primary = identity["primary_database"]
+        if any(
+            not isinstance(name, str) or not PORTABLE_IDENTIFIER.fullmatch(name)
+            for name in (*databases, bootstrap, app_user, primary)
+        ):
+            raise RecoveryError("Invalid portable PostgreSQL identifier")
+        if (
+            bootstrap == app_user
+            or bootstrap.startswith("pg_")
+            or app_user.startswith("pg_")
+            or primary not in databases
+            or databases != sorted(set(databases))
+            or MAINTENANCE_DATABASES.intersection(databases)
+            or (cluster == "metadata" and len(databases) != 1)
+        ):
+            raise RecoveryError("Invalid portable database or login identity")
+        paths[cluster] = {"roles.sql", *(f"{database}.dump" for database in databases)}
+    return paths
+
+
+def _portable_payload(
+    root: Path, paths: dict[str, set[str]], *, sealed: bool
+) -> dict[str, str]:
+    expected = set(paths)
+    if sealed:
+        expected.add("manifest.json")
+    if {path.name for path in root.iterdir()} != expected:
+        raise RecoveryError("Portable backup is incomplete or has unexpected entries")
+    hashes = {}
+    for directory, names in paths.items():
+        parent = root / directory
+        _private_path(parent, directory=True)
+        if {path.name for path in parent.iterdir()} != names:
+            raise RecoveryError(
+                "Portable backup is missing payloads or has unexpected entries"
+            )
+        for name in sorted(names):
+            path = parent / name
+            if not _private_path(path, directory=False).st_size:
+                raise RecoveryError("Portable backup has an empty payload")
+            if directory == "secrets":
+                secret = _read_private(path, 4096)
+                try:
+                    value = secret.decode().removesuffix("\n")
+                except UnicodeDecodeError as error:
+                    raise RecoveryError("Portable secret is not UTF-8") from error
+                if (
+                    not value
+                    or value != value.strip()
+                    or any(character in value for character in ("\r", "\n", "\0"))
+                ):
+                    raise RecoveryError("Portable secret must be one nonempty line")
+                _validate_content(f"secrets/{name}", secret)
+            if name.endswith(".dump"):
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(descriptor, "rb") as stream:
+                    if stream.read(5) != b"PGDMP":
+                        raise RecoveryError(
+                            "Portable database requires a custom PostgreSQL dump"
+                        )
+            hashes[f"{directory}/{name}"] = _digest(path)
+    return hashes
+
+
+def _portable_root(bundle: Path | str) -> Path:
+    root = Path(os.path.abspath(bundle))
+    _plain_parents(root)
+    _private_path(root, directory=True)
+    return root
+
+
+def seal_portable(bundle: Path | str, clusters: dict[str, Any]) -> None:
+    """Seal a private staging directory populated by a quiesced export."""
+    root = _portable_root(bundle)
+    manifest = {
+        "format": PORTABLE_FORMAT,
+        "postgres_major": PORTABLE_POSTGRES_MAJOR,
+        "clusters": clusters,
+        "sha256": _portable_payload(root, _portable_paths(clusters), sealed=False),
+    }
+    descriptor = os.open(
+        root / "manifest.json",
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(manifest, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+
+
+def _portable_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise RecoveryError("Duplicate keys in portable backup manifest")
+    return result
+
+
+def verify_portable(bundle: Path | str) -> dict[str, Any]:
+    """Validate a trusted transfer bundle before staging a logical restore."""
+    root = _portable_root(bundle)
+    try:
+        manifest = json.loads(
+            _read_private(root / "manifest.json", MAX_MANIFEST_BYTES),
+            object_pairs_hook=_portable_json_object,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as error:
+        raise RecoveryError("Invalid portable backup manifest") from error
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"format", "postgres_major", "clusters", "sha256"}
+        or manifest["format"] != PORTABLE_FORMAT
+        or type(manifest["postgres_major"]) is not int
+        or manifest["postgres_major"] != PORTABLE_POSTGRES_MAJOR
+    ):
+        raise RecoveryError("Unsupported portable PostgreSQL backup format")
+    paths = _portable_paths(manifest["clusters"])
+    if _portable_payload(root, paths, sealed=True) != manifest["sha256"]:
+        raise RecoveryError("Portable backup checksum failed")
+    return manifest
+
+
+def portable_roles_for_restore(roles_sql: bytes, bootstrap_user: str) -> bytes:
+    """Prepare a native roles dump for a cluster initialized with the same role.
+
+    PostgreSQL treats grants by its initial bootstrap role specially. Keeping
+    that role as the destination's initial role preserves grantor identities.
+    Omit only its redundant CREATE, and still replay its ALTER and grants.
+    """
+    if not PORTABLE_IDENTIFIER.fullmatch(bootstrap_user):
+        raise RecoveryError("Invalid portable bootstrap identifier")
+    statement = f'CREATE ROLE "{bootstrap_user}";\n'.encode("ascii")
+    lines = roles_sql.splitlines(keepends=True)
+    if lines.count(statement) != 1:
+        raise RecoveryError(
+            "Expected one quoted bootstrap CREATE ROLE in pg_dumpall export"
+        )
+    lines.remove(statement)
+    return b"".join(lines)
