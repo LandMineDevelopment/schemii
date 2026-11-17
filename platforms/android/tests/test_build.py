@@ -451,6 +451,7 @@ class ClosedHostControls(unittest.TestCase):
             text = target.read_text()
             for content in entries.values():
                 self.assertIn(hashlib.sha256(content).hexdigest(), text)
+            self.assertIn('#define SCHEMII_OBSERVATION_SOURCE "' + "b" * 40 + '"', text)
             self.assertIn('{"lib/arm64-v8a/libschemii_owner.so",NULL}', text)
             self.assertNotIn("HostAnchors", text)
 
@@ -482,6 +483,23 @@ class ClosedHostControls(unittest.TestCase):
                     ValueError, "Closed content inventory refused"
                 ):
                     build.closed_pins(out, content, "a" * 64, {"commit": "b" * 40})
+                self.assertFalse((out / "closed_pins.h").exists())
+
+    def test_closed_observation_identity_requires_fixed_commit(self):
+        entries = {
+            "AndroidManifest.xml": b"manifest",
+            "resources.arsc": self.RESOURCE_TABLE,
+            "classes.dex": b"dex",
+            "assets/closed-build.json": b"binding",
+        }
+        for commit in (None, "mutable", "a" * 64):
+            with (
+                self.subTest(commit=commit),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                out = Path(directory)
+                with self.assertRaisesRegex(ValueError, "immutable source identity"):
+                    build.closed_pins(out, entries, "a" * 64, {"commit": commit or ""})
                 self.assertFalse((out / "closed_pins.h").exists())
 
     def test_closed_refuses_extensions_before_tools(self):

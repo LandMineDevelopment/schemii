@@ -14,6 +14,13 @@ public final class InstalledSource {
     private InstalledSource() {}
     private static final long MAX_FILE = 16L * 1024 * 1024;
     private static final long MAX_TOTAL = 128L * 1024 * 1024;
+    // Thread-local finite observation only. It cannot provide native pins/trust.
+    private static final ThreadLocal<Integer> frameworkPhase = new ThreadLocal<Integer>();
+    static int frameworkReason() {
+        Integer phase = frameworkPhase.get();
+        frameworkPhase.remove(); // consume: a later failed invocation cannot inherit an old phase
+        return phase == null ? 0 : phase;
+    }
 
     /** Fixed reviewed framework edge. Observations only; native pins decide. */
     static final class Framework {
@@ -23,16 +30,20 @@ public final class InstalledSource {
         }
     }
     static Framework framework(android.content.Context app) throws Exception {
+        frameworkPhase.set(1); // exact framework Application
         if (app == null || app.getApplicationContext() != app
             || !app.getClass().getName().equals("android.app.Application"))
             throw new IOException("Framework application refused");
+        frameworkPhase.set(2); // CE selection
         StorageProfile.select(app, false);
+        frameworkPhase.set(3); // fixed loader graph
         ClassLoader loader = app.getClassLoader();
         if (loader == null || !loader.getClass().getName().equals("dalvik.system.PathClassLoader")
             || loader.getParent() == null || !loader.getParent().getClass().getName().equals("java.lang.BootClassLoader")
             || HostActivity.class.getClassLoader() != loader || HostService.class.getClassLoader() != loader || NativeOwner.class.getClassLoader() != loader
             || InstalledSource.class.getClassLoader() != loader || StorageProfile.class.getClassLoader() != loader)
             throw new IOException("Loader refused");
+        frameworkPhase.set(4); // framework package query, including thrown errors
         String name = app.getPackageName();
         android.content.pm.PackageManager pm = app.getPackageManager();
         android.content.pm.PackageInfo p = pm.getPackageInfo(name,
@@ -40,6 +51,7 @@ public final class InstalledSource {
             | android.content.pm.PackageManager.GET_ACTIVITIES | android.content.pm.PackageManager.GET_SERVICES
             | android.content.pm.PackageManager.GET_PROVIDERS | android.content.pm.PackageManager.GET_RECEIVERS
             | android.content.pm.PackageManager.GET_INSTRUMENTATION | android.content.pm.PackageManager.GET_SHARED_LIBRARY_FILES);
+        frameworkPhase.set(5); // finite closed package/component guard
         android.content.pm.ApplicationInfo a = p.applicationInfo;
         if (a == null || !name.equals(p.packageName) || !name.equals(a.packageName)
             || a.targetSdkVersion != 36 || a.uid != android.os.Process.myUid()
@@ -60,15 +72,20 @@ public final class InstalledSource {
             || p.services[0].exported || !name.equals(p.services[0].processName)
             || p.signingInfo == null || p.signingInfo.hasMultipleSigners())
             throw new IOException("Closed package refused");
+        frameworkPhase.set(6); // sole current signer
         android.content.pm.Signature[] signers = p.signingInfo.getApkContentsSigners();
         if (signers == null || signers.length != 1) throw new IOException("Current signer refused");
+        frameworkPhase.set(7); // package object consistency
         android.content.pm.ApplicationInfo current = app.getApplicationInfo();
         if (a.sourceDir == null || !a.sourceDir.equals(a.publicSourceDir)
             || !a.sourceDir.equals(current.sourceDir) || a.nativeLibraryDir == null
             || !a.nativeLibraryDir.equals(current.nativeLibraryDir) || a.dataDir == null
             || !a.dataDir.equals(app.getDataDir().getAbsolutePath())) throw new IOException("Package objects refused");
-        return new Framework(name,hex(MessageDigest.getInstance("SHA-256").digest(signers[0].toByteArray())),
+        frameworkPhase.set(8); // public signer observation formatting
+        Framework result = new Framework(name,hex(MessageDigest.getInstance("SHA-256").digest(signers[0].toByteArray())),
             a.sourceDir,a.dataDir,a.nativeLibraryDir + "/libschemii_owner.so");
+        frameworkPhase.set(9); // observation returned, no authority implied
+        return result;
     }
 
     static String safe(String name) throws IOException {
