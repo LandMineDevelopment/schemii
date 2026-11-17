@@ -96,8 +96,8 @@ on that model can list command slots or group the slot count by
 `verification` result aggregated at the same grain. Use the Console recipes
 for weighted fractions and percentiles. Averages of row-level rates weight
 small and large populations equally. Publish no model or report with private
-evidence references. The initial disposable check covers Console and the shared
-reader, while the saved-model and report walkthrough remains an integration gate.
+evidence references. The saved pack described below supplies the initial
+command-slot report and a separate run-grain Explore view.
 
 ## Structured assistant and API reads
 
@@ -216,8 +216,121 @@ scope, one invalid-source sample exclusion, and two eligible first failures for
 the highest-ranked case, one observed recovery. The attempt trace retains two
 failed observations before the passing retry.
 
-Independent current-head acceptance, authenticated Schemii/API and report
-walkthroughs, and a decision demonstrated with authorized natural evidence are
-still due. Schedule actual import/replay verification before natural analysis.
-Measure query plans on a bounded real sample before deciding whether larger
-windows need storage or query tuning.
+Independent current-head acceptance and mounted Schemii walkthroughs remain
+separate gates. Verify actual import/replay before natural analysis. Measure
+query plans on a bounded real sample before deciding whether larger windows
+need storage or query tuning.
+
+## Saved CI Verification model and CI Health and Performance dashboard
+
+The portable pack uses the existing Schemoo and Schemer saved-definition APIs.
+It stores presentation and scope only. PostgreSQL retains the underlying facts
+and business rules. The pack binds to one reader connection, one repository UUID,
+one installation UUID and one half-open UTC run-start window. Both roots use
+the same fixed filters. Scope IDs are inputs to the model rule and stay out of
+report fields and ad hoc report filters. There are no joins between the roots.
+Use the **CI runs** starting object in Schemoo for run counts, including runs
+with no visible commands. The dashboard uses the **Command slots** starting
+object and every tile counts or summarizes that grain.
+
+| Field or group | Business type and use |
+| --- | --- |
+| `repository_id`, `installation_id` | UUID scope keys. Use both in fixed scope rules. A repository name, branch or SHA cannot substitute for either key. |
+| `id`, `run_id`, `slot_key`, `case_key`, `attempt_number` | Internal fact identities and ordinals. A slot is one current command in one qualified run. A first attempt is ordinal zero for a qualified command/case. Run count uses one row per current run, never a distinct timestamp or a count of slot rows. |
+| `started_at`, `run_started_at` | Typed timestamp for the UTC window. Missing run start places a fact outside the window; use `health` for those records. `finished_at`, `observed_at`, `as_of` keep their separate meanings in Console or authorized detail. |
+| `mode`, `outcome`, `run_outcome`, `completeness`, `run_completeness` | Contracted producer codes. See the label map below. Preserve SQL NULL on fields where the producer did not assert a value. |
+| `acceptance`, `producer_acceptance` | Nullable boolean. A producer assertion is independent of run status and observed slot evidence. |
+| `command_key` | Registered command key such as `python-behavior`. Group by the stable code. Raw command lines are outside the fact contract. `profile`, `project`, `shard`, cohort, inventory and policy identifiers remain detail for cohort diagnosis. The portable dashboard provides no comparable-cohort claim. |
+| `disposition`, `verification_state`, `case_coverage_state`, `slot_coverage_state`, `duration_state` | Controlled view codes. The dimensions and counts inherit their distinctions from migration 002. No report expression reclassifies a row. |
+| `observed_slots`, `executed_slots`, `pending_slots`, `reused_slots`, `excluded_slots` | Integer coverage fields stored at the run-view grain. Sum only at that grain. Visible slots do not establish an independent required-obligation denominator. |
+| `expected_cases`, `observed_cases`, `missing_case_observations` | Integer per-slot counts. NULL expected means unreported inventory. NULL observed on a non-executed slot means no new observation. A case count match alone does not prove membership. |
+| `eligible_first_attempt_cases`, `excluded_first_attempt_cases`, `unknown_first_attempt_cases` | Observed first-attempt denominator and separate exclusions and missing ordinals. Summing these across mutually exclusive slots preserves the slot/case grain. Pending slots carry no eligible attempts. |
+| `first_passes`, `first_failures`, `cases_with_retries`, `recovered_first_failures` | Integer observed numerators or counts. A recovery counts once for an eligible first failure with a later observed pass. Rates stay in the canonical SQL recipes and views. |
+| `duration_ms`, `wall_elapsed_ms`, phase times | Recorded monotonic milliseconds are separate from wall-clock intervals. The dashboard reports count and maximum only for `duration_state = 'measured'`, by command and outcome. NULL phase measurements remain unknown. |
+| Evidence refs and digests, source/index SHAs, revision pins, batch and donor IDs | Authorized trace detail. The fixed model allowlist excludes them from fields and report filters. Display names, descriptions and code labels are presentation metadata. Raw evidence text, credentials, paths, and sensitive diagnostics never enter the pack. |
+| Import batch source, status, reason, timestamps and accepted/rejected totals | Closed source, status and reason codes with typed timestamps and counts at import-operation grain. Use `health` and `batches`. Imported row totals are never execution totals. |
+| Attempt outcome and phase values | The attempt outcome is a closed code at command/case/ordinal grain. Attempts can be passed, failed, skipped, cancelled or timed out under the storage contract. Detailed attempt identities and nullable timing phases remain in the reader trace. |
+
+The catalog can show names and types for columns the model leaves unexposed.
+Exposure constrains model queries. PostgreSQL reader grants and application
+authorization still govern access outside this model.
+
+### Code and label map
+
+The views return stable codes. Use these labels when reading the report or
+describing an export. The report keeps the codes for filtering and grouping.
+
+| Codes | Labels and business meaning |
+| --- | --- |
+| `selected`, `feedback`, `full` | Selected verification, feedback-only execution, full recipe requested. Mode is distinct from completeness. |
+| `passed`, `feedback-passed`, `failed`, `source-changed` | Producer passed, feedback passed, producer failed, source changed during execution. |
+| `running`, `pending`, `incomplete`, `cancelled` | In progress, pending, incomplete evidence, cancelled. |
+| `unknown`, `complete`, `partial`, `pending`, `cancelled` (run completeness) | Unknown completeness, complete, partial, pending, cancelled. |
+| `executed`, `reused`, `pending`, `excluded` (disposition) | Executed, reused from a pinned donor, pending, explicitly excluded. Reuse adds no new execution sample. |
+| `fresh-passed`, `failed`, `invalid-source`, `unknown` (verification) | Original pass, execution failed, unstable source, no classified outcome. Other recorded disposition or incomplete/skip/cancel states remain separate. |
+| `not-executed`, `unknown-inventory`, `count-mismatch`, `missing-observations`, `missing-first-attempts`, `empty-inventory`, `count-matches` | No new execution, expected inventory unknown, observed count exceeds expected, observations missing, attempt zero missing, explicit empty inventory, equal observed/expected counts. |
+| `no-visible-slots`, `plan-size-unknown` | No slot rows visible, visible slots with independent plan size unknown. |
+| `measured`, `open`, `unknown`, `invalid-source`, `excluded` (duration) | Measured, open, duration unavailable, invalid source, excluded from execution timing. A measured zero remains a sample. |
+
+### Install and review with the existing APIs
+
+Use an authorized analyst login with product authoring access and the dedicated
+PostgreSQL reader connection. Before writing metadata, select the connection
+and verify its ID, revision, database, `devops` namespace and required views
+through `GET /api/v1/schemoo/catalog?connection_id=…&namespace=devops`.
+Generate the model body with the installed project interpreter:
+
+```bash
+python -m scripts.devops.dashboard_pack model \
+  --connection-id CONNECTION_ID --database DATABASE_NAME \
+  --repository-id REPOSITORY_UUID --installation-id INSTALLATION_UUID \
+  --from 2026-11-12T00:00:00Z --until 2026-11-18T00:00:00Z
+```
+
+1. Submit the JSON to `POST /api/v1/schemoo/models` and read the exact saved
+   model using `GET /api/v1/schemoo/models/{id}`. Use that GET response as the
+   input file to `python -m scripts.devops.dashboard_pack dashboard MODEL.json`.
+2. Submit the dashboard body to `POST /api/v1/schemer/dashboards` and read
+   `GET /api/v1/schemer/dashboards/{id}`. It pins the saved model rules revision.
+   Execute `POST /api/v1/schemer/dashboards/{id}/executions/stream` with the
+   dashboard's `expectedRevision`. Review tile errors and completion limits.
+3. For run-grain Explore, use the **CI runs** starting object or
+   `python -m scripts.devops.dashboard_pack run-explore` for the `explore`
+   body. Plan or execute by saved model ID and `expectedRevision`. Compare
+   this result with `run-coverage`, and the dashboard tiles with
+   `verification` and the measured groups in `slow-commands`.
+
+For repeat-safe application, `dashboard_pack.install_pack(client, scope, ...)`
+accepts an authenticated client implementing ordinary `get` and `post`.
+It checks the explicit live connection revision and uses a deterministic name
+per connection and scope. It fetches saved definitions before reusing them,
+refuses changed or ambiguous matches, and never overwrites a saved revision.
+Use one writer per owner and scope. If a POST loses its acknowledgement,
+reconcile by reading the same scope before another POST. The API provides no
+atomic model/dashboard transaction or create-if-absent key. Generated templates
+contain no session material and never execute SQL themselves.
+
+### Limits and next dependencies
+
+The pack reports observed rows on the selected source. A slot-level
+dashboard has no authoritative run denominator, including runs that produced
+no slots. Run-grain Explore and the `run-coverage` recipe supply that count.
+Showing both grains on one dashboard requires per-tile root selection or an
+additive purpose-built PostgreSQL rollup at an explicit grain. Joined run and
+slot tiles would duplicate run measures.
+
+Keep weighted rates and percentiles in SQL until the reporting platform can
+consume a scoped, versioned aggregate view or saved exact query with named
+numerators, denominators, group coverage and sample counts. An independent
+plan denominator or pending-layer reasons require a typed source-bound
+obligation dataset. Comparable history needs an admitted comparable cohort
+and sample scope. T3 envelopes, effort and turns, issue elapsed and Git churn
+require their own typed producer facts and joins. The pack derives none of
+them from CI receipts.
+
+The opt-in test uses the normal project test runner, the real application ASGI
+routes and authentication, durable disposable PostgreSQL metadata, and a
+separate private socket copy of the verified v2 data. Both HTTP requests and
+result pages run in-process using the normal integration-test transport.
+Mounted HTTPS, browser layout, visibility under the owner's existing account,
+and durable live installation remain separate acceptance checks.
