@@ -639,3 +639,65 @@ Private build logs/receipts and emulator reports live in the owned cache.
 coordinator schedules it. Focused native/package controls do not waive that plan.
 GitHub Actions stays disabled. Keep issue264 and its draft PR open with Refs to
 264/263; no release or merge is authorized here.
+
+## Connected installed-source boundary (issue 266)
+
+The packaged shared-runtime build now includes a private foreground-service
+adapter, a native directory/control lease and compiled source/native/payload
+expectations. This is a **source refusal boundary**, not an executable server
+release. Start verifies the installed nondebuggable target36 package and public
+signer pin, composes the exact committed `assets/shared/` and
+`assets/runtime-source/` inventories into a fresh read-only source tree, selects
+CE state/control roots, then requests native admission. A missing signer pin,
+changed/missing/unknown/linked/aliased member, competing lease or unavailable
+storage refuses. Partial trees and diagnostic failures are retained. A different
+attempt never repairs or silently reuses a failed tree.
+
+`build.py build --packaged-shared-runtime` accepts
+`--connected-host-signer-sha256` for an independently supplied **public certificate
+SHA256**, and checks that the eventual package signer agrees. Omitting it keeps
+installed host admission closed. It is not a signing key, a C/A trust flag or
+runtime execution authorization. Native owner libraries are new compiled leaves;
+PRoot donor reuse remains separate and source-bound. No new APK build/install or
+signing has been performed for this source change.
+
+The canonical shared `Runtime` has closed `termux` and `apk` endpoint profiles.
+Termux retains metadata5433/target5434/Pi4097/app8000/ingress8001. APK selects
+15433/15434/14097/18000/18443, loopback only. Shared DSNs, role/bootstrap helpers,
+metadata fencing, Pi listener/URL, app bind/readiness, target credentials and nginx
+rendering use the same profile. Conflicts refuse before secrets/initdb/service
+initialization; no alternate ports. `EndpointProfile.backend` is the selected
+loopback upstream for the separately owned native tailnet integration; that peer
+is not wired or accepted by this source slice.
+
+The current production comparator still has no source-backed C/A producer.
+The native control worker therefore returns UNKNOWN/refusal, never initializes
+or advances the accepted single-run journal, never forks a managed process, and
+never grants the Python launch consumer. APK `run`, service/helper launch,
+external stop and recovery reject Termux `/proc/task/children`, process-group
+and stale-pidfile policy. Native status and Stop remain responsive while its
+observer is pending; the selected lease cannot be replaced. No journal ACK,
+CLEAN_STOPPED, complete actor inventory, graceful whole-stack stop, healthy
+Stop/Start, kernel transition or PostgreSQL recovery is claimed here.
+
+The concrete next dependency is a reviewed native caller/custody producer and
+pinned PRoot interface covering the child-birth/export gap, traced tasks,
+sysvipc double-fork helpers, conditional F2FS helpers, exact real-parent waits and
+flow closure. Live export/ACK or direct tracer exit cannot close that gap.
+Extending journal actor/terminal/later-run/recovery schemas without those actual
+producers would fabricate authority, so those changes remain pending. There is
+no public flag, environment value, signer pin or test constructor to unlock it.
+The experimental recovery fallback remains a **user-performed**, separately
+verified new kernel boot and actual existing-only two-cluster recovery. The
+current x86 guest is not given the Termux ARM64 physical recovery identity.
+Final safe recovery without reboot remains open under issues263/266.
+
+Control diagnostics use fixed scalar fields and private essential append-only
+records, bounded at16MiB with pressure refusal. Their snapshot exporter preserves
+exact bytes/length/SHA256 and marks unknown crash loss and incomplete run closure.
+It exports only this control scope; it is not the full promised actor/service
+support bundle. No stdout, commands, credentials, DSNs, UUIDs, admission tokens,
+private origins or user operations enter those events. Android FGS eligibility,
+actual selected-storage durability/DE/pre-PIN, native peer/network fencing,
+complete correlated diagnostics, both-PG SQL/integrity, device and release gates
+remain separately pending. No Direct Boot receiver is added.

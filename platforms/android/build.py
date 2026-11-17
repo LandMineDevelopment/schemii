@@ -549,7 +549,90 @@ def boot_native(cache, out, abis, identity):
     return artifacts, compilers
 
 
+def connected_native(cache, out, abis):
+    """Compile only the new owner leaf; never rebuild pinned PRoot donors."""
+    tc = cache / "sdk/android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    artifacts = {}
+    for abi in abis:
+        target = out / "lib" / abi / "libschemii_owner.so"
+        run(
+            tc / (ABI_TRIPLES[abi] + "-clang"),
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-fPIC",
+            "-shared",
+            "-pthread",
+            "-Wl,-z,max-page-size=16384",
+            "-Wl,-z,noexecstack",
+            "-Wl,-z,defs",
+            *[
+                HERE / "native/host" / name
+                for name in (
+                    "owner.c",
+                    "owner_jni.c",
+                    "boot_compare.c",
+                    "boot_identity.c",
+                )
+            ],
+            "-o",
+            target,
+        )
+        artifacts[str(target.relative_to(out))] = digest(target)
+    return artifacts
+
+
+def connected_anchors(out, record, application_id, signer):
+    """Compiled independent expectations, not authority imported from assets.
+
+    An omitted signer keeps the source profile closed on installation. The
+    caller supplies a PUBLIC certificate digest, never signing material.
+    """
+    if signer and not re.fullmatch(r"[a-f0-9]{64}", signer):
+        raise ValueError("Connected host signer must be a public SHA256 pin")
+    assets = {
+        p.relative_to(out).as_posix(): digest(p)
+        for prefix in ("assets", "lib")
+        for p in sorted((out / prefix).rglob("*"))
+        if p.is_file()
+        and not p.relative_to(out)
+        .as_posix()
+        .startswith(("assets/shared/", "assets/runtime-source/"))
+    }
+    target = (
+        out / "generated/development/landmine/schemii/android/host/HostAnchors.java"
+    )
+    target.parent.mkdir(parents=True)
+    source = "package development.landmine.schemii.android.host;\n"
+    source += "public final class HostAnchors {\n"
+    for name, value in (
+        ("COMMIT", record["commit"]),
+        ("PACKAGE", application_id),
+        ("SIGNER", signer or ""),
+    ):
+        source += f"public static final String {name} = {json.dumps(value)};\n"
+    for name, values in (("SOURCE", record["source_files"]), ("ASSETS", assets)):
+        source += f"public static final java.util.Map<String,String> {name} = new java.util.TreeMap<>();\n"
+        items = list(sorted(values.items()))
+        for part, offset in enumerate(range(0, len(items), 100)):
+            method = f"fill{name}{part}"
+            source += f"static {{ {method}(); }}\nprivate static void {method}() {{\n"
+            for key, value in items[offset : offset + 100]:
+                source += f"{name}.put({json.dumps(key)}, {json.dumps(value)});\n"
+            source += "}\n"
+    target.write_text(source + "}\n")
+    return target
+
+
 def packaged_admission(args):
+    signer = getattr(args, "connected_host_signer_sha256", None)
+    if signer and (
+        not re.fullmatch(r"[a-f0-9]{64}", signer)
+        or not getattr(args, "packaged_shared_runtime", False)
+    ):
+        raise ValueError("Connected host public signer pin requires packaged runtime")
     """Closed static packaging profile; never imply that a host adapter is ready."""
     enabled = getattr(args, "packaged_shared_runtime", False)
     anchors = getattr(args, "guest_manifest_sha256", None) or []
@@ -749,6 +832,8 @@ def build(args, cache):
     if boot_identity:
         libraries, boot_compilers = boot_native(cache, out, abis, boot_identity)
         artifacts.update(libraries)
+    if packaged_inputs is not None:
+        artifacts.update(connected_native(cache, out, abis))
     fixture = None
     if args.wrapper_controls_only:
         source = HERE / "native/runtime/collector_fixture.c"
@@ -996,6 +1081,15 @@ def build(args, cache):
     classes = out / "classes"
     classes.mkdir()
     java = sorted((HERE / "app/src/main/java").rglob("*.java")) + peer_java
+    if packaged_inputs is not None:
+        java.append(
+            connected_anchors(
+                out,
+                provenance["packaged_shared_runtime"]["runtime_source"],
+                provenance["application_id"],
+                getattr(args, "connected_host_signer_sha256", None),
+            )
+        )
     run(
         "javac",
         "-source",
@@ -1078,6 +1172,9 @@ def build(args, cache):
     )
     if len(signer) != 1:
         raise ValueError("Actual signer identity unavailable")
+    expected_host_signer = getattr(args, "connected_host_signer_sha256", None)
+    if expected_host_signer and signer[0] != expected_host_signer:
+        raise ValueError("Connected host compiled signer differs from signed package")
     badging = subprocess.check_output(
         [str(bt / "aapt"), "dump", "badging", str(signed)], text=True
     )
@@ -1176,6 +1273,10 @@ def main():
     )
     b = sub.add_parser("build")
     b.add_argument("--build-id", required=True)
+    b.add_argument(
+        "--connected-host-signer-sha256",
+        help="Public certificate pin; absent keeps installed host closed",
+    )
     b.add_argument("--abi", action="append", choices=ABI_TRIPLES)
     b.add_argument("--guest-payload", type=Path, action="append")
     b.add_argument(

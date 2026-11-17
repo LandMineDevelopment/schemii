@@ -257,15 +257,18 @@ def check(root: Path = ROOT) -> dict:
                 and not call.keywords
                 and isinstance(call.args[0], ast.Constant)
                 and type(call.args[0].value) is str
-                and isinstance(call.args[1], ast.Constant)
-                and type(call.args[1].value) is int
+                and isinstance(call.args[1], ast.Attribute)
+                and isinstance(call.args[1].value, ast.Attribute)
+                and isinstance(call.args[1].value.value, ast.Name)
+                and call.args[1].value.value.id == "self"
+                and call.args[1].value.attr == "endpoints"
                 for call in calls
             ),
             f"Android PostgreSQL startup cluster arguments drift: {method}",
         )
-        endpoints = [(call.args[0].value, call.args[1].value) for call in calls]
+        endpoints = [(call.args[0].value, call.args[1].attr) for call in calls]
         require(
-            endpoints == list(zip(policy["cluster_names"], (5433, 5434), strict=True)),
+            endpoints == [(name, name) for name in policy["cluster_names"]],
             f"Android PostgreSQL startup cluster endpoints drift: {method}",
         )
         if method == "_cluster":
@@ -318,7 +321,8 @@ def check(root: Path = ROOT) -> dict:
                 else configured[parts[0]][parts[1]] == value,
                 f"Android configuration drift: {path}",
             )
-        for name, port in cluster_endpoints:
+        for name, endpoint in cluster_endpoints:
+            port = getattr(runtime.endpoints, endpoint)
             directory = runtime.state / "postgres" / name
             (directory / "global").mkdir(parents=True)
             (directory / "PG_VERSION").write_text("17")
@@ -347,6 +351,79 @@ def check(root: Path = ROOT) -> dict:
                     pg.get(setting) == value,
                     f"Android durability/security drift: {setting}",
                 )
+    # Exercise the complete generated profile rather than just permit new
+    # endpoint syntax in the startup AST. No runtime/service launch is involved.
+    for profile, values in contract["platforms"]["android"][
+        "endpoint_profiles"
+    ].items():
+        selected = android.EndpointProfile.selected(profile)
+        require(selected._asdict() == values, "Android endpoint profile drift")
+        with tempfile.TemporaryDirectory(prefix="schemii-profile-") as temporary:
+            runtime = android.Runtime(Path(temporary) / "state", root, profile=profile)
+            runtime._prepare()
+            config = {"tailnet_ip": "100.64.0.2", "hostname": "parity-fixture"}
+            env = runtime._environment(config)
+            require(
+                f"port={selected.metadata} " in env["SCHEMII_METADATA_DSN"],
+                "Android metadata endpoint drift",
+            )
+            require(
+                env["SCHEMII_PI_PROTOTYPE_URL"] == f"http://127.0.0.1:{selected.pi}"
+                and env["SCHEMII_PI_PORT"] == str(selected.pi),
+                "Android Pi endpoint drift",
+            )
+            runtime._write_runtime_config(config)
+            nginx = (runtime.state / "run/nginx.conf").read_text()
+            require(
+                f"listen 127.0.0.1:{selected.ingress} ssl;" in nginx
+                and nginx.count(f"proxy_pass {selected.backend};") == 2,
+                "Android generated ingress endpoint drift",
+            )
+            require(
+                (f"listen {config['tailnet_ip']}:" in nginx) == (profile == "termux"),
+                "Android ingress interface drift",
+            )
+            for method in ("_cluster", "_bootstrap"):
+                for node in ast.walk(startup[0]):
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == method
+                    ):
+                        endpoint = node.args[1].attr
+                        require(
+                            getattr(selected, endpoint) == values[node.args[0].value],
+                            "Android composed startup endpoint drift",
+                        )
+    pi_source = (root / "ai/prototype/server.js").read_text()
+    require(
+        "server.listen(listenerPort(), listenerHost())" in pi_source
+        and "environment.SCHEMII_PI_PORT" in pi_source
+        and "if (environment.SCHEMII_PI_PORT === undefined) return 4097;" in pi_source,
+        "Android actual Pi listener endpoint drift",
+    )
+    # All port literals belong to the closed profile. Consumers must reference
+    # that profile, including credential/role/fence/bootstrap/readiness paths.
+    runtime_class = next(
+        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Runtime"
+    )
+    fixed_ports = {5433, 5434, 4097, 8000, 8001, 15433, 15434, 14097, 18000, 18443}
+    require(
+        not any(
+            isinstance(n, ast.Constant)
+            and (
+                type(n.value) is int
+                and n.value in fixed_ports
+                or isinstance(n.value, str)
+                and re.search(
+                    r"(?:port=|:)(?:5433|5434|4097|8000|8001|15433|15434|14097|18000|18443)(?:\b|$)",
+                    n.value,
+                )
+            )
+            for n in ast.walk(runtime_class)
+        ),
+        "Android fixed endpoint consumer drift",
+    )
     for marker in (
         contract["readiness"],
         "schemii.main:app",
@@ -663,6 +740,7 @@ APK_RUNTIME_SUPPORT = frozenset(
     {
         "dev/android/runtime.py",
         "dev/android/recovery.py",
+        "dev/android/apk_owner.py",
         "dev/android/nginx.conf.in",
         "dev/schemii.toml",
     }

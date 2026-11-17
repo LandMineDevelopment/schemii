@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import secrets
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
@@ -83,7 +84,7 @@ class PostgresConnectionRepository:
                     raise ConnectionNotFoundError("PostgreSQL connection was not found")
                 return self._profile(row)
 
-    def list_for_owners(self, owner_ids: tuple[str, ...]) -> list[PostgresConnectionProfile]:
+    def list_for_owners(self, owner_ids: tuple[str, ...]) -> builtins.list[PostgresConnectionProfile]:
         """Read selected owners' metadata in one transaction, never credentials."""
         if not owner_ids:
             return []
