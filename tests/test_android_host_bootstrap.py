@@ -686,6 +686,13 @@ def test_legacy_activity_routes_with_its_own_profile(java_bootstrap, tmp_path, a
         "logloss",
         "clock",
         "source",
+        "boot-unobserved",
+        "boot-max",
+        *[
+            f"boot-{index}-{edge}"
+            for index in range(22, 31)
+            for edge in ("high", "negative")
+        ],
     ],
 )
 def test_observation_failure_never_skips_native_cleanup(tmp_path, mode):
@@ -736,6 +743,20 @@ def test_observation_failure_never_skips_native_cleanup(tmp_path, mode):
         if (mode.equals("time")) a[32]=0;
         if (mode.equals("epoch") && closes>0) { a[31]=3; a[32]=4; }
         if (mode.equals("first-stage") && closes>0) a[2]=9;
+        if (mode.equals("boot-unobserved")) {
+            a[22]=2; a[23]=3; a[28]=1; a[29]=1; a[30]=2;
+            for (int i=24; i<=27; i++) a[i]=-1;
+        } else if (mode.startsWith("boot-")) {
+            long[] maximum={2,15,11,8,4095,4095,2,3,2};
+            if (mode.equals("boot-max")) {
+                for (int i=22; i<=30; i++) a[i]=maximum[i-22];
+            } else {
+                String[] parts=mode.split("-");
+                int index=Integer.parseInt(parts[1]);
+                a[index]=parts[2].equals("high") ? maximum[index-22]+1
+                    : index>=24 && index<=27 ? -2 : -1;
+            }
+        }
         return a;
     }""",
     )
@@ -762,7 +783,8 @@ public class MalformedControl {
   ExecutorService work=(ExecutorService)field.get(s);work.shutdown();
   if (!work.awaitTermination(5,TimeUnit.SECONDS) || NativeOwner.closes!=1) throw new AssertionError("cleanup skipped");
   Field pending=HostService.class.getDeclaredField("outstanding");pending.setAccessible(true);
-  boolean malformed=!System.getProperty("mode").equals("valid") && !System.getProperty("mode").equals("logloss") && !System.getProperty("mode").equals("clock");
+  String mode=System.getProperty("mode");
+  boolean malformed=!(mode.equals("valid") || mode.equals("logloss") || mode.equals("clock") || mode.equals("boot-unobserved") || mode.equals("boot-max"));
   if ((pending.get(null)!=null)!=malformed || !HostService.status().contains("First error 13.")) throw new AssertionError("unknown report released or first failure erased");
   if (System.getProperty("mode").equals("logloss") && !HostService.status().contains("Observation loss detected")) throw new AssertionError("loss not surfaced");
   for (String line:android.util.Log.records) if(line.contains("SECRET") || line.contains(args[0])) throw new AssertionError("redaction");

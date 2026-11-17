@@ -202,9 +202,11 @@ static uint32_t le32(const uint8_t *p) { return le16(p) | (uint32_t)le16(p+2)<<1
 static int content(int fd, uint8_t **bytes, size_t *size, struct installed_objects *o, int kind) {
   struct stat s;
   if (fstat(fd,&s)) { int error=errno; object_failure(o,error,kind,0,INST_STAT,error); return error; }
-  if (s.st_size <= 0 || s.st_size > LIMIT) return EFBIG;
+  if (s.st_size <= 0 || s.st_size > LIMIT) {
+    object_failure(o,EFBIG,kind,0,INST_CONTENT,0); return EFBIG;
+  }
   *size = (size_t)s.st_size; *bytes = malloc(*size);
-  if (!*bytes) return ENOMEM;
+  if (!*bytes) { object_failure(o,ENOMEM,kind,0,INST_CONTENT,0); return ENOMEM; }
   size_t done = 0;
   while (done < *size) {
     ssize_t n = pread(fd,*bytes+done,*size-done,(off_t)done);
@@ -296,8 +298,10 @@ int installed_validate(struct installed_objects *o, const struct installed_pin *
   uint8_t *a=NULL,*m=NULL; size_t an=0,mn=0;
   if (!e) e=content(o->apk,&a,&an,o,INST_APK);
   if (!e) e=content(o->module,&m,&mn,o,INST_MODULE);
-  if (!e) e=zip_validate(a,an,m,mn,pins,count);
-  object_failure(o,e,INST_APK,0,INST_CONTENT,0);
+  if (!e) {
+    e=zip_validate(a,an,m,mn,pins,count);
+    object_failure(o,e,INST_APK,0,INST_CONTENT,0);
+  }
   free(a); free(m);
   if (!e) e=current(o->apk,o->apk_path,&o->a,&o->errors,o,INST_APK);
   if (!e) e=current(o->module,o->module_path,&o->m,&o->errors,o,INST_MODULE);

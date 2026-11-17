@@ -34,6 +34,15 @@ def installed(tmp_path_factory):
 #include <errno.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdlib.h>
+size_t fail_content_allocation;
+void *__real_malloc(size_t);
+void *__wrap_malloc(size_t size) {
+ if (fail_content_allocation && size==fail_content_allocation) {
+  fail_content_allocation=0; errno=ENOMEM; return NULL;
+ }
+ return __real_malloc(size);
+}
 int fail_strdup;
 char *__real_strdup(const char *);
 char *__wrap_strdup(const char *s) {
@@ -71,6 +80,7 @@ int __wrap_close(int fd) {
             str(wrapper),
             "-Wl,--wrap=close",
             "-Wl,--wrap=strdup",
+            "-Wl,--wrap=malloc",
             "-o",
             str(target),
         ],
@@ -817,3 +827,43 @@ def test_preclose_observation_preserves_two_equal_cleanup_errors(installed, tmp_
         observed.secondary_cleanup,
     ) == (12, 24, errno.EIO, errno.EIO)
     assert (final.cleanup, final.secondary_cleanup, final.retained) == (errno.EIO, 0, 1)
+
+
+@pytest.mark.parametrize("kind", [1, 2])
+@pytest.mark.parametrize("fault", ["empty", "allocation"])
+def test_content_observation_keeps_actual_object_kind(installed, tmp_path, kind, fault):
+    """Actual content guard and cleanup; only malloc failure is injected."""
+    data, _, apk, module, pins = specimen(tmp_path, "valid")
+    target = apk if kind == 1 else module
+    if fault == "empty":
+        target.write_bytes(b"")
+    out, errors = ctypes.c_void_p(), Errors()
+    assert (
+        installed.installed_open(
+            bytes(apk),
+            bytes(module),
+            bytes(data),
+            ctypes.byref(out),
+            ctypes.byref(errors),
+        )
+        == 0
+    )
+    if fault == "allocation":
+        ctypes.c_size_t.in_dll(
+            installed, "fail_content_allocation"
+        ).value = target.stat().st_size
+    expected = errno.EFBIG if fault == "empty" else errno.ENOMEM
+    assert installed.installed_validate(out, pins, len(pins)) == expected
+    installed.installed_observe.argtypes = [ctypes.c_void_p]
+    installed.installed_observe.restype = InstalledObservation
+    observed = installed.installed_observe(out)
+    assert (
+        observed.error,
+        observed.kind,
+        observed.hop,
+        observed.operation,
+        observed.syscall_error,
+    ) == (expected, kind, 0, 6, 0)
+    assert ctypes.c_size_t.in_dll(installed, "fail_content_allocation").value == 0
+    assert installed.installed_close(ctypes.byref(out), ctypes.byref(errors)) == 0
+    assert out.value is None and errors.cleanup == 0
