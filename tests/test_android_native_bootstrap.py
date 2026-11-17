@@ -123,11 +123,27 @@ def specimen(tmp_path, mode):
                 apk.writestr("classes.dex", b"duplicate")
     apk = tmp_path / "base.apk"
     content = stream.getvalue()
-    if mode in {"signblock", "unknown-signblock", "invalid-gap"}:
+    padded_modes = {
+        "page-padded-signblock",
+        "nonzero-sign-padding",
+        "short-sign-padding",
+        "long-sign-padding",
+        "padded-unknown-signblock",
+        "padded-header-size",
+        "padded-footer-size",
+        "padded-no-signatures",
+    }
+    if mode in {"signblock", "unknown-signblock", "invalid-gap"} | padded_modes:
         central = struct.unpack_from("<I", content, len(content) - 6)[0]
-        pair = (
-            struct.pack("<QI", 8, 0x7109871A if mode == "signblock" else 0xDEADBEEF)
-            + b"test"
+        identity = (
+            0xDEADBEEF
+            if mode in {"unknown-signblock", "padded-unknown-signblock"}
+            else 0x42726577
+            if mode == "padded-no-signatures"
+            else 0x7109871A
+        )
+        pair = struct.pack("<QI", 8, identity) + (
+            b"\0" * 4 if mode == "padded-no-signatures" else b"test"
         )
         size = len(pair) + 24
         block = (
@@ -136,10 +152,24 @@ def specimen(tmp_path, mode):
             + struct.pack("<Q", size)
             + b"APK Sig Block 42"
         )
+        # SDK36's real signed product pads the data domain to a 4KiB block
+        # boundary. These are structural fixtures, not signature/C/A proof.
+        padding = b"\0" * (-central % 4096) if mode in padded_modes else b""
+        if mode == "nonzero-sign-padding":
+            padding = b"X" + padding[1:]
+        elif mode == "short-sign-padding":
+            padding = padding[:-1]
+        elif mode == "long-sign-padding":
+            padding += b"\0" * 4096
+        elif mode == "padded-header-size":
+            block = struct.pack("<Q", size + 1) + block[8:]
+        elif mode == "padded-footer-size":
+            block = block[:-24] + struct.pack("<Q", (1 << 64) - 1) + block[-16:]
         if mode == "invalid-gap":
             block = b"unknown gap"
-        content = bytearray(content[:central] + block + content[central:])
-        struct.pack_into("<I", content, len(content) - 6, central + len(block))
+        inserted = padding + block
+        content = bytearray(content[:central] + inserted + content[central:])
+        struct.pack_into("<I", content, len(content) - 6, central + len(inserted))
     apk.write_bytes(content)
     if mode == "module-tamper":
         module.write_bytes(b"different module")
@@ -156,6 +186,14 @@ def specimen(tmp_path, mode):
         "signblock",
         "unknown-signblock",
         "invalid-gap",
+        "page-padded-signblock",
+        "nonzero-sign-padding",
+        "short-sign-padding",
+        "long-sign-padding",
+        "padded-unknown-signblock",
+        "padded-header-size",
+        "padded-footer-size",
+        "padded-no-signatures",
         "tamper",
         "unknown",
         "split",
@@ -204,7 +242,9 @@ def test_held_installed_objects(installed, tmp_path, mode):
         result = installed.installed_validate(
             out, pins, len(pins) - (mode == "missing-pin")
         )
-        assert (result == 0) == (mode in {"valid", "signblock", "cleanup-error"})
+        assert (result == 0) == (
+            mode in {"valid", "signblock", "page-padded-signblock", "cleanup-error"}
+        )
     if mode == "cleanup-error":
         ctypes.c_int.in_dll(installed, "fail_close").value = 1
     result = installed.installed_close(ctypes.byref(out), ctypes.byref(errors))

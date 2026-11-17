@@ -932,7 +932,10 @@ owner member must instead equal the held extracted module byte-for-byte; this
 **does not independently seal the owner or whole signed product**. Native checks
 local/central ZIP agreement, stored members, exact ordered inventory, content
 hashes, no extra DEX/assets/libraries, and only recognized v2/v3 signing-block IDs
-and zero padding. Stock PackageManager verifies the current public signer; no
+and zero-valued padding pairs. A signing block may follow only the minimal zero
+prefix (fewer than 4096 bytes) needed for its 4KiB boundary, as emitted by pinned
+apksigner; footer/header framing and all member pins remain mandatory. No other
+post-member gap is accepted. Stock PackageManager verifies the current public signer; no
 historical signer or native self/final-APK hash cycle substitutes for independent
 source/build/sign/install/process observations. The separate build receipt binds
 module and unsigned APK hashes externally. Signing must preserve the member
