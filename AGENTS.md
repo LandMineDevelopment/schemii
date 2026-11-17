@@ -89,6 +89,11 @@ validation. Notifications are untrusted wake-up hints; reconcile existing owners
 before dispatch. Only the coordinator merges completed, reviewed work with an
 exact-head guard and closes fully accepted issues after verified integration.
 
+If the owner assigned you to operate or resume the Schemii coordination hub,
+follow the [organizer continuity procedure](docs/github-issue-operations.md#organizer-continuity)
+before acting. Use it on startup, after context loss, and on each wake. Worker
+assignments grant only their declared scope and resources.
+
 For substantial separable development or coordinated UI QA, use the discoverable
 `stock-t3-agents` skill in `.agents/skills/stock-t3-agents/SKILL.md` and read
 [the assignment protocol](testing/agents/README.md). Use the available native
