@@ -33,6 +33,22 @@ def installed(tmp_path_factory):
     wrapper.write_text("""
 #include <errno.h>
 #include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
+size_t fail_content_allocation;
+void *__real_malloc(size_t);
+void *__wrap_malloc(size_t size) {
+ if (fail_content_allocation && size==fail_content_allocation) {
+  fail_content_allocation=0; errno=ENOMEM; return NULL;
+ }
+ return __real_malloc(size);
+}
+int fail_strdup;
+char *__real_strdup(const char *);
+char *__wrap_strdup(const char *s) {
+ if (fail_strdup>0 && --fail_strdup==0) { errno=ENOMEM; return NULL; }
+ return __real_strdup(s);
+}
 int fail_close;
 int __real_close(int);
 int __wrap_close(int fd) {
@@ -63,6 +79,8 @@ int __wrap_close(int fd) {
             ],
             str(wrapper),
             "-Wl,--wrap=close",
+            "-Wl,--wrap=strdup",
+            "-Wl,--wrap=malloc",
             "-o",
             str(target),
         ],
@@ -293,6 +311,34 @@ class BootResult(ctypes.Structure):
     ]
 
 
+class ObjectReport(ctypes.Structure):
+    _fields_ = [
+        (n, ctypes.c_int)
+        for n in ("error", "kind", "hop", "operation", "syscall_error")
+    ]
+
+
+class AcquisitionReport(ctypes.Structure):
+    _fields_ = [
+        (n, ctypes.c_int)
+        for n in (
+            "first_stage",
+            "first_substage",
+            "last_stage",
+            "last_substage",
+            "error",
+            "secondary",
+            "framework_reason",
+            "image_reason",
+            "image_count",
+        )
+    ] + [
+        ("object", ObjectReport),
+        ("cleanup", ctypes.c_int),
+        ("secondary_cleanup", ctypes.c_int),
+    ]
+
+
 class BootstrapStatus(ctypes.Structure):
     _fields_ = [
         (name, ctypes.c_int)
@@ -401,13 +447,18 @@ int __wrap_close(int fd) {
 }
 int exercise(const char *apk,const char *module,const char *data,
              const struct installed_pin *pins,size_t count,int mode,
-             struct native_bootstrap_status *report,int *released) {
+             struct native_bootstrap_status *report,int *released,struct acquisition_observation *diagnostic) {
   fail_probe=(mode==1 || mode==4) ? 2 : mode==5 ? 3 : 0;
   fail_reader=mode==5;
   int opened=native_bootstrap_open(apk,module,data,pins,count,&owner);
   int expected=(mode==1 || mode==4) ? EIO : mode==5 ? EACCES : 0;
   if (opened!=expected || !owner) return -1;
-  if (mode==3) native_bootstrap_refuse(owner,EACCES);
+  if (mode==3) {
+    native_bootstrap_refuse(owner,EACCES);
+    struct acquisition_observation d=native_bootstrap_observe(owner);
+    acquisition_step(&d,AQ_FRAMEWORK,1); acquisition_failure(&d,EACCES);
+    observation=d;
+  }
   if (mode==4) {
     int changed=open(apk,O_WRONLY|O_CLOEXEC);
     if (changed<0 || ftruncate(changed,1) || close(changed)) return -2;
@@ -416,7 +467,7 @@ int exercise(const char *apk,const char *module,const char *data,
   reserved=1; busy=0; worker=pthread_self();
   armed=mode==2 || mode==3;
   int result=Java_development_landmine_schemii_android_host_NativeOwner_close(NULL,NULL);
-  *report=snapshot; *released=owner==NULL;
+  *report=snapshot; *released=owner==NULL; *diagnostic=observation;
   return result;
 }
 """)
@@ -465,8 +516,13 @@ int exercise(const char *apk,const char *module,const char *data,
         ctypes.c_int,
         ctypes.POINTER(BootstrapStatus),
         ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(AcquisitionReport),
     ]
-    report, released = BootstrapStatus(), ctypes.c_int()
+    report, released, diagnostic = (
+        BootstrapStatus(),
+        ctypes.c_int(),
+        AcquisitionReport(),
+    )
     number = {
         "custody-probe": 1,
         "two-cleanup-errors": 2,
@@ -483,9 +539,18 @@ int exercise(const char *apk,const char *module,const char *data,
         number,
         ctypes.byref(report),
         ctypes.byref(released),
+        ctypes.byref(diagnostic),
     )
     assert result == errno.EIO
     assert report.error == (errno.EACCES if number in (3, 5) else errno.EIO)
+    assert diagnostic.last_stage == 24 and diagnostic.last_substage == 2
+    assert diagnostic.first_stage == (6 if number == 3 else 24 if number == 2 else 15)
+    assert diagnostic.error == (
+        0 if number == 2 else errno.EACCES if number in (3, 5) else errno.EIO
+    )
+    assert diagnostic.secondary == (
+        errno.ESTALE if number == 4 else errno.EIO if number == 5 else 0
+    )
     assert report.boot.relation == 2
     assert report.boot.current_admission == report.boot.prior_admission == 1
     if number in (1, 4, 5):
@@ -529,6 +594,11 @@ def test_jni_pair_refusals_and_local_frame_ownership(tmp_path, mode):
 #include <string.h>
 static const char *mode;
 static int exception, pushes, pops, classes, callbacks;
+static jlong diagnostic[34];
+static jlongArray array(JNIEnv *e,jsize count) { (void)e; assert(count==34); return (jlongArray)(uintptr_t)123; }
+static void region(JNIEnv *e,jlongArray a,jsize start,jsize count,const jlong *v) {
+ (void)e; assert((uintptr_t)a==123 && start==0 && count==34); memcpy(diagnostic,v,sizeof(diagnostic));
+}
 static jint push(JNIEnv *e,jint n) { (void)e; assert(n==64); pushes++; return 0; }
 static jobject pop(JNIEnv *e,jobject o) { (void)e; assert(!o); pops++; return NULL; }
 static jboolean pending(JNIEnv *e) { (void)e; return exception; }
@@ -558,16 +628,24 @@ static jobject call(JNIEnv *e,jclass c,jmethodID id,...) {
 static jboolean equal(JNIEnv *e,jobject a,jobject b) { (void)e; assert(!exception); return a==b; }
 extern jint Java_development_landmine_schemii_android_host_NativeOwner_open(JNIEnv *,jclass);
 extern jint Java_development_landmine_schemii_android_host_NativeOwner_close(JNIEnv *,jclass);
+extern jlongArray Java_development_landmine_schemii_android_host_NativeOwner_observation(JNIEnv *,jclass);
 int main(int argc,char **argv) {
     assert(argc==2); mode=argv[1];
     const struct JNINativeInterface_ table={.PushLocalFrame=push,.PopLocalFrame=pop,
       .ExceptionCheck=pending,.ExceptionClear=clear,.FindClass=find,.GetStaticMethodID=method,
-      .CallStaticObjectMethod=call,.IsSameObject=equal};
+      .CallStaticObjectMethod=call,.IsSameObject=equal,.NewLongArray=array,.SetLongArrayRegion=region};
     JNIEnv env=&table;
+    Java_development_landmine_schemii_android_host_NativeOwner_observation(&env,NULL);
+    assert(diagnostic[21]==0 && diagnostic[22]==2 && diagnostic[24]==-1 && diagnostic[28]==1 && diagnostic[29]==1 && diagnostic[31]==-1);
     assert(Java_development_landmine_schemii_android_host_NativeOwner_open(&env,(jclass)(uintptr_t)1)==EACCES);
     assert(pushes==1 && pops==1 && !exception);
     assert(callbacks==(!strcmp(mode,"class-throw") ? 0 : !strncmp(mode,"application-",12) ? 1 : 2));
+    Java_development_landmine_schemii_android_host_NativeOwner_observation(&env,NULL);
+    int first=!strcmp(mode,"class-throw") ? 3 : !strncmp(mode,"application-",12) ? 4 : 5;
+    assert(diagnostic[0]==1 && diagnostic[1]==34 && diagnostic[2]==first && diagnostic[14]==EACCES && diagnostic[21]==2 && diagnostic[33]==1);
     assert(Java_development_landmine_schemii_android_host_NativeOwner_close(&env,NULL)==0);
+    Java_development_landmine_schemii_android_host_NativeOwner_observation(&env,NULL);
+    assert(diagnostic[2]==first && diagnostic[4]==24 && diagnostic[14]==EACCES && diagnostic[21]==4);
     puts("PASS fixed pair refusal; locals disposed; no global/attachment/import");
 }
 """)
@@ -607,3 +685,185 @@ int main(int argc,char **argv) {
     subprocess.run(command, check=True, capture_output=True)
     result = subprocess.run([str(executable), mode], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+class InstalledObservation(ctypes.Structure):
+    _fields_ = [
+        (name, ctypes.c_int)
+        for name in ("error", "kind", "hop", "operation", "syscall_error")
+    ]
+
+
+@pytest.mark.parametrize("kind", [1, 2, 3])
+def test_object_observation_records_actual_missing_hop(installed, tmp_path, kind):
+    data, control, apk, module, pins = specimen(tmp_path, "valid")
+    target = {1: apk, 2: module, 3: control}[kind]
+    if kind == 3:
+        target.rmdir()
+    else:
+        target.unlink()
+    out, errors = ctypes.c_void_p(), Errors()
+    installed.installed_observe.argtypes = [ctypes.c_void_p]
+    installed.installed_observe.restype = InstalledObservation
+    assert (
+        installed.installed_open(
+            bytes(apk),
+            bytes(module),
+            bytes(data),
+            ctypes.byref(out),
+            ctypes.byref(errors),
+        )
+        == errno.ENOENT
+    )
+    observed = installed.installed_observe(out)
+    assert (
+        observed.error,
+        observed.kind,
+        observed.operation,
+        observed.syscall_error,
+    ) == (errno.ENOENT, kind, 1, errno.ENOENT)
+    assert observed.hop == len(target.parts) - 1
+    saved = bytes(observed)
+    assert installed.installed_close(ctypes.byref(out), ctypes.byref(errors)) == 0
+    assert bytes(observed) == saved  # value snapshot survives disposal
+
+
+def test_object_mode_refusal_is_not_a_syscall_errno(installed, tmp_path):
+    data, control, apk, module, pins = specimen(tmp_path, "valid")
+    control.chmod(0o750)
+    out, errors = ctypes.c_void_p(), Errors()
+    installed.installed_observe.argtypes = [ctypes.c_void_p]
+    installed.installed_observe.restype = InstalledObservation
+    assert (
+        installed.installed_open(
+            bytes(apk),
+            bytes(module),
+            bytes(data),
+            ctypes.byref(out),
+            ctypes.byref(errors),
+        )
+        == errno.EACCES
+    )
+    observed = installed.installed_observe(out)
+    assert (
+        observed.error,
+        observed.kind,
+        observed.hop,
+        observed.operation,
+        observed.syscall_error,
+    ) == (errno.EACCES, 3, 0, 5, 0)
+    assert installed.installed_close(ctypes.byref(out), ctypes.byref(errors)) == 0
+
+
+def test_object_allocation_errno_is_not_reported_as_syscall(installed, tmp_path):
+    data, _, apk, module, _ = specimen(tmp_path, "valid")
+    out, errors = ctypes.c_void_p(), Errors()
+    installed.installed_observe.argtypes = [ctypes.c_void_p]
+    installed.installed_observe.restype = InstalledObservation
+    ctypes.c_int.in_dll(installed, "fail_strdup").value = 3  # first held-path copy
+    assert (
+        installed.installed_open(
+            bytes(apk),
+            bytes(module),
+            bytes(data),
+            ctypes.byref(out),
+            ctypes.byref(errors),
+        )
+        == errno.ENOMEM
+    )
+    observed = installed.installed_observe(out)
+    assert (
+        observed.error,
+        observed.kind,
+        observed.operation,
+        observed.syscall_error,
+    ) == (errno.ENOMEM, 1, 1, 0)
+    assert installed.installed_close(ctypes.byref(out), ctypes.byref(errors)) == 0
+
+
+def test_preclose_observation_preserves_two_equal_cleanup_errors(installed, tmp_path):
+    data, _, apk, module, pins = specimen(tmp_path, "valid")
+    installed.native_bootstrap_open.argtypes = [ctypes.c_char_p] * 3 + [
+        ctypes.POINTER(Pin),
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    installed.native_bootstrap_observe.argtypes = [ctypes.c_void_p]
+    installed.native_bootstrap_observe.restype = AcquisitionReport
+    installed.native_bootstrap_status.argtypes = [ctypes.c_void_p]
+    installed.native_bootstrap_status.restype = BootstrapStatus
+    installed.native_bootstrap_close_observed.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(BootstrapStatus),
+        ctypes.POINTER(AcquisitionReport),
+    ]
+    ctypes.c_int.in_dll(installed, "fail_close").value = 2
+    owner = ctypes.c_void_p()
+    assert (
+        installed.native_bootstrap_open(
+            bytes(apk), bytes(module), bytes(data), pins, len(pins), ctypes.byref(owner)
+        )
+        == errno.EIO
+    )
+    before = installed.native_bootstrap_observe(owner)
+    assert (before.first_stage, before.cleanup, before.secondary_cleanup) == (
+        12,
+        errno.EIO,
+        errno.EIO,
+    )
+    # New observation must not silently redefine raw16's original ABI/semantics.
+    assert installed.native_bootstrap_status(owner).cleanup == 0
+    final, observed = BootstrapStatus(), AcquisitionReport()
+    assert (
+        installed.native_bootstrap_close_observed(
+            ctypes.byref(owner), ctypes.byref(final), ctypes.byref(observed)
+        )
+        == errno.EIO
+    )
+    assert (
+        observed.first_stage,
+        observed.last_stage,
+        observed.cleanup,
+        observed.secondary_cleanup,
+    ) == (12, 24, errno.EIO, errno.EIO)
+    assert (final.cleanup, final.secondary_cleanup, final.retained) == (errno.EIO, 0, 1)
+
+
+@pytest.mark.parametrize("kind", [1, 2])
+@pytest.mark.parametrize("fault", ["empty", "allocation"])
+def test_content_observation_keeps_actual_object_kind(installed, tmp_path, kind, fault):
+    """Actual content guard and cleanup; only malloc failure is injected."""
+    data, _, apk, module, pins = specimen(tmp_path, "valid")
+    target = apk if kind == 1 else module
+    if fault == "empty":
+        target.write_bytes(b"")
+    out, errors = ctypes.c_void_p(), Errors()
+    assert (
+        installed.installed_open(
+            bytes(apk),
+            bytes(module),
+            bytes(data),
+            ctypes.byref(out),
+            ctypes.byref(errors),
+        )
+        == 0
+    )
+    if fault == "allocation":
+        ctypes.c_size_t.in_dll(
+            installed, "fail_content_allocation"
+        ).value = target.stat().st_size
+    expected = errno.EFBIG if fault == "empty" else errno.ENOMEM
+    assert installed.installed_validate(out, pins, len(pins)) == expected
+    installed.installed_observe.argtypes = [ctypes.c_void_p]
+    installed.installed_observe.restype = InstalledObservation
+    observed = installed.installed_observe(out)
+    assert (
+        observed.error,
+        observed.kind,
+        observed.hop,
+        observed.operation,
+        observed.syscall_error,
+    ) == (expected, kind, 0, 6, 0)
+    assert ctypes.c_size_t.in_dll(installed, "fail_content_allocation").value == 0
+    assert installed.installed_close(ctypes.byref(out), ctypes.byref(errors)) == 0
+    assert out.value is None and errors.cleanup == 0

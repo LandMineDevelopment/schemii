@@ -901,6 +901,11 @@ def closed_pins(out, entries, signer, bindings):
         raise ValueError("Closed content inventory refused")
     target = out / "closed_pins.h"
     source = '#include "installed_provenance.h"\n'
+    if not re.fullmatch(r"[a-f0-9]{40}", bindings.get("commit", "")):
+        raise ValueError("Closed observation requires immutable source identity")
+    source += (
+        "#define SCHEMII_OBSERVATION_SOURCE " + json.dumps(bindings["commit"]) + "\n"
+    )
     source += "static const char closed_package[]=" + json.dumps(CLOSED_PACKAGE) + ";\n"
     source += "static const char closed_signer[]=" + json.dumps(signer) + ";\n"
     source += "static const struct installed_pin closed_pins[]={\n"

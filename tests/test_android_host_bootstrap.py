@@ -88,6 +88,18 @@ public class Notification {
     }
 }
 """,
+    "android/os/SystemClock.java": """package android.os; public class SystemClock { public static long elapsedRealtimeNanos() { if (Boolean.getBoolean("fixture.clockfail")) throw new SecurityException("SECRET-clock"); return System.nanoTime(); } }""",
+    "android/util/Log.java": """
+package android.util;
+public class Log {
+    public static final java.util.List<String> records = java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+    public static int i(String tag, String record) {
+        if (!tag.equals("SchemiiAcquire")) throw new AssertionError("fixed tag");
+        records.add(record);
+        return Boolean.getBoolean("fixture.logloss") ? 0 : record.length();
+    }
+}
+""",
     "android/os/IBinder.java": "package android.os; public interface IBinder {}",
     "android/os/UserManager.java": """
 package android.os;
@@ -148,6 +160,7 @@ public final class InstalledSource {
             module=System.getProperty("fixture.module");
         }
     }
+    static int frameworkReason() { return 4; }
     static Framework framework(Context app) throws Exception {
         app.getPackageManager().getPackageInfo(app.getPackageName(),0);
         return new Framework(app);
@@ -237,7 +250,19 @@ public class BootstrapControl {
     }
     public static void main(String[] args) throws Exception {
         String mode = args[0]; File data = new File(args[1]);
-        if (mode.startsWith("storage:")) {
+        if (mode.startsWith("diagnostic-array:")) {
+            String variant = mode.substring(17);
+            long[] raw = new long[34]; raw[0]=1; raw[1]=34; raw[4]=24; raw[21]=4; raw[31]=1; raw[32]=2; raw[33]=1;
+            if (variant.equals("version")) raw[0]=2;
+            if (variant.equals("length")) raw=new long[35];
+            if (variant.equals("range")) raw[9]=99;
+            if (variant.equals("time")) raw[32]=0;
+            NativeOwner.Observation d=NativeOwner.Observation.decode(raw);
+            if (variant.equals("clone")) {
+                check(d!=null && d.disposed(),"valid explicit schema"); raw[18]=1;
+                check(d.disposed(),"immutable cloned snapshot");
+            } else check(d==null,"unknown/malformed diagnostic unresolved");
+        } else if (mode.startsWith("storage:")) {
             String selection = mode.substring(8);
             App app = new App(data, selection);
             boolean refuse = !selection.equals("CE");
@@ -318,6 +343,21 @@ public class BootstrapControl {
                 check(state[0]==5 && state[2]==0 && state[4]==0, "disposed custody error preserved without cleanup failure");
                 check(HostService.status().contains("First error 5.") && !HostService.status().contains("Cleanup error"), "operation and cleanup diagnostics remain distinct");
             }
+            long[] diagnostic=NativeOwner.observation();
+            check(diagnostic.length==34 && diagnostic[0]==1 && diagnostic[1]==34,"separate v1 ABI");
+            check(diagnostic[4]==24 && diagnostic[33]==0,"close attempted; main thread is not acquiring worker");
+            if (mode.startsWith("pm-error") || mode.startsWith("link-error"))
+                check(diagnostic[2]==6 && diagnostic[6]==4,"finite framework failure precedes cancellation/disposal");
+            if (!Boolean.getBoolean("fixture.existing") && (mode.equals("normal") || mode.equals("stale-stop")))
+                check(diagnostic[2]==12 && diagnostic[9]==3 && diagnostic[11]==1 && diagnostic[12]==2,
+                    "selected-root open errno/hop attributed");
+            for (String record : android.util.Log.records) {
+                check(record.length()<=2048 && record.contains("delivery=unverified"),"bounded explicit log loss domain");
+                check(!record.contains(data.getAbsolutePath()) && !record.contains("fixture.package")
+                    && !record.contains("private PM") && !record.contains("private native"),"no raw private input in logs");
+            }
+            check(android.util.Log.records.stream().anyMatch(x -> x.contains("completionObserved=1") && !x.contains("end=-1")),"finite worker completion record");
+            if (invalidated) check(android.util.Log.records.stream().anyMatch(x -> x.contains("cancelRequested=1")),"request and completion distinct");
             absent(); service.onDestroy();
             service.onCreate(); action(service,"start"); check(HostService.status().contains("stale"), "destroyed incarnation cannot revive");
             if (replacement != null) replacement.onDestroy();
@@ -373,7 +413,9 @@ def java_bootstrap(tmp_path_factory):
     jdk = Path(javac).resolve().parents[1]
     pins = work / "closed_pins.h"
     pins.write_text(
-        '#include "installed_provenance.h"\nstatic const char *closed_package="fixture.package", *closed_signer="'
+        '#include "installed_provenance.h"\n#define SCHEMII_OBSERVATION_SOURCE "'
+        + "f" * 40
+        + '"\nstatic const char *closed_package="fixture.package", *closed_signer="'
         + "a" * 64
         + '";\nstatic const struct installed_pin closed_pins[]={'
         + '{"AndroidManifest.xml","'
@@ -475,6 +517,11 @@ def snapshot(root: Path) -> dict[str, tuple[int, bytes | None]]:
 @pytest.mark.parametrize(
     "case",
     [
+        "diagnostic-array:version",
+        "diagnostic-array:length",
+        "diagnostic-array:range",
+        "diagnostic-array:time",
+        "diagnostic-array:clone",
         "storage:CE",
         "storage:DE",
         "storage:explicit-DE",
@@ -623,3 +670,269 @@ def test_legacy_activity_routes_with_its_own_profile(java_bootstrap, tmp_path, a
     )
     result = run_java([java, "-cp", str(route_classes), "LegacyRoute"])
     assert result.stdout.strip() == ("host" if anchors else "diagnostic")
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "valid",
+        "version",
+        "length",
+        "throw",
+        "time",
+        "epoch",
+        "first-stage",
+        "flaky",
+        "logloss",
+        "clock",
+        "source",
+        "boot-unobserved",
+        "boot-max",
+        *[
+            f"boot-{index}-{edge}"
+            for index in range(22, 31)
+            for edge in ("high", "negative")
+        ],
+    ],
+)
+def test_observation_failure_never_skips_native_cleanup(tmp_path, mode):
+    """Production service/parser; explicit native report ABI edge double only.
+
+    This proves Java failure isolation, not JNI or Android observations. The
+    actual JNI projection is covered separately by the normal bootstrap cases.
+    """
+    sources = []
+    for name, content in STUBS.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        sources.append(str(path))
+    # Keep the real immutable Observation decoder verbatim, replace only native
+    # ABI edges in this isolated classpath; no product hook or setter exists.
+    owner = (HOST / "NativeOwner.java").read_text()
+    owner = owner.replace('    static { System.loadLibrary("schemii_owner"); }', "")
+    owner = owner.replace(
+        "static native int open();", "static int open() { return 13; }"
+    )
+    owner = owner.replace(
+        "static native int request(int operation);",
+        "static int request(int operation) { return 13; }",
+    )
+    owner = owner.replace(
+        "static native int close();",
+        "static int close() { closes++; return 0; } static int closes; static int reports;",
+    )
+    owner = owner.replace(
+        "static native String observationSource();",
+        'static String observationSource() { if (System.getProperty("mode").equals("source")) return "SECRET-source"; return "'
+        + "f" * 40
+        + '"; }',
+    )
+    owner = owner.replace(
+        "static native long[] status();",
+        "static long[] status() { long[] a=new long[16]; a[0]=13; return a; }",
+    )
+    owner = owner.replace(
+        "static native long[] observation();",
+        """static long[] observation() {
+        String mode=System.getProperty("mode"); reports++;
+        if (mode.equals("throw")) throw new OutOfMemoryError("SECRET-NATIVE-REPORT");
+        long[] a=new long[34]; a[0]=1; a[1]=34; a[2]=10; a[3]=1; a[4]=closes==0 ? 10 : 24; a[14]=13; a[21]=closes==0 ? 2 : 4; a[31]=1; a[32]=2; a[33]=1;
+        if (mode.equals("version")) a[0]=99;
+        if (mode.equals("length") || (mode.equals("flaky") && reports==1)) a=new long[16];
+        if (mode.equals("time")) a[32]=0;
+        if (mode.equals("epoch") && closes>0) { a[31]=3; a[32]=4; }
+        if (mode.equals("first-stage") && closes>0) a[2]=9;
+        if (mode.equals("boot-unobserved")) {
+            a[22]=2; a[23]=3; a[28]=1; a[29]=1; a[30]=2;
+            for (int i=24; i<=27; i++) a[i]=-1;
+        } else if (mode.startsWith("boot-")) {
+            long[] maximum={2,15,11,8,4095,4095,2,3,2};
+            if (mode.equals("boot-max")) {
+                for (int i=22; i<=30; i++) a[i]=maximum[i-22];
+            } else {
+                String[] parts=mode.split("-");
+                int index=Integer.parseInt(parts[1]);
+                a[index]=parts[2].equals("high") ? maximum[index-22]+1
+                    : index>=24 && index<=27 ? -2 : -1;
+            }
+        }
+        return a;
+    }""",
+    )
+    native = tmp_path / "NativeOwner.java"
+    native.write_text(owner)
+    sources += [
+        str(native),
+        str(HOST / "HostService.java"),
+        str(HOST / "StorageProfile.java"),
+    ]
+    harness = tmp_path / "MalformedControl.java"
+    harness.write_text("""
+package development.landmine.schemii.android.host;
+import android.content.*; import android.os.*; import java.io.*; import java.lang.reflect.*; import java.util.concurrent.*;
+public class MalformedControl {
+ public static void main(String[] args) throws Exception {
+  HostService s=new HostService();
+  s.frameworkApplication=new Context() {
+   public File getDataDir() { return new File(args[0]); }
+   public <T> T getSystemService(Class<T> c) { return c.cast(new UserManager()); }
+  };
+  s.onCreate(); s.onStartCommand(new Intent("start"),0,1);
+  Field field=HostService.class.getDeclaredField("work");field.setAccessible(true);
+  ExecutorService work=(ExecutorService)field.get(s);work.shutdown();
+  if (!work.awaitTermination(5,TimeUnit.SECONDS) || NativeOwner.closes!=1) throw new AssertionError("cleanup skipped");
+  Field pending=HostService.class.getDeclaredField("outstanding");pending.setAccessible(true);
+  String mode=System.getProperty("mode");
+  boolean malformed=!(mode.equals("valid") || mode.equals("logloss") || mode.equals("clock") || mode.equals("boot-unobserved") || mode.equals("boot-max"));
+  if ((pending.get(null)!=null)!=malformed || !HostService.status().contains("First error 13.")) throw new AssertionError("unknown report released or first failure erased");
+  if (System.getProperty("mode").equals("logloss") && !HostService.status().contains("Observation loss detected")) throw new AssertionError("loss not surfaced");
+  for (String line:android.util.Log.records) if(line.contains("SECRET") || line.contains(args[0])) throw new AssertionError("redaction");
+  s.onDestroy();
+ }
+}
+""")
+    sources.append(str(harness))
+    classes = tmp_path / "classes"
+    classes.mkdir()
+    run_java(["javac", "-source", "8", "-target", "8", "-d", str(classes), *sources])
+    run_java(
+        [
+            "java",
+            "-Dmode=" + mode,
+            "-Dfixture.logloss=" + str(mode == "logloss").lower(),
+            "-Dfixture.clockfail=" + str(mode == "clock").lower(),
+            "-cp",
+            str(classes),
+            PACKAGE + ".MalformedControl",
+            str(tmp_path),
+        ]
+    )
+
+
+@pytest.mark.parametrize("fault", ["none", "holder", "set", "get", "remove"])
+@pytest.mark.parametrize(
+    "mode,reason", [("application", 1), ("storage", 2), ("loader", 3)]
+)
+def test_actual_framework_producer_retains_finite_failure_reason(
+    tmp_path, mode, reason, fault
+):
+    """Actual framework validator, negative fake-framework edges only.
+
+    JVM loaders cannot supply Android's required loader graph, so no positive
+    framework/package/caller claim is made. JNI PM exceptions are separately
+    exercised through the lifecycle fixture's declared observation-edge double.
+    """
+    stubs = dict(STUBS)
+    stubs.pop("development/landmine/schemii/android/host/InstalledSource.java")
+    stubs["android/content/Context.java"] = stubs[
+        "android/content/Context.java"
+    ].replace(
+        "public abstract <T> T getSystemService",
+        "public ClassLoader getClassLoader() { return getClass().getClassLoader(); }\n    public abstract <T> T getSystemService",
+    )
+    stubs["android/content/pm/ApplicationInfo.java"] = """package android.content.pm;
+public class ApplicationInfo {
+ public static final int FLAG_DEBUGGABLE=2; public int flags,targetSdkVersion,uid;
+ public String packageName,className,appComponentFactory,processName,sourceDir,publicSourceDir,nativeLibraryDir,dataDir;
+ public String[] splitSourceDirs,splitPublicSourceDirs,sharedLibraryFiles;
+} """
+    stubs["android/content/pm/PackageInfo.java"] = """package android.content.pm;
+public class PackageInfo {
+ public String packageName; public ApplicationInfo applicationInfo; public String[] splitNames;
+ public Object[] providers,receivers,instrumentation;
+ public ActivityInfo[] activities,services; public SigningInfo signingInfo;
+} """
+    stubs["android/content/pm/ActivityInfo.java"] = """package android.content.pm;
+public class ActivityInfo { public String name,processName; public boolean exported; }"""
+    stubs["android/content/pm/PackageManager.java"] = """package android.content.pm;
+public abstract class PackageManager {
+ public static final int GET_SIGNING_CERTIFICATES=1,GET_ACTIVITIES=2,GET_SERVICES=4,GET_PROVIDERS=8,GET_RECEIVERS=16,GET_INSTRUMENTATION=32,GET_SHARED_LIBRARY_FILES=64;
+ public abstract PackageInfo getPackageInfo(String name,int flags);
+} """
+    stubs["android/os/Process.java"] = (
+        "package android.os; public class Process { public static int myUid() { return 100; } }"
+    )
+    stubs["development/landmine/schemii/android/host/HostActivity.java"] = (
+        "package development.landmine.schemii.android.host; public class HostActivity {}"
+    )
+    stubs["android/app/Application.java"] = """package android.app;
+import android.content.Context; import android.os.UserManager; import java.io.File;
+public class Application extends Context {
+ public File getDataDir() { return new File(System.getProperty("data")); }
+ public <T> T getSystemService(Class<T> c) { return c.cast(new UserManager() { public boolean isUserUnlocked() { return !System.getProperty("mode").equals("storage"); } }); }
+} """
+    sources = []
+    for n, content in stubs.items():
+        p = tmp_path / n
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+        sources.append(str(p))
+    harness = tmp_path / "ReasonControl.java"
+    harness.write_text("""package development.landmine.schemii.android.host;
+import android.content.Context;
+public class ReasonControl {
+ public static void main(String[] args) throws Exception {
+  Context app=System.getProperty("mode").equals("application") ? new android.app.Service() : new android.app.Application();
+  try { InstalledSource.framework(app); throw new AssertionError("must refuse"); }
+  catch (java.io.IOException expected) { if (InstalledSource.frameworkReason()!=Integer.parseInt(args[0])) throw new AssertionError("finite reason lost"); if(InstalledSource.frameworkReason()!=0) throw new AssertionError("stale phase reused"); }
+ }
+} """)
+    installed_source = HOST / "InstalledSource.java"
+    if fault != "none":
+        # Only the ThreadLocal allocation/storage edge is injected in a private
+        # source copy; actual framework guards and catch/consume code stay exact.
+        # No product setter, hook, injected source or class is packaged.
+        copied = installed_source.read_text()
+        if fault == "holder":
+            allocation = 'throw new OutOfMemoryError("SECRET-phase-holder");'
+        else:
+            signature = {
+                "set": "void set(Integer value)",
+                "get": "Integer get()",
+                "remove": "void remove()",
+            }[fault]
+            allocation = (
+                "return new ThreadLocal<Integer>() { @Override public "
+                + signature
+                + ' { throw new OutOfMemoryError("SECRET-phase-edge"); } };'
+            )
+        assert "return new ThreadLocal<Integer>();" in copied
+        copied = copied.replace("return new ThreadLocal<Integer>();", allocation)
+        installed_source = tmp_path / "InstalledSource.java"
+        installed_source.write_text(copied)
+    classes = tmp_path / "classes"
+    classes.mkdir()
+    run_java(
+        [
+            "javac",
+            "-source",
+            "8",
+            "-target",
+            "8",
+            "-d",
+            str(classes),
+            *sources,
+            str(installed_source),
+            *[
+                str(HOST / n)
+                for n in (
+                    "StorageProfile.java",
+                    "NativeOwner.java",
+                    "HostService.java",
+                )
+            ],
+            str(harness),
+        ]
+    )
+    run_java(
+        [
+            "java",
+            "-Dmode=" + mode,
+            "-Ddata=" + str(tmp_path),
+            "-cp",
+            str(classes),
+            PACKAGE + ".ReasonControl",
+            str(reason if fault == "none" else 0),
+        ]
+    )
