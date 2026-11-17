@@ -306,3 +306,51 @@ def test_journal_busy_private_and_offline_schema(tmp_path, capsys):
     columns = json.loads(capsys.readouterr().out)["columns"]
     assert columns["devops.ci_runs"]["outcome"].startswith("text CHECK")
     assert columns["devops.ci_runs"]["acceptance"] == "boolean"
+
+
+@pytest.mark.parametrize("current", [False, True])
+def test_historical_and_current_public_offline_contract(
+    tmp_path, capsys, monkeypatch, current
+):
+    from tests.devops.test_importer import historical_fixture
+
+    historical_fixture(tmp_path, current=current)
+    monkeypatch.setattr(
+        importer.psycopg, "connect", lambda **kw: pytest.fail("offline connected")
+    )
+    plan_id = None
+    for action in ("plan", "dry-run", "explain", "export"):
+        assert cli.main(arguments(tmp_path, action) + ["--json"]) == 0
+        machine = json.loads(capsys.readouterr().out)
+        assert machine["counts"] == dict(
+            ci_runs=1, commands=23 if current else 22, test_attempts=3
+        )
+        assert machine["plan_id"] == (plan_id or machine["plan_id"])
+        plan_id = machine["plan_id"]
+        assert bool(machine["producer_contracts"]) is (not current)
+        assert cli.main(arguments(tmp_path, action)) == 0
+        human = dict(
+            line.split(": ", 1) for line in capsys.readouterr().out.splitlines()
+        )
+        assert {k: json.loads(v) for k, v in human.items()} == machine
+    assert cli.main(["schema", "--json"]) == 0
+    discovered = json.loads(capsys.readouterr().out)
+    assert (
+        discovered["producer_recipes"][importer.HISTORICAL_RECIPE]["selection"]
+        == "explicit-curator-provenance"
+    )
+
+
+def test_historical_refusal_does_not_echo_untrusted_provenance(tmp_path, capsys):
+    from tests.devops.test_importer import historical_fixture
+
+    m, _ = historical_fixture(tmp_path)
+    m["runs"][0]["producer"]["files"] = {
+        "SECRET_SENTINEL": "postgres://SECRET_SENTINEL/private"
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(m))
+    for action in ("plan", "dry-run", "explain", "export"):
+        assert cli.main(arguments(tmp_path, action) + ["--json"]) == 2
+        captured = capsys.readouterr()
+        assert "SECRET_SENTINEL" not in captured.out + captured.err
+        assert json.loads(captured.out)["reason"] == "unsupported-producer-provenance"

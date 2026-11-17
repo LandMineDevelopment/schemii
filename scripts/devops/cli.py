@@ -211,6 +211,15 @@ def execute(args) -> dict:
             contract_version=1,
             manifest_version=1,
             supported_source="local-ci-v1",
+            producer_recipes={
+                "current": {"selection": "default", "native_prefix": True},
+                core.HISTORICAL_RECIPE: {
+                    "selection": "explicit-curator-provenance",
+                    "profile": "full",
+                    "files": core.HISTORICAL_FILES,
+                    "native_prefix": False,
+                },
+            },
             datasets=[
                 "v1_ci_runs",
                 "v1_command_runs",
@@ -246,6 +255,7 @@ def execute(args) -> dict:
         gaps=selected["body"]["gaps"],
         acceptance="producer-assertion-only",
         coverage="explicit-manifest-only",
+        producer_contracts=selected["body"].get("producer_contracts", []),
     )
     if args.action in {"plan", "dry-run", "explain", "export"}:
         if args.action == "export":
