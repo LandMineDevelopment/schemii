@@ -640,6 +640,7 @@ def connected_native(cache, out, abis):
                     "actor_channel.c",
                     "owner_jni.c",
                     "boot_compare.c",
+                    "boot_authority.c",
                     "boot_identity.c",
                 )
             ],

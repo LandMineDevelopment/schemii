@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "owner.h"
-#include "boot_compare.h"
+#include "boot_authority.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -15,7 +15,8 @@
 #include <unistd.h>
 
 struct apk_owner {
-    int dirfd, sockets[2], actors[2];
+    int sockets[2], actors[2];
+    struct boot_authority *authority;
     pthread_t worker;
     pthread_mutex_t lock;
     atomic_int busy, cancel, finished;
@@ -58,7 +59,7 @@ static void *serve(void *arg) {
              * absent C/A remains UNKNOWN. No managed fork can precede this gate.
              * Existing journal bytes remain untouched for independent diagnosis.
              */
-            struct boot_compare_result b=boot_compare_current(NULL);
+            struct boot_compare_result b=boot_authority_compare(o->authority);
             pthread_mutex_lock(&o->lock);
             o->status.boot_relation=b.relation; o->status.boot_reason=b.reason;
             o->status.cleanup_error=b.cleanup_error;
@@ -79,23 +80,31 @@ static void close_once(int fd, struct apk_owner_errors *errors) {
         else if (!errors->secondary_close_error) errors->secondary_close_error=e;
     }
 }
+static void merge_custody(struct apk_owner_errors *errors, const struct boot_authority_errors *custody) {
+    const int extra[]={custody->close_error,custody->secondary_close_error};
+    for (unsigned i=0;i<2;i++) {
+        if (!extra[i]) continue;
+        if (!errors->close_error) errors->close_error=extra[i];
+        else if (!errors->secondary_close_error) errors->secondary_close_error=extra[i];
+    }
+    errors->close_failures+=custody->close_failures;
+}
 int apk_owner_open_diagnostic(int borrowed,struct apk_owner **out,struct apk_owner_errors *report) {
     struct apk_owner_errors local={0};
     struct apk_owner_errors *errors=report?report:&local;
     memset(errors,0,sizeof(*errors));
     if (!out) { errors->error=EINVAL; return EINVAL; }
     *out=NULL;
-    struct stat st;
-    if (fstat(borrowed,&st)<0) { errors->error=errno; return errors->error; }
-    if (!S_ISDIR(st.st_mode) || st.st_uid!=geteuid() || (st.st_mode&0777)!=0700) {
-        errors->error=EACCES; return EACCES;
+    struct boot_authority *authority=NULL;
+    struct boot_authority_errors custody={0};
+    errors->error=boot_authority_open(borrowed,&authority,&custody);
+    if (errors->error) {
+        merge_custody(errors,&custody);
+        return errors->error;
     }
-    int dir=openat(borrowed,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
-    if (dir<0) { errors->error=errno; return errors->error; }
     struct apk_owner *o=NULL;
     int sockets[2]={-1,-1}, actors[2]={-1,-1};
     int mutex_ready=0;
-    if (flock(dir,LOCK_EX|LOCK_NB)<0) { errors->error=errno; goto failed; }
     o=calloc(1,sizeof(*o));
     if (!o) { errors->error=ENOMEM; goto failed; }
     if (socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,sockets)<0) {
@@ -106,7 +115,7 @@ int apk_owner_open_diagnostic(int borrowed,struct apk_owner **out,struct apk_own
     if (socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC|SOCK_NONBLOCK,0,actors)<0) {
         errors->error=errno; goto failed;
     }
-    o->dirfd=dir; memcpy(o->sockets,sockets,sizeof(sockets)); memcpy(o->actors,actors,sizeof(actors));
+    o->authority=authority; memcpy(o->sockets,sockets,sizeof(sockets)); memcpy(o->actors,actors,sizeof(actors));
     errors->error=pthread_mutex_init(&o->lock,NULL);
     if (errors->error) goto failed;
     mutex_ready=1;
@@ -120,7 +129,9 @@ int apk_owner_open_diagnostic(int borrowed,struct apk_owner **out,struct apk_own
 failed:
     if (mutex_ready) pthread_mutex_destroy(&o->lock);
     for (int i=0;i<2;i++) { close_once(actors[i],errors); close_once(sockets[i],errors); }
-    close_once(dir,errors); free(o);
+    (void)boot_authority_close(&authority,&custody);
+    merge_custody(errors,&custody);
+    free(o);
     return errors->error;
 }
 int apk_owner_open(int borrowed,struct apk_owner **out) {
@@ -128,7 +139,7 @@ int apk_owner_open(int borrowed,struct apk_owner **out) {
 }
 int apk_owner_request(struct apk_owner *o,uint32_t operation) {
     if (!o || operation<1 || operation>2) return EINVAL;
-    if (operation==2) atomic_store(&o->cancel,1);
+    if (operation==2) { atomic_store(&o->cancel,1); boot_authority_cancel(o->authority); }
     if (atomic_exchange(&o->busy,1)) return EBUSY;
     if (atomic_load(&o->finished) || o->sent==UINT32_MAX) { atomic_store(&o->busy,0); return EPIPE; }
     struct envelope frame={MAGIC,1,++o->sent,operation};
@@ -159,9 +170,12 @@ int apk_owner_close_diagnostic(struct apk_owner **owner,struct apk_owner_errors 
     }
     int e=pthread_join(o->worker,NULL); if (e) { errors->error=e; return e; }
     for (int i=0;i<2;i++) { close_once(o->actors[i],errors); close_once(o->sockets[i],errors); }
-    close_once(o->dirfd,errors);
+    struct boot_authority_errors custody={0};
+    errors->error=boot_authority_close(&o->authority,&custody);
+    merge_custody(errors,&custody);
     pthread_mutex_destroy(&o->lock); memset(o,0,sizeof(*o)); free(o); *owner=NULL;
-    errors->error=errors->close_error; return errors->error;
+    if (!errors->error) errors->error=errors->close_error;
+    return errors->error;
 }
 
 int apk_owner_close(struct apk_owner **owner) {
