@@ -14,6 +14,7 @@ Usage: schemii COMMAND [ARGUMENTS]
   install                         Install the dedicated Debian 13 ARM64 runtime
   configure --tailnet-ip IP --hostname NAME
   start | stop | restart | status  Manage the complete phone backend
+  start --foreground             Keep the launch task attached after readiness
   wait-network                   Wait up to 120 seconds for the configured VPN address
   doctor                         Inspect runtime dependencies and device checks
   logs [SERVICE]                 Read bounded private logs
@@ -301,9 +302,18 @@ PENDING
   return 1
 }
 start_runtime() {
-  (($# == 0)) || fail 'start takes no arguments; use configure first.'
+  local foreground=0
+  if [[ ${1-} == --foreground ]]; then
+    foreground=1
+    shift
+  fi
+  if (($# != 0)); then fail 'Usage: schemii start [--foreground]; use configure first.'; return 1; fi
   if runtime status > "$SCHEMII_ANDROID_CONTROL/status.json" 2>/dev/null; then
-    cat "$SCHEMII_ANDROID_CONTROL/status.json"; return
+    cat "$SCHEMII_ANDROID_CONTROL/status.json"
+    if ((foreground)); then
+      printf 'Backend already ready; no background task attached.\n'
+    fi
+    return
   fi
   if report_tailnet_pending; then return 2; fi
   host_running && fail 'The supervisor is active but not ready. Inspect logs, then stop it before starting again.'
@@ -311,7 +321,9 @@ start_runtime() {
   if [[ -f "$logfile" ]] && (( $(wc -c < "$logfile") > 1048576 )); then
     mv -f -- "$logfile" "$logfile.1"
   fi
-  command -v termux-wake-lock >/dev/null && termux-wake-lock
+  # Termux counts the running boot task itself. It does not need a wake lock
+  # to keep its foreground service active while this task is attached.
+  if ((!foreground)) && command -v termux-wake-lock >/dev/null; then termux-wake-lock; fi
   # All guest services remain children of one foreground PRoot session.
   if native_mode; then
     nohup python "$SCHEMII_ANDROID_ROOT/dev/android/host.py" run \
@@ -331,7 +343,16 @@ start_runtime() {
   local deadline=$((SECONDS + 180))
   while ((SECONDS < deadline)); do
     if runtime status > "$SCHEMII_ANDROID_CONTROL/status.json" 2>/dev/null; then
-      cat "$SCHEMII_ANDROID_CONTROL/status.json"; return
+      cat "$SCHEMII_ANDROID_CONTROL/status.json"
+      if ((!foreground)); then return; fi
+      # Stop, restart and maintenance still use the launcher lock. Follow
+      # only the child started by this invocation and leave stop to the launcher.
+      exec 9>&-
+      printf 'Backend ready; Termux background task attached.\n' | tee -a -- "$logfile"
+      local runner_status=0
+      wait "$runner" || runner_status=$?
+      printf 'Backend supervisor exited with status %s; inspect schemii status and logs.\n' "$runner_status" | tee -a -- "$logfile"
+      return "$runner_status"
     fi
     if report_tailnet_pending; then return 2; fi
     host_running || fail "The supervisor exited before readiness. Inspect private log: $logfile"
@@ -364,29 +385,33 @@ restart_runtime() {
   stop_runtime || return
   start_runtime
 }
-manage_boot() {
-  local action=$1 target="$HOME/.termux/boot/schemii"
+manage_boot() (
+  local action=$1 directory="$HOME/.termux/boot" target temporary
+  target="$directory/schemii"
+  [[ ! -L "$HOME/.termux" && ! -L "$directory" ]] || fail 'Termux boot directories must not be symlinks.'
+  if [[ -e "$target" || -L "$target" ]]; then
+    [[ ! -L "$target" && -f "$target" && $(sed -n '2p' -- "$target") == '# Schemii Android preview boot v1' ]] || fail 'Existing boot file is not owned by Schemii; preserving it.'
+  fi
   if [[ "$action" == disable-boot ]]; then
     if [[ -e "$target" ]]; then
-      [[ ! -L "$target" ]] && head -n2 "$target" | grep -Fq '# Schemii Android preview boot v1' || fail 'Existing boot file is not owned by Schemii; preserving it.'
       rm -- "$target"
     fi
     printf 'Schemii boot startup disabled.\n'; return
   fi
-  mkdir -p -- "$HOME/.termux/boot"
-  if [[ -e "$target" ]]; then
-    [[ ! -L "$target" ]] && head -n2 "$target" | grep -Fq '# Schemii Android preview boot v1' || fail 'Existing boot file is not owned by Schemii; preserving it.'
-  fi
+  mkdir -p -- "$directory"
   [[ ! -e "$target.tmp" && ! -L "$target.tmp" ]] || fail 'Existing boot temporary file is preserved; inspect it before retrying.'
+  # Termux:Boot dispatches all regular files in boot, even temporary ones.
+  temporary=$(mktemp -- "$HOME/.termux/.schemii-boot.XXXXXXXX")
+  trap 'rm -f -- "$temporary"' EXIT
   {
     printf '#!%s/bin/bash\n# Schemii Android preview boot v1\n' "$PREFIX"
-    printf 'set -eu\n%q wait-network\n' "$PREFIX/bin/schemii"
-    printf 'exec %q start\n' "$PREFIX/bin/schemii"
-  } > "$target.tmp"
-  chmod 700 "$target.tmp"
-  mv -f -- "$target.tmp" "$target"
+    printf 'set -eu\nprintf "Schemii boot: waiting for the configured VPN address.\\n"\n'
+    printf '%q wait-network\nexec %q start --foreground\n' "$PREFIX/bin/schemii" "$PREFIX/bin/schemii"
+  } > "$temporary"
+  chmod 700 "$temporary"
+  mv -fT -- "$temporary" "$target"
   printf 'Schemii boot script enabled. Install/open Termux:Boot from the same source as Termux. Enable Tailscale always-on VPN and battery exemptions for both apps; first unlock and physical idle/reboot tests remain required.\n'
-}
+)
 main() {
   local action=${1:---help}
   case "$action" in --help|-h|help) usage; return;; esac
