@@ -41,7 +41,7 @@ public final class HostService extends Service {
         long begin = -1, end = -1;
         boolean completed, workerStarted, observationAttempted;
         int javaStage = 1, javaFailure, logSequence, logFailures;
-        String source = "unknown";
+        String source = "unknown", imageRefusal = "unknown";
         NativeOwner.Observation beforeClose, afterClose;
         Acquisition acquisition;
         String refusal = "Launch refused — private storage unavailable. Data preserved.";
@@ -125,11 +125,12 @@ public final class HostService extends Service {
         }
     }
     private static void emitObservation(Operation operation, int phase) {
-        String source, pre, post;
+        String source, pre, post, image;
         long begin, end; int sequence, losses, stage, failure; boolean cancel, completed;
         synchronized (lifecycle) {
             sequence = ++operation.logSequence; losses = operation.logFailures;
             source = operation.source; begin = operation.begin; end = operation.end;
+            image = operation.imageRefusal;
             stage = operation.javaStage; failure = operation.javaFailure;
             cancel = operation.cancelled || operation.service.destroyed || operation.service.replaced;
             completed = operation.completed;
@@ -141,7 +142,7 @@ public final class HostService extends Service {
             + " record=" + sequence + " phase=" + phase + " begin=" + begin + " end=" + end
             + " javaStage=" + stage + " javaFailure=" + failure + " cancelRequested=" + (cancel ? 1 : 0)
             + " completionObserved=" + (completed ? 1 : 0) + " lost=" + losses
-            + " delivery=unverified pre=" + pre + " post=" + post;
+            + " delivery=unverified pre=" + pre + " post=" + post + " image=" + image;
         int written = -1;
         try {
             if (record.length() <= 2048) written = android.util.Log.i("SchemiiAcquire", record);
@@ -179,7 +180,11 @@ public final class HostService extends Service {
                 : "Launch refused — native acquisition failed (" + result + "). Data preserved.";
         }
         NativeOwner.Observation observed = readObservation();
-        synchronized (lifecycle) { operation.beforeClose = observed; operation.observationAttempted = true; }
+        String image = "unknown";
+        if (observed != null && observed.at(7) == 3) try {
+            image = observed.imageRefusalScalars(NativeOwner.imageRefusal());
+        } catch (Exception | LinkageError | OutOfMemoryError error) { /* observation unavailable, close unchanged */ }
+        synchronized (lifecycle) { operation.beforeClose = observed; operation.observationAttempted = true; operation.imageRefusal = image; }
     }
     private void finish(Operation operation) {
         // Sole reserving worker owns native cleanup. No lifecycle monitor across
