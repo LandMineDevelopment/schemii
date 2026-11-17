@@ -32,6 +32,7 @@ int ac_clone_policy(int clone3, uint64_t flags);
 void ac_proot_bind(struct ac_channel *);
 int ac_proot_require(void);
 void ac_proot_fault(int error);
+int ac_proot_wait_end(void);
 pid_t ac_native_fork(unsigned kind);
 int ac_child_fds(const int *keep, size_t count);
 int ac_birth_enter(pid_t pid);
@@ -41,5 +42,5 @@ void ac_observe(pid_t pid, int status);
 int ac_helper_wait(pid_t pid, int status);
 pid_t ac_target_wait(pid_t pid, int *status, int options, int direct);
 long ac_resume(int request, pid_t pid, void *address, void *data);
-void ac_exec(pid_t oldpid, pid_t newpid);
+int ac_exec(pid_t oldpid, pid_t newpid);
 #endif

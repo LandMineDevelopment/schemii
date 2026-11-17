@@ -1,7 +1,8 @@
-"""Controls extracted from exact patched production leaves, not a policy model.
+"""Finite controls on complete patched production units and supporting snippets.
 
-Requires the reviewed read-only donor via SCHEMII_ACTOR_DONOR. This test never
-runs PRoot/guest/SDK or a deployment. Children belong directly to each fixture.
+Requires a reviewed read-only donor via SCHEMII_ACTOR_DONOR. Host controls use
+only bounded native fixtures; no packaged guest, Android binary, app or deployment
+runs. Kernel transport substitutions and observer-only waits are explicit.
 """
 
 from __future__ import annotations
@@ -74,7 +75,7 @@ def function(text, start):
     return text[begin:end]
 
 
-def compile_control(tmp_path, source):
+def compile_control(tmp_path, source, extra=()):
     path = tmp_path / "fixture.c"
     path.write_text(source)
     output = tmp_path / "fixture"
@@ -92,6 +93,7 @@ def compile_control(tmp_path, source):
             str(HOST),
             str(path),
             str(HOST / "actor_channel.c"),
+            *extra,
             "-o",
             str(output),
         ],
@@ -388,7 +390,7 @@ def test_actual_resume_on_directly_owned_tracee(patched, tmp_path):
 #include <sys/wait.h>
 #include <unistd.h>
 typedef struct { struct { int wait_pid; } as_ptracer;
- int restart_how,pid,last_restart_how,running; } Tracee;
+ int restart_how,pid,last_restart_how,running,terminated; } Tracee;
 """
         + body
         + r"""
@@ -402,9 +404,10 @@ int main(void) {
   raise(SIGSTOP); _exit(0);
  }
  int status; assert(ac_target_wait(child,&status,0,0)==child && WIFSTOPPED(status));
- Tracee t={{0},PTRACE_CONT,child,0,0}; assert(restart_tracee(&t,0));
+ Tracee t={{0},PTRACE_CONT,child,0,0,0}; assert(restart_tracee(&t,0));
  assert(t.running && t.last_restart_how==PTRACE_CONT && !t.restart_how);
  assert(ac_target_wait(child,&status,0,0)==child && WIFEXITED(status));
+ t.terminated=1;assert(!restart_tracee(&t,0) && !c.lost);
  assert(ac_highwater(&c)==EBUSY); return 0;
 }
 """,
@@ -413,7 +416,10 @@ int main(void) {
 
 def test_actual_arm64_raw_resume_wait_block_on_owned_host_tracee(patched, tmp_path):
     text = (patched / "tracee/mem.c").read_text()
-    block = text.split("#ifdef SCHEMII_MANAGED_ACTORS", 2)[-1].split("#else", 1)[0]
+    start = text.rfind(
+        "#ifdef SCHEMII_MANAGED_ACTORS", 0, text.index("if (ac_resume(PTRACE_CONT")
+    )
+    block = text[start:].split("\n", 1)[1].split("#else", 1)[0]
     assert "ac_resume(PTRACE_CONT" in block and "ac_target_wait" in block
     compile_control(
         tmp_path,
@@ -430,7 +436,7 @@ static int raw(Tracee *tracee) {int wstatus=0;
 """
         + block
         + r"""
-return wstatus;}
+return wstatus;managed_raw_restore:return -1;}
 int main(void) {
  struct ac_binding b={{1},{2},{3},1,42,1}; struct ac_channel c; int pair[2];
  assert(!ac_pair(pair)); assert(!ac_init(&c,pair[0],&b)); ac_proot_bind(&c);
@@ -472,3 +478,269 @@ def test_actual_actor_parity_rejects_changed_source(tmp_path):
     path.write_bytes(path.read_bytes() + b"\n/* changed */\n")
     with pytest.raises(ParityError, match="actor source drift"):
         check_actor_producer(tmp_path)
+
+
+@pytest.fixture(scope="module")
+def integrated_control(patched):
+    """Whole production translation units, linked together; no snippet substitutes."""
+    import re
+    import shutil
+
+    donor = Path(os.environ["SCHEMII_ACTOR_DONOR"])
+    talloc = donor.parent / "talloc-2.5.0"
+    out = patched.parent / "integrated"
+    out.mkdir()
+    # Host glibc already declares memset_explicit; use its implementation.
+    # Target build retains the unchanged bionic portability header.
+    replace_header = (ROOT / "platforms/android/native/replace.h").read_text()
+    (out / "replace.h").write_text(
+        replace_header.split("/* C23 memset_explicit")[0] + "\n#include <limits.h>\n"
+    )
+    subprocess.run(
+        [
+            "cc",
+            "-c",
+            "-O1",
+            "-D_GNU_SOURCE",
+            "-I" + str(out),
+            "-I" + str(talloc),
+            str(talloc / "talloc.c"),
+            "-o",
+            str(out / "talloc.o"),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["ar", "rcs", str(out / "libtalloc.a"), str(out / "talloc.o")], check=True
+    )
+    recipe = patched / "GNUmakefile"
+    recipe.write_text("OBJECTS += actor_channel.o\n" + recipe.read_text())
+    subprocess.run(
+        [
+            "patch",
+            "--batch",
+            "--fuzz=0",
+            "-p1",
+            "-i",
+            str(ROOT / "platforms/android/native/proot-string-header.patch"),
+        ],
+        cwd=patched,
+        check=True,
+    )
+    args = [
+        "make",
+        "-j4",
+        "V=1",
+        "HAS_LOADER_32BIT=",
+        "PROOT_UNBUNDLE_LOADER=/nonexistent",
+        "CPPFLAGS=-D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -DSCHEMII_MANAGED_ACTORS -DPROOT_UNBUNDLE_LOADER='\"/nonexistent\"' -I. -I"
+        + str(talloc),
+        "LDFLAGS=-L" + str(out) + " -ltalloc -Wl,-z,noexecstack",
+        "CFLAGS=-O1 -g -ffunction-sections -fdata-sections",
+    ]
+    database = subprocess.check_output(args + ["-pn"], cwd=patched, text=True)
+    objects = re.search(r"^OBJECTS = (.+)$", database, re.M)
+    assert objects
+    names = objects[1].split()
+    assert names.count("actor_channel.o") == 1
+    subprocess.run(args + names, cwd=patched, check=True)
+    cli = out / "cli-renamed.o"
+    shutil.copyfile(patched / "cli/cli.o", cli)
+    subprocess.run(
+        ["objcopy", "--redefine-sym", "main=schemii_proot_main", str(cli)], check=True
+    )
+    helper_object = out / "sysvipc-exposed.o"
+    shutil.copyfile(patched / "extension/sysvipc/sysvipc_shm.o", helper_object)
+    subprocess.run(
+        [
+            "objcopy",
+            "--globalize-symbol",
+            "sysvipc_shm_send_helper_request",
+            "--globalize-symbol",
+            "sysvipc_shm_helper_addr",
+            str(helper_object),
+        ],
+        check=True,
+    )
+    text = (patched / "extension/sysvipc/sysvipc_shm.c").read_text()
+    (out / "fixture-sysvipc.h").write_text(
+        text[
+            text.index("enum SysVIpcShmHelperRequestOp") : text.index(
+                "static struct sockaddr_un sysvipc_shm_helper_addr;"
+            )
+        ]
+        + "\nvoid sysvipc_shm_send_helper_request(struct SysVIpcShmHelperRequest *, void *, size_t);\n"
+    )
+    output = out / "control"
+    subprocess.run(
+        [
+            "cc",
+            "-D_GNU_SOURCE",
+            "-DAC_INTEGRATED",
+            "-DSCHEMII_MANAGED_ACTORS",
+            "-g",
+            "-O1",
+            "-I" + str(patched),
+            "-I" + str(out),
+            "-I" + str(talloc),
+            "-I" + str(HOST),
+            str(ROOT / "platforms/android/native/tests/actor_control.c"),
+            *[
+                str(
+                    cli
+                    if n == "cli/cli.o"
+                    else helper_object
+                    if n == "extension/sysvipc/sysvipc_shm.o"
+                    else patched / n
+                )
+                for n in names
+            ],
+            str(out / "libtalloc.a"),
+            "-Wl,--wrap=ptrace",
+            "-Wl,--wrap=waitpid",
+            "-Wl,--wrap=execvp",
+            "-Wl,--wrap=fork",
+            "-Wl,--wrap=kill",
+            "-Wl,--wrap=translate_syscall_enter",
+            "-Wl,--wrap=translate_syscall_exit",
+            "-o",
+            str(output),
+        ],
+        check=True,
+    )
+    (out / "objects.json").write_text(json.dumps(names))
+    return output
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "kernel-fork",
+        "kernel-vfork",
+        "kernel-clone",
+        "kernel-thread",
+        "kernel-untraced",
+        "kernel-clone3",
+        "kernel-rejected-clone",
+        "root-exec-failure",
+        "root-stop-failure",
+        "root-options-failure",
+        "helper-first",
+        "helper-last",
+        "script-stop-first",
+        "script-death-first",
+        "script-nonleader-exec",
+        "script-exec-collision",
+        "tracer-live-helper-loss",
+        "root-fork-failure",
+        "root-traceme-failure",
+        "loop-wait-EINTR",
+        "loop-wait-ECHILD",
+        "loop-wait-EIO",
+        "loop-wait-invalid",
+        "kernel-nonleader-exec",
+        "f2fs-full",
+        "f2fs-fork-failure",
+        "helper-fork-failure",
+        "helper-startup-failure",
+    ],
+)
+def test_integrated_production_paths(integrated_control, mode):
+    subprocess.run(
+        [str(integrated_control), mode],
+        cwd=integrated_control.parent,
+        check=True,
+        timeout=20,
+    )
+
+
+@pytest.mark.parametrize("fault", range(14))
+def test_complete_raw_workaround_injected_boundaries(patched, tmp_path, fault):
+    body = function(
+        (patched / "tracee/mem.c").read_text(),
+        "static int ptrace_pokedata_or_via_stub(",
+    )
+    source = (
+        r"""
+#include "actor_channel.h"
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ptrace.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#define HAS_POKEDATA_WORKAROUND 1
+#define VERBOSE(...) ((void)0)
+#define CURRENT 0
+#define INSTR_POINTER 1
+#define SYSARG_2 2
+#define SYSARG_3 3
+#define PR_void 0
+#define ERROR 0
+#define INFO 1
+#define INTERNAL 0
+typedef uintptr_t word_t;
+struct user_regs_struct {word_t value;};
+typedef struct {struct user_regs_struct _regs[1];int pid,verbose;bool restore_original_regs,is_aarch32,_regs_were_changed,pokedata_workaround_cancelled_syscall;word_t pokedata_workaround_stub_addr;} Tracee;
+static int fault=RAW_CASE, mask_sets, resumes, waits, redeliver;
+static void note(Tracee *t,int a,int b,const char *fmt,...) {(void)t;(void)a;(void)b;(void)fmt;}
+static void poke_reg(Tracee *t,int reg,word_t value) {(void)reg;t->_regs[0].value=value;}
+static void set_sysnum(Tracee *t,int n) {(void)t;(void)n;}
+static int push_specific_regs(Tracee *t,bool all) {(void)t;(void)all;if(fault==4 || fault==12) {errno=EIO;return -1;}return 0;}
+static void print_current_regs(Tracee *t,int n,const char *s) {(void)t;(void)n;(void)s;}
+static long injected_ptrace(int request,int pid,uintptr_t address,void *data) {
+ (void)pid;(void)address;
+ if(request==PTRACE_POKEDATA) {errno=EIO;return -1;}
+ if(request==PTRACE_GETSIGMASK) {if(fault==1) {errno=EACCES;return -1;}sigemptyset(data);return 0;}
+ if(request==PTRACE_SETSIGMASK) {mask_sets++;if((fault==2 && mask_sets==1)||((fault==3 || fault==12) && mask_sets==2)) {errno=EPERM;return -1;}return 0;}
+ if(request==PTRACE_CONT) {resumes++;if(fault==5) {errno=EIO;return -1;}return 0;}
+ return 0;
+}
+long __wrap_ptrace(enum __ptrace_request request,...) {
+ va_list ap;va_start(ap,request);int pid=va_arg(ap,int);void *a=va_arg(ap,void *),*b=va_arg(ap,void *);va_end(ap);
+ return injected_ptrace(request,pid,(uintptr_t)a,b);
+}
+pid_t __real_waitpid(pid_t,int *,int);
+pid_t __wrap_waitpid(pid_t pid,int *status,int options) {
+ (void)options;waits++;
+ if(fault==6 || fault==7) {errno=fault==6?ECHILD:EIO;return -1;}
+ if(fault==8) {*status=0xffff;return pid;}
+ int sig=SIGILL;
+ if(fault==9 && waits==1) {errno=EINTR;return -1;}
+ if(fault==9 && waits==2) sig=SIGSYS;
+ if(fault==9 && waits==3) sig=SIGSTOP;
+ if(fault==13 && waits==1) sig=SIGSTOP;
+ if(fault==10) sig=SIGTRAP;
+ *status=fault==11?0:(sig<<8)|0x7f;return pid;
+}
+static int injected_kill(int pid,int sig) {(void)pid;(void)sig;redeliver++;if(fault==13) {errno=ESRCH;return -1;}return 0;}
+#define kill injected_kill
+#define ptrace(r,p,a,b) injected_ptrace(r,p,(uintptr_t)(a),(void *)(uintptr_t)(b))
+"""
+        + body
+        + r"""
+int main(void) {
+ int pair[2];struct ac_channel c;struct ac_binding b={{1},{2},{3},1,42,1};
+ assert(!ac_pair(pair));assert(!ac_init(&c,pair[0],&b));ac_proot_bind(&c);
+ pid_t child=ac_native_fork(AC_ROOT);assert(child>=0);
+ if(!child) {const int keep[]={0,1,2};if(ac_child_fds(keep,3)) _exit(125);_exit(0);}
+ Tracee t={0};t.pid=child;t._regs[0].value=123;t.restore_original_regs=true;
+ int result=ptrace_pokedata_or_via_stub(&t,456,789);
+ int status;assert(__real_waitpid(child,&status,0)==child && WIFEXITED(status));
+ if(fault==0 || fault==9) {assert(!result && !c.lost && t._regs[0].value==123 && t.restore_original_regs);if(fault==9) assert(waits==4 && redeliver==1);}
+ else {assert(result==-1 && c.lost);assert(ac_highwater(&c)==EBUSY);if(fault==12) assert(c.error==EIO && c.secondary==EPERM);}
+ assert(t._regs[0].value==123 && t.restore_original_regs);
+ return 0;
+}
+"""
+    )
+    compile_control(
+        tmp_path,
+        source.replace("RAW_CASE", str(fault)),
+        ["-Wl,--wrap=ptrace", "-Wl,--wrap=waitpid"],
+    )

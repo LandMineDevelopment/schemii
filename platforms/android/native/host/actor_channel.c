@@ -204,6 +204,15 @@ static struct ac_channel *producer;
 void ac_proot_fault(int e) { if(producer) ac_loss(producer,e); }
 void ac_proot_bind(struct ac_channel *c) { if(!producer) producer=c; else ac_loss(producer,EALREADY); }
 int ac_proot_require(void) { return !producer?ENOTCONN:producer->lost?producer->error:0; }
+int ac_proot_wait_end(void) {
+    int e=ac_proot_require(); if(e) return e;
+    for(unsigned i=0;i<AC_CAPACITY;i++)
+        if(producer->slots[i].live || producer->slots[i].pending || producer->early[i].pid) {
+            ac_loss(producer,ECHILD); return ECHILD;
+        }
+    /* Guest real-parent wait obligations remain untouched. */
+    return 0;
+}
 static struct ac_slot *slot(pid_t pid) {
     if(!producer) return NULL;
     for(unsigned i=0;i<AC_CAPACITY;i++) if(producer->slots[i].pid==pid && producer->slots[i].live) return &producer->slots[i];
@@ -213,7 +222,7 @@ static struct ac_slot *allocate(pid_t pid,unsigned kind,int direct,uint64_t proc
     if(ac_proot_require()) return NULL;
     if(slot(pid)) { ac_loss(producer,EEXIST); return NULL; }
     for(unsigned i=0;i<AC_CAPACITY;i++) if(!producer->slots[i].live && !producer->slots[i].pending && !producer->slots[i].wait_pending) {
-        if(producer->next_incarnation==UINT64_MAX) break;
+        if(producer->next_incarnation==UINT64_MAX) { ac_loss(producer,EOVERFLOW); return NULL; }
         struct ac_slot *s=&producer->slots[i]; memset(s,0,sizeof(*s));
         s->task=++producer->next_incarnation; s->process=process?process:s->task;
         s->creator=producer->binding.creator; s->pid=pid; s->kind=kind; s->direct=direct; s->live=1; s->wait_pending=1; return s;
@@ -260,6 +269,12 @@ int ac_task(pid_t parent,pid_t pid,int thread) {
 }
 pid_t ac_native_fork(unsigned kind) {
     int e=ac_proot_require(); if(e) { errno=e; return -1; }
+    /* A pipe failure is not a helper terminal. Do not replace the service
+     * while its exact direct-parent wait is still outstanding. */
+    if(kind==AC_SYSVIPC) for(unsigned i=0;i<AC_CAPACITY;i++)
+        if(producer->slots[i].kind==AC_SYSVIPC && (producer->slots[i].live || producer->slots[i].pending || producer->slots[i].wait_pending)) {
+            errno=EBUSY; return -1;
+        }
     struct ac_slot *s=allocate(0,kind,1,0); if(!s) { errno=producer->error; return -1; }
     s->native_intent=1; s->pending=1; s->intent=producer->tx+1;
     if(emit(s,AC_INTENT,0,getpid())) { errno=producer->error; return -1; }
@@ -300,9 +315,13 @@ void ac_observe(pid_t pid,int status) {
 }
 pid_t ac_target_wait(pid_t pid,int *status,int options,int direct) {
     int e=ac_proot_require(); if(e) { errno=e; return -1; }
+    if(pid<=0 || !status || !slot(pid)) { ac_loss(producer,EINVAL); errno=EINVAL; return -1; }
     pid_t result; do { result=waitpid(pid,status,options); } while(result<0 && errno==EINTR);
+    if(result>0 && (result!=pid || !(WIFEXITED(*status)||WIFSIGNALED(*status)||WIFSTOPPED(*status)))) {
+        ac_loss(producer,EPROTO); errno=EPROTO; return -1;
+    }
     if(result==pid) {
-        if(direct) { if(!ac_helper_wait(pid,*status)) ac_loss(producer,EPROTO); }
+        if(direct) { if(!ac_helper_wait(pid,*status)) { ac_loss(producer,EPROTO); errno=EPROTO; return -1; } }
         else ac_observe(pid,*status);
     } else if(result<0) ac_loss(producer,errno);
     return result;
@@ -316,12 +335,12 @@ long ac_resume(int request,pid_t pid,void *address,void *data) {
     if(result<0) ac_loss(producer,errno);
     return result;
 }
-void ac_exec(pid_t oldpid,pid_t newpid) {
-    if(!producer) return;
+int ac_exec(pid_t oldpid,pid_t newpid) {
+    if(!producer) return ENOTCONN;
     struct ac_slot *s=slot(oldpid), *leader=slot(newpid);
-    if(!s) { ac_loss(producer,ESRCH); return; }
+    if(!s) { ac_loss(producer,ESRCH); return ESRCH; }
     if(leader && leader!=s && leader->process!=s->process) {
-        ac_loss(producer,ESTALE); return;
+        ac_loss(producer,ESTALE); return ESTALE;
     }
     if(!emit(s,AC_EXEC,0,newpid)) {
         /* Kernel exec remaps the task identity but supplies no separate
@@ -330,4 +349,5 @@ void ac_exec(pid_t oldpid,pid_t newpid) {
         if(leader && leader!=s) { leader->live=0; leader->wait_pending=1; }
         s->pid=newpid;
     }
+    return producer->lost?producer->error:0;
 }

@@ -15,40 +15,62 @@
 +		{ const int keep[] = {0, 1, 2};
 +		  if (ac_child_fds(keep, 3)) _exit(125); }
 +#endif
-@@ -420,0 +432,3 @@
+@@ -140,0 +152,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++		if (kill(getpid(), SIGSTOP) < 0) return -errno;
++#else
+@@ -141,0 +156 @@
++#endif
+@@ -420,0 +436,3 @@
 +#ifdef SCHEMII_MANAGED_ACTORS
 +				ac_proot_fault(errno);
 +#endif
-@@ -424,3 +438,12 @@
+@@ -424,3 +442,15 @@
 -			break;
 -		}
 -
 +#ifdef SCHEMII_MANAGED_ACTORS
 +			/* ECHILD is not a closure receipt; retained slots decide. */
-+			if (ac_proot_require()) return EXIT_FAILURE;
++			if (ac_proot_wait_end()) return EXIT_FAILURE;
 +#endif
 +			break;
 +		}
 +
 +#ifdef SCHEMII_MANAGED_ACTORS
++		if (!(WIFEXITED(tracee_status) || WIFSIGNALED(tracee_status) || WIFSTOPPED(tracee_status))) {
++			ac_proot_fault(EPROTO); return EXIT_FAILURE;
++		}
 +		/* Registered real children never become guest Tracees. */
 +		if (ac_helper_wait(pid, tracee_status)) continue;
 +		ac_observe(pid, tracee_status);
 +#endif
-@@ -556,0 +580,3 @@
+@@ -457,0 +488,5 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++		/* Loss cannot be repaired by another wait/resume. Return the live
++		 * ownership uncertainty; never block forever on a stopped task. */
++		if (ac_proot_require()) return EXIT_FAILURE;
++#endif
+@@ -556,0 +592,4 @@
 +#ifdef SCHEMII_MANAGED_ACTORS
 +					ac_proot_fault(errno);
++					return -1;
 +#endif
-@@ -611,0 +638,4 @@
+@@ -611,0 +651,4 @@
 +#ifdef SCHEMII_MANAGED_ACTORS
 +					if (!was_sysenter)
 +						ac_birth_result(tracee->pid, (long)peek_reg(tracee, CURRENT, SYSARG_RESULT));
 +#endif
-@@ -952,0 +983,3 @@
+@@ -945,0 +989,5 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++	/* An authoritative terminal was just consumed. Never resume that task
++	 * again: ESRCH here is expected, not a fresh actor-ownership loss. */
++	if (tracee->terminated) return false;
++#endif
+@@ -952,0 +1001,3 @@
 +#ifdef SCHEMII_MANAGED_ACTORS
 +	status = ac_resume(tracee->restart_how, tracee->pid, NULL, (void *)(intptr_t)signal);
 +#else
-@@ -953,0 +987 @@
+@@ -953,0 +1005 @@
 +#endif
 --- a/syscall/enter.c
 +++ b/syscall/enter.c
@@ -83,7 +105,7 @@
 +#endif
 @@ -431,0 +435,3 @@
 +#ifdef SCHEMII_MANAGED_ACTORS
-+	ac_exec(thread->pid, leader->pid);
++	if (ac_exec(thread->pid, leader->pid)) return leader;
 +#endif
 @@ -720,0 +727,5 @@
 +#ifdef SCHEMII_MANAGED_ACTORS
@@ -97,13 +119,70 @@
 +#ifdef SCHEMII_MANAGED_ACTORS
 +#include "actor_channel.h"
 +#endif
-@@ -151,0 +155,5 @@
+@@ -126 +129,8 @@
+-		// Block signals
++		int wstatus = 0;
++		bool redeliver_sigstop = false;
++		bool success = false;
++#ifdef SCHEMII_MANAGED_ACTORS
++		if (ptrace(PTRACE_GETSIGMASK, tracee->pid, sizeof(sigset_t), &orig_sigset) < 0) {
++			ac_proot_fault(errno); return -1;
++		}
++#else
+@@ -127,0 +138 @@
++#endif
+@@ -134,0 +146,3 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++		if (sigmask_result < 0) { ac_proot_fault(errno); return -1; }
++#endif
+@@ -143,0 +158,5 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++		if (push_specific_regs(tracee, true) < 0) {
++			ac_proot_fault(errno); goto managed_raw_restore;
++		}
++#else
+@@ -145,0 +165 @@
++#endif
+@@ -148,2 +167,0 @@
+-		int wstatus = 0;
+-		bool redeliver_sigstop = false;
+@@ -151,0 +170,5 @@
 +#ifdef SCHEMII_MANAGED_ACTORS
 +			if (ac_resume(PTRACE_CONT, tracee->pid, 0, 0) < 0 ||
 +			    ac_target_wait(tracee->pid, &wstatus, 0, 0) != tracee->pid)
-+				return -1; /* Keep error/loss; never interpret fabricated status. */
++				goto managed_raw_restore; /* Preserve error and restore only held state. */
 +#else
-@@ -153,0 +162 @@
+@@ -153,0 +177 @@
++#endif
+@@ -164,0 +189,5 @@
++#ifdef SCHEMII_MANAGED_ACTORS
++			if (kill(tracee->pid, SIGSTOP) < 0) {
++				ac_proot_fault(errno); goto managed_raw_restore;
++			}
++#else
+@@ -165,0 +195 @@
++#endif
+@@ -168,0 +199 @@
++#ifndef SCHEMII_MANAGED_ACTORS
+@@ -174,3 +205,9 @@
+-		bool success = (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGILL);
+-
+-		// Restore tracee state to one before intervention
++#endif
++		success = (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGILL);
++#ifdef SCHEMII_MANAGED_ACTORS
++		if (!success) ac_proot_fault(EFAULT);
++managed_raw_restore:
++		/* A failed restore is secondary to the first loss, never an ACK. */
++		if (ptrace(PTRACE_SETSIGMASK, tracee->pid, sizeof(sigset_t), &orig_sigset) < 0)
++			ac_proot_fault(errno);
++#else
+@@ -177,0 +215 @@
++#endif
+@@ -182 +220,3 @@
+-
++#ifdef SCHEMII_MANAGED_ACTORS
++		if (ac_proot_require()) { errno = ac_proot_require(); return -1; }
 +#endif
 --- a/cli/cli.c
 +++ b/cli/cli.c

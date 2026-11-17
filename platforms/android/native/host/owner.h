@@ -16,6 +16,14 @@ struct apk_owner_status {
     int32_t journal_status, journal_effect, boot_relation, boot_reason;
     int32_t births, closure_known;
 };
+struct apk_owner_errors {
+    int error, close_error, secondary_close_error, close_failures;
+};
+/* Private source diagnostics only; no trust or admission input. */
+int apk_owner_open_diagnostic(int borrowed_dirfd, struct apk_owner **out,
+                              struct apk_owner_errors *errors);
+int apk_owner_close_diagnostic(struct apk_owner **owner,
+                               struct apk_owner_errors *errors);
 int apk_owner_open(int borrowed_dirfd, struct apk_owner **out);
 /* Private bounded AF_UNIX channel; exact op1 Start, op2 Stop. Status never waits
  * on a writer syscall. Pending work retains the sole lease; no replacement. */

@@ -70,35 +70,61 @@ static void *serve(void *arg) {
     atomic_store(&o->finished,1);
     return NULL;
 }
-int apk_owner_open(int borrowed,struct apk_owner **out) {
-    if (!out) return EINVAL;
+static void close_once(int fd, struct apk_owner_errors *errors) {
+    if (fd<0) return;
+    if (close(fd)<0) {
+        int e=errno;
+        errors->close_failures++;
+        if (!errors->close_error) errors->close_error=e;
+        else if (!errors->secondary_close_error) errors->secondary_close_error=e;
+    }
+}
+int apk_owner_open_diagnostic(int borrowed,struct apk_owner **out,struct apk_owner_errors *report) {
+    struct apk_owner_errors local={0};
+    struct apk_owner_errors *errors=report?report:&local;
+    memset(errors,0,sizeof(*errors));
+    if (!out) { errors->error=EINVAL; return EINVAL; }
     *out=NULL;
     struct stat st;
-    if (fstat(borrowed,&st)<0) return errno;
-    if (!S_ISDIR(st.st_mode) || st.st_uid!=geteuid() || (st.st_mode&0777)!=0700) return EACCES;
+    if (fstat(borrowed,&st)<0) { errors->error=errno; return errors->error; }
+    if (!S_ISDIR(st.st_mode) || st.st_uid!=geteuid() || (st.st_mode&0777)!=0700) {
+        errors->error=EACCES; return EACCES;
+    }
     int dir=openat(borrowed,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
-    if (dir<0) return errno;
-    if (flock(dir,LOCK_EX|LOCK_NB)<0) { int e=errno; close(dir); return e; }
-    struct apk_owner *o=calloc(1,sizeof(*o));
-    if (!o) { close(dir); return ENOMEM; }
-    o->dirfd=dir;
-    if (socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,o->sockets)<0) {
-        int e=errno; close(dir); free(o); return e;
+    if (dir<0) { errors->error=errno; return errors->error; }
+    struct apk_owner *o=NULL;
+    int sockets[2]={-1,-1}, actors[2]={-1,-1};
+    int mutex_ready=0;
+    if (flock(dir,LOCK_EX|LOCK_NB)<0) { errors->error=errno; goto failed; }
+    o=calloc(1,sizeof(*o));
+    if (!o) { errors->error=ENOMEM; goto failed; }
+    if (socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,sockets)<0) {
+        errors->error=errno; goto failed;
     }
-    /* Distinct private producer endpoints, created before the owner worker.
-     * Neither is exported to Java/Python/PRoot: C/A and launch remain absent. */
-    if (socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC|SOCK_NONBLOCK,0,o->actors)<0) {
-        int e=errno; close(o->sockets[0]); close(o->sockets[1]); close(dir); free(o); return e;
+    /* Reserve the separate actor pair before starting the worker. Neither end
+     * is exported to Java/Python/PRoot; C/A and launch remain absent. */
+    if (socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC|SOCK_NONBLOCK,0,actors)<0) {
+        errors->error=errno; goto failed;
     }
-    int e=pthread_mutex_init(&o->lock,NULL);
-    if (e) { close(o->actors[0]); close(o->actors[1]); close(o->sockets[0]); close(o->sockets[1]); close(dir); free(o); return e; }
+    o->dirfd=dir; memcpy(o->sockets,sockets,sizeof(sockets)); memcpy(o->actors,actors,sizeof(actors));
+    errors->error=pthread_mutex_init(&o->lock,NULL);
+    if (errors->error) goto failed;
+    mutex_ready=1;
     o->status.boot_relation=BOOT_COMPARE_UNKNOWN;
     o->status.boot_reason=BOOT_COMPARE_CALLER_UNPROVED;
-    o->status.journal_status=-1; /* Not observed; never JOURNAL_OK. */
-    o->status.journal_effect=0; /* NOT_ATTEMPTED; no durable ACK invented. */
-    e=pthread_create(&o->worker,NULL,serve,o);
-    if (e) { close(o->actors[0]); close(o->actors[1]); pthread_mutex_destroy(&o->lock); close(o->sockets[0]); close(o->sockets[1]); close(dir); free(o); return e; }
+    o->status.journal_status=-1;
+    o->status.journal_effect=0;
+    errors->error=pthread_create(&o->worker,NULL,serve,o);
+    if (errors->error) goto failed;
     *out=o; return 0;
+failed:
+    if (mutex_ready) pthread_mutex_destroy(&o->lock);
+    for (int i=0;i<2;i++) { close_once(actors[i],errors); close_once(sockets[i],errors); }
+    close_once(dir,errors); free(o);
+    return errors->error;
+}
+int apk_owner_open(int borrowed,struct apk_owner **out) {
+    return apk_owner_open_diagnostic(borrowed,out,NULL);
 }
 int apk_owner_request(struct apk_owner *o,uint32_t operation) {
     if (!o || operation<1 || operation>2) return EINVAL;
@@ -117,20 +143,27 @@ struct apk_owner_status apk_owner_status(struct apk_owner *o) {
     if (atomic_load(&o->busy)) s.phase=APK_PENDING;
     return s;
 }
-int apk_owner_close(struct apk_owner **owner) {
-    if (!owner || !*owner) return EINVAL;
+int apk_owner_close_diagnostic(struct apk_owner **owner,struct apk_owner_errors *report) {
+    struct apk_owner_errors local={0};
+    struct apk_owner_errors *errors=report?report:&local;
+    memset(errors,0,sizeof(*errors));
+    if (!owner || !*owner) { errors->error=EINVAL; return EINVAL; }
     struct apk_owner *o=*owner;
-    if (atomic_load(&o->busy)) return EBUSY;
+    if (atomic_load(&o->busy)) { errors->error=EBUSY; return EBUSY; }
     if (!atomic_load(&o->finished)) {
-        if (o->sent==UINT32_MAX) return EOVERFLOW;
+        if (o->sent==UINT32_MAX) { errors->error=EOVERFLOW; return EOVERFLOW; }
         struct envelope frame={MAGIC,1,++o->sent,3};
-        if (send(o->sockets[0],&frame,sizeof(frame),MSG_DONTWAIT|MSG_NOSIGNAL)!=(ssize_t)sizeof(frame)) return errno?errno:EIO;
+        if (send(o->sockets[0],&frame,sizeof(frame),MSG_DONTWAIT|MSG_NOSIGNAL)!=(ssize_t)sizeof(frame)) {
+            errors->error=errno?errno:EIO; return errors->error;
+        }
     }
-    int e=pthread_join(o->worker,NULL); if (e) return e;
-    for (int i=0;i<2;i++) {
-        if (close(o->actors[i])<0) { if (!e) e=errno; }
-        if (close(o->sockets[i])<0) { if (!e) e=errno; }
-    }
-    if (close(o->dirfd)<0 && !e) e=errno;
-    pthread_mutex_destroy(&o->lock); memset(o,0,sizeof(*o)); free(o); *owner=NULL; return e;
+    int e=pthread_join(o->worker,NULL); if (e) { errors->error=e; return e; }
+    for (int i=0;i<2;i++) { close_once(o->actors[i],errors); close_once(o->sockets[i],errors); }
+    close_once(o->dirfd,errors);
+    pthread_mutex_destroy(&o->lock); memset(o,0,sizeof(*o)); free(o); *owner=NULL;
+    errors->error=errors->close_error; return errors->error;
+}
+
+int apk_owner_close(struct apk_owner **owner) {
+    return apk_owner_close_diagnostic(owner,NULL);
 }

@@ -786,3 +786,38 @@ owner-loss recovery preserves/refuses until a USER-performed, separately verifie
 new kernel and guarded existing-only BOTH-PG recovery; no automatic reboot,
 force-stop, adoption, forced cleanup, PID-file deletion or reset is introduced.
 Healthy fully proved Stop/Start remains graceful.
+
+The R293-02 successor controls link complete pinned PRoot translation units into
+an isolated host fixture. Real native fork, vfork, clone, thread and nonleader
+exec generate production ptrace events; the fixture waits only its captured child
+and kernel-event TID identities. The nonleader-exec transport passes native
+filesystem/loader syscalls through without guest translation, while birth entry,
+attachment, remap and event/wait handling remain production code. Separate
+explicit register/event injections cover early child stop/death and cross-process
+exec collision. A collision now stops before PRoot mutates task identities.
+
+The full event loop also consumes real SysVIPC service terminals before and after
+native fixture events. Failed readiness/pipe EOF cannot replace a helper while
+its exact parent wait remains outstanding. An observer fixture proves a native
+helper can stay live in the actual service's blocking accept after its real
+parent/tracer dies. Its later observer ptrace wait is deliberately **not** a
+real-parent receipt and cannot clear the channel's retained loss or helper wait.
+This test-only observer does not provide a production recovery/adoption path.
+
+Managed terminal observations no longer trigger another resume of the terminated
+task. Wait errors, invalid statuses, ECHILD with live local obligations, failed
+initial stop/options, raw ARM64 mask/register/resume/wait/restore failures and
+secondary cleanup errors preserve uncertainty. The whole raw workaround is
+exercised under explicit host syscall injections and compiled by the actual
+ARM64/API29 production link; it is not Android execution. Fixed scalar channel
+records replace the managed raw workaround's memory-address/value debug dump.
+Owner allocation/thread/close controls additionally retain primary and two close
+errors through private diagnostic variants; existing JNI control remains unchanged.
+
+Both 128-entry task and early-observation bounds, incarnation/sequence wrap,
+critical intent/birth/export/receipt loss, descriptor allowlists and same-lease
+pending observation/Stop are finite controls. No connected writer/receipt Stop
+proof is implied: endpoints remain unexported and actual native C/A, guest-lease
+conversion, journal transitions and authoritative guest real-parent waits remain
+OPEN integration dependencies. The current draft's source milestone and fresh
+production native link still require independent exact-head acceptance.
