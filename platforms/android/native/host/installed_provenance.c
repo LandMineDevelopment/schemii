@@ -238,10 +238,20 @@ static int zip_validate(const uint8_t *a, size_t n, const uint8_t *m, size_t mn,
   if (last!=central) {
     size_t gap=central-last;
     if (gap<32 || memcmp(a+central-16,"APK Sig Block 42",16)) return EPROTO;
-    uint64_t size=(uint64_t)le32(a+last)|((uint64_t)le32(a+last+4)<<32);
     uint64_t footer=(uint64_t)le32(a+central-24)|((uint64_t)le32(a+central-20)<<32);
-    if (size!=gap-8 || footer!=size) return EPROTO;
-    size_t cursor=last+8; unsigned signatures=0;
+    if (footer<24 || footer>gap-8) return EPROTO;
+    size_t block=central-(size_t)footer-8;
+    size_t prefix=block-last;
+    /* Pinned apksigner pads its signed data domain to a 4KiB boundary.
+     * Only the minimal zero prefix is allowed; no arbitrary post-member gap.
+     * The OS signature check remains required, not inferred from this syntax. */
+    if (prefix) {
+      if (prefix>=4096 || block%4096) return EPROTO;
+      for (size_t k=last;k<block;k++) if (a[k]) return EPROTO;
+    }
+    uint64_t size=(uint64_t)le32(a+block)|((uint64_t)le32(a+block+4)<<32);
+    if (size!=footer) return EPROTO;
+    size_t cursor=block+8; unsigned signatures=0;
     while (cursor<central-24) {
       if (central-24-cursor<12) return EPROTO;
       uint64_t pair=(uint64_t)le32(a+cursor)|((uint64_t)le32(a+cursor+4)<<32);
