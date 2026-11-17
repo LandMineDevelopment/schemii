@@ -73,7 +73,8 @@ struct journal;
 /* Opens a NEW open-file description on selected_dirfd and locks the directory.
  * Caller keeps the selected directory private, stable, and exclusively owned;
  * cooperative flock is storage serialization, NOT historical owner authority.
- * Calls on a handle must be serialized by the caller; do not share across fork.
+ * Calls must be serialized on the opening thread (native TLS lifetime binding);
+ * another thread or inherited process fences continuation. Do not share across fork.
  * Replacing paths by hostile same-UID actors cannot be secured by this API. */
 struct journal_result journal_open(int selected_dirfd,
                                    const struct journal_binding *binding,
@@ -90,6 +91,15 @@ struct journal_result journal_active(struct journal *journal, uint64_t seq);
 /* Always invalidates continuation, even on a valid prefix or failed inspection.
  * Reload cannot reconstruct the prior writer's durable-ACK observation. */
 struct journal_result journal_inspect(struct journal *journal);
+/* Checks actual uninterrupted initial-writer custody against the retained
+ * acknowledged anchor/prefix, current names and exclusive lease. No imported
+ * prefix or claim can enable it; inspect, cancellation, failure, a different
+ * process/thread or any detected gap permanently fences it. Success describes
+ * HOST/native storage continuity only, NEVER original prebirth C or admitted A.
+ * This v1 journal still has supplied source/run/CE-DE claims, not provenance.
+ * No view usable by boot_compare is issued. Calls remain serialized. */
+struct journal_result journal_custody_check(struct journal *journal);
+struct journal_result journal_cancel(struct journal *journal);
 /* Native-only structural digest access, no admission capability. Invalidated
  * by each mutation/inspection; never retain as trusted custody across reload.
  */

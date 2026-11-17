@@ -120,6 +120,37 @@ def synthetic_native_donor(root, commit):
 
 
 class BuildControls(unittest.TestCase):
+    def test_connected_owner_recipe_includes_custodian_once(self):
+        # Recipe control only: synthetic ELF output, NOT Android link evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = []
+
+            def compile_fixture(*arguments):
+                calls.append(arguments)
+                target = Path(arguments[-1])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(elf())
+
+            with patch.object(build, "run", compile_fixture):
+                result = build.connected_native(root / "tools", root, ["arm64-v8a"])
+            self.assertEqual(len(calls), 1)
+            units = [Path(arg).name for arg in calls[0] if str(arg).endswith(".c")]
+            self.assertEqual(units.count("boot_authority.c"), 1)
+            self.assertEqual(
+                set(units),
+                {
+                    "owner.c",
+                    "owner_jni.c",
+                    "actor_channel.c",
+                    "boot_compare.c",
+                    "boot_authority.c",
+                    "boot_identity.c",
+                },
+            )
+            self.assertIn("-Wl,-z,defs", calls[0])
+            self.assertEqual(set(result), {"lib/arm64-v8a/libschemii_owner.so"})
+
     def test_native_reuse_recipe_binds_flags_and_abi_mapping(self):
         source = "ABI_TRIPLES = {'x': 'triple'}\ndef run(): pass\ndef digest(): pass\ndef native(cache, out, abi):\n return ['-fPIE']\n"
         self.assertEqual(

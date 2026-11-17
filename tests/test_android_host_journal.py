@@ -32,12 +32,25 @@ STRICT = [
     "-fstack-protector-strong",
     "-D_FORTIFY_SOURCE=3",
 ]
-WRAPS = ["write", "read", "fsync", "close", "linkat", "fstat", "fstatat"]
+WRAPS = [
+    "write",
+    "read",
+    "fsync",
+    "close",
+    "linkat",
+    "fstat",
+    "fstatat",
+    "pthread_key_create",
+    "pthread_setspecific",
+    "pthread_key_delete",
+]
 HARNESS = r"""
 #define _GNU_SOURCE
 #include "journal.c"
 #include <stdio.h>
 #include <signal.h>
+#include <sys/wait.h>
+#include <pthread.h>
 static const char *fault="";
 static int calls, syncs, reads, stats, ats, closes;
 static char events[4096];
@@ -109,6 +122,19 @@ int __wrap_fstatat(int fd,const char *n,struct stat *s,int f) {
   if (!r && has("path_race")) ++s->st_ino;
   return r;
 }
+int __real_pthread_key_create(pthread_key_t *,void (*)(void *));
+int __real_pthread_setspecific(pthread_key_t,const void *);
+int __real_pthread_key_delete(pthread_key_t);
+int __wrap_pthread_key_create(pthread_key_t *key,void (*destroy)(void *)) {
+  return has("key_pressure") ? EAGAIN : __real_pthread_key_create(key,destroy);
+}
+int __wrap_pthread_setspecific(pthread_key_t key,const void *value) {
+  return has("key_binding") ? EACCES : __real_pthread_setspecific(key,value);
+}
+int __wrap_pthread_key_delete(pthread_key_t key) {
+  int r=__real_pthread_key_delete(key);
+  return has("key_delete_secondary") ? EPERM : has("key_delete") ? EIO : r;
+}
 static struct journal_binding binding(void) {
   struct journal_binding b; memset(&b,0,sizeof(b));
   memset(b.source,1,32); memset(b.contract,2,32);
@@ -117,6 +143,15 @@ static struct journal_binding binding(void) {
   b.generation=1; b.known=255; b.storage=1; b.boot_kind=1;
   b.pg_major=17; b.durability=1; b.planned_slots=3; return b;
 }
+struct opened_thread { int dir; struct journal *journal; };
+static void *initial_writer(void *arg) {
+  struct opened_thread *o=arg;
+  struct journal_binding b=binding();
+  if (journal_open(o->dir,&b,&o->journal).status ||
+      journal_initialize(o->journal).status || journal_active(o->journal,1).status) abort();
+  return NULL;
+}
+static void *wrong_thread(void *j) { (void)journal_custody_check(j); return NULL; }
 static void print_result(struct journal_result r) {
   printf("{\"status\":%d,\"stage\":%d,\"error\":%d,\"cleanup_error\":%d,"
          "\"effect\":%d,\"bytes\":%llu,\"prefix_bytes\":%llu,\"last_sequence\":%llu,"
@@ -154,7 +189,54 @@ int main(int argc,char **argv) {
   struct journal_result r=journal_open(dir,&b,&j);
   print_result(r);
   if (!j) { if (__real_close(dir)) abort(); return 0; }
-  if (!strcmp(argv[2],"concurrent")) {
+  if (!strcmp(argv[2],"custody")) {
+    print_result(journal_initialize(j));
+    print_result(journal_active(j,1));
+    print_result(journal_custody_check(j));
+    if (!strcmp(argv[3],"owner-exit")) {
+      print_result(journal_close(&j));
+      /* The prior namespace is retained; use an explicitly NEW disposable one. */
+      if (mkdirat(dir,"new-writer",0700)) abort();
+      int next=openat(dir,"new-writer",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+      struct opened_thread o={next,NULL}; pthread_t worker;
+      if (next<0 || pthread_create(&worker,NULL,initial_writer,&o) || pthread_join(worker,NULL)) abort();
+      j=o.journal;
+      if (__real_close(next)) abort();
+    } else if (!strcmp(argv[3],"thread")) {
+      pthread_t worker;
+      if (pthread_create(&worker,NULL,wrong_thread,j) || pthread_join(worker,NULL)) abort();
+    } else if (!strcmp(argv[3],"reopen")) {
+      print_result(journal_close(&j));
+      print_result(journal_open(dir,&b,&j));
+      if (!j) abort();
+      print_result(journal_inspect(j));
+    } else if (!strcmp(argv[3],"inspect")) print_result(journal_inspect(j));
+    else if (!strcmp(argv[3],"cancel")) print_result(journal_cancel(j));
+    else if (!strcmp(argv[3],"lease")) { if (flock(j->dir,LOCK_UN)) abort(); }
+    else if (!strcmp(argv[3],"fork")) {
+      pid_t child=fork(); if (child<0) abort();
+      if (!child) _exit(journal_custody_check(j).status==JOURNAL_REFUSED ? 0 : 8);
+      int status; if (waitpid(child,&status,0)!=child || status) abort();
+    } else if (!strcmp(argv[3],"replace-anchor")) {
+      if (renameat(dir,"anchor",dir,"retained-anchor")) abort();
+      if (linkat(dir,"anchor.pending",dir,"anchor",0)) abort();
+      /* Same original inode is continuous, unlike replacement bytes. */
+    } else if (!strcmp(argv[3],"replace-essential")) {
+      if (renameat(dir,"essential",dir,"retained-essential")) abort();
+      int fd=openat(dir,"essential",O_WRONLY|O_CREAT|O_EXCL,0600);
+      if (fd<0 || __real_close(fd)) abort();
+    } else if (!strcmp(argv[3],"partial")) {
+      int fd=openat(dir,"essential",O_WRONLY|O_APPEND);
+      if (fd<0 || __real_write(fd,"x",1)!=1 || __real_close(fd)) abort();
+    } else if (!strcmp(argv[3],"damage")) {
+      int fd=openat(dir,"anchor",O_WRONLY);
+      if (fd<0 || __real_write(fd,"x",1)!=1 || __real_close(fd)) abort();
+    } else if (!strcmp(argv[3],"mode")) { if (fchmod(dir,0755)) abort(); }
+    else if (!strcmp(argv[3],"error")) { arm("read_fail"); }
+    else if (!strcmp(argv[3],"key-delete-after-error")) { arm("read_fail_key_delete_secondary"); }
+    print_result(journal_custody_check(j));
+    print_result(journal_custody_check(j));
+  } else if (!strcmp(argv[2],"concurrent")) {
     struct journal *other=NULL; print_result(journal_open(dir,&b,&other));
     if (other) abort();
   } else if (!strcmp(argv[2],"inspect") || !strcmp(argv[2],"inspect_continue") || !strcmp(argv[2],"inspect_digest")) {
@@ -201,7 +283,8 @@ int main(int argc,char **argv) {
       if (!strcmp(argv[2],"after_active_validate_fault")) print_result(journal_inspect(j));
     }
   }
-  fault=""; print_result(journal_close(&j));
+  fault=!strcmp(argv[3],"key-delete-after-error") ? "key_delete_secondary" : "";
+  print_result(journal_close(&j));
   if (__real_close(dir)) abort();
   printf("{\"events\":\"%s\"}\n",events); return 0;
 }
@@ -221,6 +304,7 @@ def native(tmp_path_factory):
             compiler,
             *STRICT,
             "-O2",
+            "-pthread",
             "-I",
             str(SOURCE),
             str(harness),
@@ -640,6 +724,8 @@ def test_hardened_production_object_has_no_trust_or_test_dependencies(
         "journal_inspect",
         "journal_prefix",
         "journal_close",
+        "journal_cancel",
+        "journal_custody_check",
     }
     for forbidden in [
         "boot_compare",
@@ -712,3 +798,61 @@ def test_initial_namespace_stat_failure_preserves_errno(native, store):
     row = run(native, store, "init_fault", "statat_fail")[1]
     assert row["status"] == 3 and row["stage"] == 3 and row["error"] == 13
     assert row["effect"] == 0 and not list(store.iterdir())
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "",
+        "fork",
+        "inspect",
+        "cancel",
+        "lease",
+        "replace-essential",
+        "thread",
+        "owner-exit",
+        "reopen",
+        "partial",
+        "damage",
+        "mode",
+        "error",
+    ],
+)
+def test_uninterrupted_custody_is_live_handle_only(native, store, change):
+    rows = run(native, store, "custody", change)
+    assert rows[3]["status"] == 0 and rows[3]["effect"] == 5
+    tail = rows[-4:-1] if change in ("inspect", "cancel") else rows[-3:-1]
+    checked = tail[-1]
+    if change in ("", "fork"):
+        assert checked["status"] == 0 and checked["effect"] == 5
+    else:
+        assert checked["status"] != 0 and checked["effect"] != 5
+        assert rows[-3] == rows[-2]  # original refusal retained, no retry/repair
+    assert (store / "essential").exists() and (store / "anchor.pending").exists()
+
+
+@pytest.mark.parametrize(
+    "fault,error,cleanup",
+    [
+        ("key_pressure", errno.EAGAIN, 0),
+        ("key_binding", errno.EACCES, 0),
+        ("key_binding_key_delete_close", errno.EACCES, errno.EIO),
+    ],
+)
+def test_native_thread_binding_failure_has_no_writer_or_state(
+    native, store, fault, error, cleanup
+):
+    first = run(native, store, "open", fault)[0]
+    assert first["status"] == 3 and first["stage"] == 4
+    assert first["error"] == error and first["cleanup_error"] == cleanup
+    assert not list(store.iterdir())
+
+
+def test_tls_close_retains_secondary_error_after_original_read_failure(native, store):
+    rows = run(native, store, "custody", "key-delete-after-error")
+    first, closed = rows[-3], rows[-2]
+    assert first["status"] == 3 and first["error"] == errno.EIO
+    assert first["cleanup_error"] == 0
+    assert closed["status"] == first["status"] and closed["error"] == errno.EIO
+    assert closed["cleanup_error"] == errno.EPERM
+    assert (store / "essential").stat().st_size == 320

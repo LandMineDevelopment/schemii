@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <pthread.h>
 #include <unistd.h>
 
 /* Frozen P2a v1 wire, all integers unsigned BIG ENDIAN, exactly 320 bytes:
@@ -31,6 +32,10 @@ struct journal {
   int writable, failed;
   dev_t essential_dev;
   ino_t essential_ino;
+  dev_t anchor_dev;
+  ino_t anchor_ino;
+  pid_t process;
+  pthread_key_t thread_key;
 };
 static uint32_t be32(const uint8_t *p) {
   return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 |
@@ -134,6 +139,11 @@ static int fail(struct journal *j, int status, int stage, int error) {
   }
   j->writable = 0;
   return 0;
+}
+static int current_owner(struct journal *j) {
+  if (j->process != getpid() || pthread_getspecific(j->thread_key) != j)
+    return fail(j, JOURNAL_REFUSED, JOURNAL_VALIDATE, 0);
+  return 1;
 }
 static void closefd(struct journal *j, int fd) {
   if (close(fd) < 0) {
@@ -324,6 +334,24 @@ struct journal_result journal_open(int selected_dirfd,
     return temp.result;
   }
   *j = temp;
+  j->process = getpid();
+  int thread_error = pthread_key_create(&j->thread_key, NULL);
+  if (!thread_error) {
+    thread_error = pthread_setspecific(j->thread_key, j);
+    if (thread_error) {
+      int cleanup = pthread_key_delete(j->thread_key);
+      if (cleanup)
+        j->result.cleanup_error = cleanup;
+    }
+  }
+  if (thread_error) {
+    (void)fail(j, JOURNAL_IO, JOURNAL_OPEN, thread_error);
+    closefd(j, j->dir);
+    struct journal_result r = j->result;
+    memset(j, 0, sizeof(*j));
+    free(j);
+    return r;
+  }
   *out = j;
   return j->result;
 }
@@ -334,6 +362,8 @@ struct journal_result journal_initialize(struct journal *j) {
     return r;
   }
   if (j->failed)
+    return j->result;
+  if (!current_owner(j))
     return j->result;
   if (!metadata(j, j->dir, 1))
     return j->result;
@@ -410,6 +440,8 @@ struct journal_result journal_initialize(struct journal *j) {
   j->prefix.known = 1;
   j->essential_dev = essential_stat.st_dev;
   j->essential_ino = essential_stat.st_ino;
+  j->anchor_dev = anchor_stat.st_dev;
+  j->anchor_ino = anchor_stat.st_ino;
   j->writable = 1;
   j->result.effect = JOURNAL_DURABLE;
   j->result.stage = JOURNAL_DIR_SYNC;
@@ -423,6 +455,8 @@ struct journal_result journal_active(struct journal *j, uint64_t seq) {
     return r;
   }
   if (j->failed)
+    return j->result;
+  if (!current_owner(j))
     return j->result;
   if (!j->writable) {
     (void)fail(j, JOURNAL_REFUSED, JOURNAL_VALIDATE, 0);
@@ -487,7 +521,7 @@ static int readframe(struct journal *j, int fd, uint8_t r[320], size_t *count) {
   }
   return 1;
 }
-struct journal_result journal_inspect(struct journal *j) {
+static struct journal_result inspect_prefix(struct journal *j) {
   if (!j) {
     struct journal_result r = blank();
     r.status = JOURNAL_REFUSED;
@@ -555,6 +589,74 @@ struct journal_result journal_inspect(struct journal *j) {
   /* Structural success intentionally leaves effect NOT_ATTEMPTED. */
   return j->result;
 }
+struct journal_result journal_inspect(struct journal *j) {
+  if (j)
+    (void)current_owner(j);
+  return inspect_prefix(j);
+}
+struct journal_result journal_cancel(struct journal *j) {
+  if (!j) {
+    struct journal_result r = blank();
+    r.status = JOURNAL_REFUSED;
+    return r;
+  }
+  (void)fail(j, JOURNAL_REFUSED, JOURNAL_VALIDATE, 0);
+  return j->result;
+}
+
+struct journal_result journal_custody_check(struct journal *j) {
+  if (!j)
+    return journal_cancel(NULL);
+  if (j->failed)
+    return j->result;
+  if (!current_owner(j) || !j->writable || !j->prefix.known) {
+    (void)fail(j, JOURNAL_REFUSED, JOURNAL_VALIDATE, 0);
+    return j->result;
+  }
+  /* Never reacquire the owner's description after a gap. The independent
+   * probe must conflict, under the cooperative native-owner assumption. */
+  int probe = openat(j->dir, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  if (probe < 0) {
+    (void)fail(j, JOURNAL_IO, JOURNAL_LOCK, errno);
+    return j->result;
+  }
+  int locked = flock(probe, LOCK_EX | LOCK_NB);
+  int error = locked < 0 ? errno : 0;
+  if (locked == 0 || (error != EWOULDBLOCK && error != EAGAIN))
+    (void)fail(j, JOURNAL_REFUSED, JOURNAL_LOCK, error);
+  closefd(j, probe);
+  if (j->failed)
+    return j->result;
+  struct stat a, e;
+  if (fstatat(j->dir, "anchor", &a, AT_SYMLINK_NOFOLLOW) < 0 ||
+      fstatat(j->dir, "essential", &e, AT_SYMLINK_NOFOLLOW) < 0) {
+    (void)fail(j, JOURNAL_IO, JOURNAL_VALIDATE, errno);
+    return j->result;
+  }
+  if (a.st_dev != j->anchor_dev || a.st_ino != j->anchor_ino ||
+      e.st_dev != j->essential_dev || e.st_ino != j->essential_ino) {
+    (void)fail(j, JOURNAL_REFUSED, JOURNAL_VALIDATE, 0);
+    return j->result;
+  }
+  /* Validate bytes using a private temporary verifier. Inspection of the
+   * ORIGINAL handle still irrevocably invalidates it. This is not reloaded
+   * history admission: compare against the original live acknowledged tip. */
+  struct journal checked = *j;
+  struct journal_result r = inspect_prefix(&checked);
+  if (r.status != JOURNAL_OK || !checked.prefix.known ||
+      checked.prefix.bytes != j->prefix.bytes ||
+      checked.prefix.sequence != j->prefix.sequence ||
+      memcmp(checked.prefix.digest, j->prefix.digest, sizeof(j->prefix.digest))) {
+    if (r.status != JOURNAL_OK) {
+      (void)fail(j, r.status, r.stage, r.error);
+      if (!j->result.cleanup_error)
+        j->result.cleanup_error = r.cleanup_error;
+    } else
+      (void)fail(j, JOURNAL_REFUSED, JOURNAL_VALIDATE, 0);
+  }
+  memset(&checked, 0, sizeof(checked));
+  return j->result;
+}
 struct journal_native_prefix journal_prefix(const struct journal *j) {
   struct journal_native_prefix p;
   memset(&p, 0, sizeof(p));
@@ -567,6 +669,14 @@ struct journal_result journal_close(struct journal **ptr) {
     return r;
   }
   struct journal *j = *ptr;
+  int thread_error = pthread_key_delete(j->thread_key);
+  if (thread_error) {
+    if (j->failed) {
+      if (!j->result.cleanup_error)
+        j->result.cleanup_error = thread_error;
+    } else
+      (void)fail(j, JOURNAL_IO, JOURNAL_CLOSE, thread_error);
+  }
   closefd(j, j->dir);
   struct journal_result r = j->result;
   memset(j, 0, sizeof(*j));

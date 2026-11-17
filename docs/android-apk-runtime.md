@@ -827,3 +827,50 @@ proof is implied: endpoints remain unexported and actual native C/A, guest-lease
 conversion, journal transitions and authoritative guest real-parent waits remain
 OPEN integration dependencies. The current draft's source milestone and fresh
 production native link still require independent exact-head acceptance.
+
+### Native custody prerequisites and remaining C/A boundary (issue 266)
+
+`boot_authority_open` now owns the native selected-directory lease used by the
+control worker. It opens an independent CLOEXEC description, validates private
+0700 directory ownership and inode identity, and checks cooperative exclusive
+custody before and after the unchanged strict R observation. A detected gap is
+latched; the owner never reacquires it. Cancellation revokes continuation without
+closing an in-flight operation. Close waits for the worker and retains first and
+secondary native errors. The constructor creates no directory, anchor or journal.
+An inherited process cannot compare through the parent's custodian or unlock the
+parent by closing its inherited copy. These are native storage/lifetime
+prerequisites, not proof of an untraced approved caller.
+
+`journal_custody_check` checks the original acknowledged initial-run handle,
+process and opening-thread TLS lifetime (not a reusable numeric TID), cooperative
+lock, original anchor/essential inodes, complete
+checked bytes and retained prefix tip. It returns only the existing safe scalar
+journal result. Inspection, cancellation, detected loss or failure fences that
+handle; reopening and matching a prefix cannot restore its observed commitment.
+The journal's supplied binding fields remain claims. This check issues no
+`boot_anchor_view` and does not establish original prebirth C, installed-source
+admission, selected CE/DE lineage, historical custody or antirollback. Host
+filesystem controls and fault injections do not establish Android durability.
+
+**Positive C/A construction remains blocked at concrete source interfaces.**
+`NativeOwner.open(int fd)` transfers only a borrowed descriptor. Java's separate
+installed-source verification is not a native provenance/custody transfer, and
+the descriptor cannot prove CE/default versus explicit opt-in DE lineage. No
+owned native seam establishes the owner's birth outside the PRoot trace path;
+PID, thread ID, TracerPid, signer and R's proc observations are insufficient.
+Consequently the production comparator continues UNKNOWN/CALLER_UNPROVED (or
+the earlier storage/R failure). It ignores arbitrary incoming anchor pointers,
+and neither constructor allocation nor an empty selected directory is classified
+as NO_PRIOR_FRESH. No production journal initialization or managed birth occurs.
+
+The next consuming interface needs independently verified installed-source/build
+provenance and the actual approved Android native-owner birth/call/storage
+boundary, retained in the sole custodian. A positive fresh initializer must create
+and own an explicitly new namespace under that boundary, derive its immutable
+source/install/state/run/generation and CE/DE bindings natively, and preserve
+R+C through anchor/ACTIVE publication before birth. Missing anchors in existing
+namespaces remain refusal. Only then can uninterrupted committed history lend an
+admitted A view. Exact-source Android caller/CE-DE/lease and filesystem proof must
+be scheduled separately. Actor endpoint transfer, versioned Python guest lease,
+journal actor/terminal/newrun/retry, connected writer/receipt Stop, guest real-parent
+and all-task closure, network epochs and recovery remain dependent open gates.
