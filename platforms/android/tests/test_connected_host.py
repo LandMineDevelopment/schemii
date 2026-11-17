@@ -17,6 +17,69 @@ JAVA = (
     / "platforms/android/app/src/main/java/development/landmine/schemii/android/host/InstalledSource.java"
 )
 
+# Compile-only dependencies of InstalledSource.framework. This fixture runs the
+# complete production compose implementation, never the framework observation
+# edge; every callable double fails loudly if that boundary is crossed.
+FRAMEWORK_COMPILE_STUBS = {
+    "android/content/Context.java": """package android.content;
+public class Context {
+ public Context getApplicationContext(){throw new AssertionError("framework not exercised");}
+ public ClassLoader getClassLoader(){throw new AssertionError("framework not exercised");}
+ public String getPackageName(){throw new AssertionError("framework not exercised");}
+ public android.content.pm.PackageManager getPackageManager(){throw new AssertionError("framework not exercised");}
+ public android.content.pm.ApplicationInfo getApplicationInfo(){throw new AssertionError("framework not exercised");}
+ public java.io.File getDataDir(){throw new AssertionError("framework not exercised");}
+}""",
+    "android/content/pm/ApplicationInfo.java": """package android.content.pm;
+public class ApplicationInfo {
+ public static final int FLAG_DEBUGGABLE=2;
+ public int targetSdkVersion, uid, flags;
+ public String packageName,className,appComponentFactory,processName,sourceDir,publicSourceDir,nativeLibraryDir,dataDir;
+ public String[] splitSourceDirs,splitPublicSourceDirs,sharedLibraryFiles;
+}""",
+    "android/content/pm/PackageInfo.java": """package android.content.pm;
+public class PackageInfo {
+ public ApplicationInfo applicationInfo;
+ public String packageName;
+ public String[] splitNames;
+ public Object[] providers,receivers,instrumentation;
+ public ActivityInfo[] activities;
+ public ServiceInfo[] services;
+ public SigningInfo signingInfo;
+}""",
+    "android/content/pm/PackageManager.java": """package android.content.pm;
+public class PackageManager {
+ public static final int GET_SIGNING_CERTIFICATES=1,GET_ACTIVITIES=2,GET_SERVICES=4,
+ GET_PROVIDERS=8,GET_RECEIVERS=16,GET_INSTRUMENTATION=32,GET_SHARED_LIBRARY_FILES=64;
+ public PackageInfo getPackageInfo(String name,int flags){throw new AssertionError("framework not exercised");}
+}""",
+    "android/content/pm/ActivityInfo.java": """package android.content.pm;
+public class ActivityInfo {public String name,processName; public boolean exported;}""",
+    "android/content/pm/ServiceInfo.java": """package android.content.pm;
+public class ServiceInfo {public String name,processName; public boolean exported;}""",
+    "android/content/pm/SigningInfo.java": """package android.content.pm;
+public class SigningInfo {
+ public boolean hasMultipleSigners(){throw new AssertionError("framework not exercised");}
+ public Signature[] getApkContentsSigners(){throw new AssertionError("framework not exercised");}
+}""",
+    "android/content/pm/Signature.java": """package android.content.pm;
+public class Signature {public byte[] toByteArray(){throw new AssertionError("framework not exercised");}}""",
+    "android/os/Process.java": """package android.os;
+public class Process {public static int myUid(){throw new AssertionError("framework not exercised");}}""",
+    "development/landmine/schemii/android/host/StorageProfile.java": """package development.landmine.schemii.android.host;
+public class StorageProfile {
+ public static void select(android.content.Context app,boolean de){throw new AssertionError("framework not exercised");}
+}""",
+    **{
+        "development/landmine/schemii/android/host/" + name + ".java": (
+            "package development.landmine.schemii.android.host; public class "
+            + name
+            + " {}"
+        )
+        for name in ("HostActivity", "HostService", "NativeOwner")
+    },
+}
+
 
 @pytest.fixture(scope="module")
 def java(tmp_path_factory):
@@ -33,7 +96,15 @@ public class Extract {
   InstalledSource.compose(new File(args[0]),new File(args[1]),read(args[2]),read(args[3]));
  }
 }""")
-    subprocess.run(["javac", "-d", str(out), str(JAVA), str(harness)], check=True)
+    dependencies = []
+    for name, content in FRAMEWORK_COMPILE_STUBS.items():
+        path = out / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        dependencies.append(str(path))
+    subprocess.run(
+        ["javac", "-d", str(out), *dependencies, str(JAVA), str(harness)], check=True
+    )
     return out
 
 

@@ -108,7 +108,9 @@ public final class HostService extends Service {
                 int cleanup = NativeOwner.close();
                 long[] state = NativeOwner.status();
                 synchronized (lifecycle) {
-                    operation.cleanupError = cleanup;
+                    // close can return a retained operational error after safe disposal.
+                    // The scalar report distinguishes it from actual cleanup failure.
+                    operation.cleanupError = state != null && state.length == 16 ? (int)state[2] : cleanup;
                     operation.unresolved = state == null || state.length != 16 || state[4] != 0 || state[5] != 0;
                     if (state != null && state.length == 16 && operation.firstError == 0) operation.firstError = (int)state[0];
                 }

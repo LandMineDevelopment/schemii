@@ -313,6 +313,11 @@ public class BootstrapControl {
                     action(service,"start"); check(HostService.status().contains("pending"), "no replacement after unresolved cleanup");
                 } else check(state[0]==0 && state[4]==0, "real JNI acquisition/mapping completed and disposed");
             }
+            if (Boolean.getBoolean("fixture.existing") && mode.equals("custody-error")) {
+                long[] state=NativeOwner.status();
+                check(state[0]==5 && state[2]==0 && state[4]==0, "disposed custody error preserved without cleanup failure");
+                check(HostService.status().contains("First error 5.") && !HostService.status().contains("Cleanup error"), "operation and cleanup diagnostics remain distinct");
+            }
             absent(); service.onDestroy();
             service.onCreate(); action(service,"start"); check(HostService.status().contains("stale"), "destroyed incarnation cannot revive");
             if (replacement != null) replacement.onDestroy();
@@ -390,7 +395,13 @@ def java_bootstrap(tmp_path_factory):
 #include <stdlib.h>
 #include <errno.h>
 #include <unistd.h>
-static int inventory_calls, armed;
+#include <sys/file.h>
+static int inventory_calls, armed, flock_calls;
+int __real_flock(int,int);
+int __wrap_flock(int fd,int op) {
+    if (++flock_calls==2 && getenv("SCHEMII_J2_FIXTURE_CUSTODY")) { errno=EIO; return -1; }
+    return __real_flock(fd,op);
+}
 int __real_close(int);
 int __wrap_close(int fd) {
     int result=__real_close(fd);
@@ -442,6 +453,7 @@ int __wrap_dl_iterate_phdr(int (*callback)(struct dl_phdr_info *,size_t,void *),
             str(inventory),
             "-Wl,--wrap=dl_iterate_phdr",
             "-Wl,--wrap=close",
+            "-Wl,--wrap=flock",
             "-ldl",
             "-o",
             str(library),
@@ -481,6 +493,7 @@ def snapshot(root: Path) -> dict[str, tuple[int, bytes | None]]:
         "stale-stop",
         "normal",
         "cleanup-error",
+        "custody-error",
         "stop",
         "destroy",
         "replace",
@@ -539,10 +552,74 @@ def test_production_ce_bootstrap_refuses_without_mutation(
             **{
                 key: value
                 for key, value in os.environ.items()
-                if key != "SCHEMII_J2_FIXTURE_CLEANUP"
+                if key
+                not in {"SCHEMII_J2_FIXTURE_CLEANUP", "SCHEMII_J2_FIXTURE_CUSTODY"}
             },
             **({"SCHEMII_J2_FIXTURE_CLEANUP": "1"} if case == "cleanup-error" else {}),
+            **({"SCHEMII_J2_FIXTURE_CUSTODY": "1"} if case == "custody-error" else {}),
         },
     )
     assert f"PASS {case}" in result.stdout
     assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("anchors", [False, True], ids=["diagnostic", "legacy-host"])
+def test_legacy_activity_routes_with_its_own_profile(java_bootstrap, tmp_path, anchors):
+    """Execute the actual diagnostic guard/helper, without Android UI actions.
+
+    The production service is compiled by java_bootstrap. Only the Activity's
+    fixed guard and helper are extracted because its UI/diagnostic SDK surface
+    is outside this host-JVM fixture; the helper bytes are never replaced.
+    """
+    activity = (
+        ROOT
+        / "platforms/android/app/src/main/java/development/landmine/schemii/runtimeprobe/ProbeActivity.java"
+    ).read_text()
+    start = activity.index("    private static boolean hostControlsAvailable() {")
+    end = activity.index("\n    @Override", start)
+    helper = activity[start:end]
+    guard = f"{PACKAGE}.HostService.available() && hostControlsAvailable()"
+    create = activity[activity.index("@Override public void onCreate(Bundle state)") :]
+    assert f"if ({guard}) {{" in create
+    java, classes, _ = java_bootstrap
+    # The general bootstrap fixture has a compile-only HostAnchors stub.
+    # Isolate its classpath and remove only that stub; never modify the shared
+    # fixture or replace the compiled production service/helper under test.
+    route_classes = tmp_path / "classes"
+    anchor_class = Path(*PACKAGE.split(".")) / "HostAnchors.class"
+    for compiled in classes.rglob("*.class"):
+        relative = compiled.relative_to(classes)
+        if relative == anchor_class:
+            continue
+        target = route_classes / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(compiled.read_bytes())
+    assert not (route_classes / anchor_class).exists()
+    sources = []
+    if anchors:
+        anchor = tmp_path / "HostAnchors.java"
+        anchor.write_text(
+            f'package {PACKAGE}; public class HostAnchors {{ public static final String COMMIT="fixture"; }}'
+        )
+        sources.append(str(anchor))
+    harness = tmp_path / "LegacyRoute.java"
+    harness.write_text(
+        "public class LegacyRoute {\n"
+        + helper
+        + "\npublic static void main(String[] ignored) { System.out.println("
+        + guard
+        + ' ? "host" : "diagnostic"); }\n}\n'
+    )
+    run_java(
+        [
+            "javac",
+            "-cp",
+            str(route_classes),
+            "-d",
+            str(route_classes),
+            *sources,
+            str(harness),
+        ]
+    )
+    result = run_java([java, "-cp", str(route_classes), "LegacyRoute"])
+    assert result.stdout.strip() == ("host" if anchors else "diagnostic")

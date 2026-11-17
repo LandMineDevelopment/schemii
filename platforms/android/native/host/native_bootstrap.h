@@ -16,4 +16,8 @@ int native_bootstrap_validate(struct native_bootstrap *owner,
 struct native_bootstrap_status native_bootstrap_status(struct native_bootstrap *owner);
 void native_bootstrap_refuse(struct native_bootstrap *owner, int error);
 int native_bootstrap_close(struct native_bootstrap **owner);
+/* Capture the last scalar report before successful disposal. With no owner,
+ * leave the supplied report untouched so a caller can retain its last result. */
+int native_bootstrap_close_report(struct native_bootstrap **owner,
+                                  struct native_bootstrap_status *final);
 #endif

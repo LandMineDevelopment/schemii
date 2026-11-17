@@ -161,11 +161,12 @@ JNIEXPORT jint JNICALL Java_development_landmine_schemii_android_host_NativeOwne
     pthread_mutex_unlock(&calls); return EBUSY;
   }
   busy=1; struct native_bootstrap *closing=owner;
+  struct native_bootstrap_status final=snapshot;
   pthread_mutex_unlock(&calls);
-  int result=native_bootstrap_close(&closing);
+  int result=native_bootstrap_close_report(&closing,&final);
   pthread_mutex_lock(&calls);
   owner=closing;
-  if (owner) snapshot=native_bootstrap_status(owner);
-  else { snapshot.retained=0; if (!snapshot.cleanup) snapshot.cleanup=result; reserved=0; }
+  snapshot=final;
+  if (!owner) { snapshot.retained=0; reserved=0; }
   busy=0; pthread_mutex_unlock(&calls); return result;
 }
