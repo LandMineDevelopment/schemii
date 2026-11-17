@@ -52,7 +52,7 @@
     "descendant_identity": "UNKNOWN; pinned PRoot birth/export race and native helpers not closed",
     "shutdown": "bounded graceful stop; no forced PostgreSQL cleanup",
     "ready": false,
-    "native_owner": "FGS + private native AF_UNIX lease; R-only observation; C/A UNKNOWN; no birth or journal grant",
+    "native_owner": "FGS + private native AF_UNIX control; native selected-directory custodian; R-only observation; C/A UNKNOWN; no birth or journal grant",
     "actor_producer": {
       "profile": "source-only-managed-actors-refused",
       "contract": "platforms/android/native/host/actor-channel-v1.json",

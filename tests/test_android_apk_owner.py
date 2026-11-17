@@ -70,6 +70,7 @@ struct boot_identity_result boot_identity_read(void) {
             str(HOST),
             str(HOST / "owner.c"),
             str(HOST / "boot_compare.c"),
+            str(HOST / "boot_authority.c"),
             str(wrapper),
             "-o",
             str(library),
