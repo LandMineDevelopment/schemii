@@ -69,7 +69,25 @@ static jstring field(JNIEnv *e, jclass cls, jobject object, const char *name) {
   jfieldID id=(*e)->GetFieldID(e,cls,name,"Ljava/lang/String;");
   return id && !(*e)->ExceptionCheck(e) ? (*e)->GetObjectField(e,object,id) : NULL;
 }
-struct image_inventory { const char *module; unsigned own; int refused, reason, count; };
+/* Observation only: bounded loader-name bytes, never emitted directly. */
+struct first_image_refusal {
+  unsigned count, phnum; int complete, stage;
+  size_t length; unsigned char name[512];
+};
+static struct first_image_refusal first_image;
+struct image_inventory {
+  const char *module; unsigned own; int refused, reason, count;
+  struct first_image_refusal first;
+};
+static void capture_first_image(struct image_inventory *inventory, const struct dl_phdr_info *info) {
+  inventory->first.count=(unsigned)inventory->count;
+  inventory->first.phnum=info->dlpi_phnum;
+  size_t i=0;
+  for (; i<sizeof(inventory->first.name) && info->dlpi_name[i]; ++i)
+    inventory->first.name[i]=(unsigned char)info->dlpi_name[i];
+  inventory->first.length=i;
+  inventory->first.complete=i<sizeof(inventory->first.name);
+}
 static int images(struct dl_phdr_info *info, size_t size, void *arg) {
   struct image_inventory *inventory=arg;
   if (inventory->count<4096) ++inventory->count;
@@ -82,14 +100,21 @@ static int images(struct dl_phdr_info *info, size_t size, void *arg) {
   else if (!*name || !strcmp(name,"linux-vdso.so.1") || !strcmp(name,"[vdso]") ||
            !strncmp(name,"/system/",8) || !strncmp(name,"/apex/",6)) {
     /* Stock OS runtime/ART dependency boundary; no application plugin ELF. */
-  } else { inventory->refused=1; inventory->reason=3; return 1; }
+  } else { inventory->refused=1; inventory->reason=3; capture_first_image(inventory,info); return 1; }
   return 0;
 }
 static int closed_images(const char *module, struct acquisition_observation *r) {
-  struct image_inventory inventory={module,0,0,0,0};
+  struct image_inventory inventory={.module=module};
   dl_iterate_phdr(images,&inventory);
   int result=inventory.refused || inventory.own!=1 ? EACCES : 0;
   if (result && !r->image_reason) { r->image_reason=inventory.reason ? inventory.reason : 4; r->image_count=inventory.count; }
+  if (inventory.first.count) {
+    int saved_errno=errno;
+    pthread_mutex_lock(&calls);
+    if (!first_image.count) { first_image=inventory.first; first_image.stage=r->last_stage; }
+    pthread_mutex_unlock(&calls);
+    errno=saved_errno;
+  }
   return result;
 }
 JNIEXPORT jint JNICALL Java_development_landmine_schemii_android_host_NativeOwner_open(JNIEnv *e,jclass cls) {
@@ -97,6 +122,7 @@ JNIEXPORT jint JNICALL Java_development_landmine_schemii_android_host_NativeOwne
   if (reserved) { pthread_mutex_unlock(&calls); return EBUSY; }
   reserved=busy=1; worker=pthread_self(); memset(&snapshot,0,sizeof(snapshot));
   observation=(struct acquisition_observation){0};
+  first_image=(struct first_image_refusal){0};
   observation_begin=monotonic_ns(); observation_end=-1; observation_phase=1; worker_known=1;
   snapshot.retained=1; snapshot.stage=1;
   snapshot.boot=(struct boot_compare_result){BOOT_COMPARE_UNKNOWN,BOOT_COMPARE_CALLER_UNPROVED,
@@ -271,6 +297,20 @@ JNIEXPORT jlongArray JNICALL Java_development_landmine_schemii_android_host_Nati
   pthread_mutex_unlock(&calls);
   jlongArray out=(*e)->NewLongArray(e,34);
   if (out) (*e)->SetLongArrayRegion(e,out,0,34,v);
+  return out;
+}
+/* Separate private observation ABI; raw16/raw34 and all decisions stay unchanged.
+ * Same-worker consumer must redact the name bytes before any logging. */
+JNIEXPORT jlongArray JNICALL Java_development_landmine_schemii_android_host_NativeOwner_imageRefusal(JNIEnv *e,jclass cls) {
+  (void)cls; pthread_mutex_lock(&calls);
+  int readable=!busy && worker_known && pthread_equal(worker,pthread_self());
+  struct first_image_refusal d=first_image; jlong begin=observation_begin;
+  pthread_mutex_unlock(&calls);
+  if (!readable || !d.count) return NULL;
+  jlong v[8+512]={1,(jlong)(8+d.length),d.count,d.phnum,d.complete,begin,d.stage,(jlong)d.length};
+  for (size_t i=0;i<d.length;++i) v[8+i]=d.name[i];
+  jlongArray out=(*e)->NewLongArray(e,(jsize)(8+d.length));
+  if (out) (*e)->SetLongArrayRegion(e,out,0,(jsize)(8+d.length),v);
   return out;
 }
 JNIEXPORT jstring JNICALL Java_development_landmine_schemii_android_host_NativeOwner_observationSource(JNIEnv *e,jclass cls) {
