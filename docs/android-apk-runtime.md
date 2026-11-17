@@ -746,7 +746,12 @@ silently removed by the new policy. Existing namespace emulation is unchanged.
 
 Root/native births publish an intent before fork and a correlated failure or
 observed PID result afterward. A send failure after the real birth retains the
-live slot and unresolved intent. Guest entry intents bind attach-child identity;
+live slot and unresolved intent. Guest entry reserves a slot and unique child
+incarnation before kernel resume; competing creators share the same finite budget.
+Both channel ends derive reservations in intent sequence order. Attachment uses
+the exact reservation even when children attach in a different order. Only an
+observed negative birth result releases a reservation; loss retains it. Guest
+entry intents bind attach-child identity;
 child stops arriving before creator events are held in a bounded local table and
 exported only after attachment. Lost/truncated chronology remains UNKNOWN.
 Direct real-parent helper waits are dispatched **before** guest Tracee creation.
@@ -760,7 +765,8 @@ execution. Raw failure fences further managed resume/birth and preserves uncerta
 Guest ptrace terminal observation remains distinct from the guest's real-parent
 wait: it retains an unresolved wait slot. Nonleader exec records the remap and
 retains displaced same-process task waits, refusing cross-process identity
-collisions with ESTALE rather than manufacturing terminal evidence. Complete task retirement and guest real-parent
+collisions with ESTALE before changing relatives or task identities, rather than
+manufacturing terminal evidence. Complete task retirement and guest real-parent
 wait consumption remain integration gates. `ac_highwater` is only a local finite
 actor observation: no pending intent/early event/loss/live actor/task/helper/wait
 and every sent record receipt-ACKed. It is never a durable journal ACK, CLEAN,

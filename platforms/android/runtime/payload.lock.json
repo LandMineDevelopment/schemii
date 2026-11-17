@@ -2531,10 +2531,10 @@
     "profile": "source-only-managed-actors-refused",
     "proot_commit": "52d65a4dc140ca554d241a1438ddd4f6b00c9813",
     "inputs": {
-      "platforms/android/native/host/actor_channel.c": "ddbf4d32aa48a04617d591a06ab6c1dddf58de0c6b8578a07fc1c0572024bdf0",
-      "platforms/android/native/host/actor_channel.h": "f73b68a8724dcd5a3e705a11dd32391f57b4b036355a288fdadc0f265e9880c8",
-      "platforms/android/native/host/actor-channel-v1.json": "065e7c4c75ff8d04b6156b116f8c0d29404ae4be2f5c32f80993dc34fa6f441e",
-      "platforms/android/native/proot-actor-channel.patch": "08625de5795437b864c7c2926310333447ea72842dc4c34d2889bcf59b8e8678"
+      "platforms/android/native/host/actor_channel.c": "3de84d124eb1c6e585f6bcaad268ead9dad39f4d0a4763afb7d29b10cd0bb7da",
+      "platforms/android/native/host/actor_channel.h": "ce759731b3c62f7958e1e61212bbf0cdaa261359da341f49eaef98867ea6aef1",
+      "platforms/android/native/host/actor-channel-v1.json": "11dd64189355c29dd3def8fd5b1dd5d0f40bc3aebb3878a6195671cfc89129e5",
+      "platforms/android/native/proot-actor-channel.patch": "ed1fc44619b2c69779851f0cb39310a80630f49ec6d4d155fde35330fa37cfb6"
     },
     "donor_inputs": {
       "tracee/event.c": "a0ff3803895b6c3cf9a631fd80c535c5233e5dca4c8d52e44f5b61a2329d858e",

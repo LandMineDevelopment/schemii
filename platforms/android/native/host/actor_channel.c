@@ -63,6 +63,20 @@ int ac_send(struct ac_channel *c,struct ac_record *r) {
     if(n!=(ssize_t)sizeof(p)) { ac_loss(c,n<0?errno:EIO); return c->error; }
     c->tx=r->sequence; return 0;
 }
+/* Both ends reserve in sequenced INTENT order. Attachment may arrive in a
+ * different order; its exact intent selects the already unique incarnation.
+ * Unresolved reservations are pending slots and can never be recycled. */
+static struct ac_slot *reserve_guest(struct ac_channel *c,const struct ac_slot *parent,uint64_t intent) {
+    if(c->next_incarnation==UINT64_MAX) { ac_loss(c,EOVERFLOW); return NULL; }
+    for(unsigned i=0;i<AC_CAPACITY;i++) {
+        struct ac_slot *s=&c->slots[i];
+        if(s->live || s->pending || s->wait_pending) continue;
+        memset(s,0,sizeof(*s)); s->task=++c->next_incarnation;
+        s->creator=parent->task; s->intent=intent; s->kind=AC_GUEST;
+        s->pending=1; s->reserved=1; return s;
+    }
+    ac_loss(c,ENOSPC); return NULL;
+}
 static int consume(struct ac_channel *, const struct ac_record *);
 int ac_receive(struct ac_channel *c,struct ac_record *r) {
     unsigned char p[AC_FRAME_SIZE], expected[AC_FRAME_SIZE]={0};
@@ -113,16 +127,19 @@ int ac_receive(struct ac_channel *c,struct ac_record *r) {
 static int consume(struct ac_channel *c,const struct ac_record *r) {
     if(r->op==AC_ACK) return 0;
     if(r->op==AC_HIGHWATER) { ac_loss(c,EPROTO); return c->error; }
-    struct ac_slot *s=NULL, *intent=NULL, *free_slot=NULL;
+    struct ac_slot *s=NULL, *intent=NULL, *reservation=NULL, *free_slot=NULL;
     for(unsigned i=0;i<AC_CAPACITY;i++) {
         struct ac_slot *v=&c->slots[i];
         if(v->task==r->task && v->live) s=v;
-        if(v->intent==r->intent && v->pending) intent=v;
+        if(v->intent==r->intent && v->pending) {
+            if(v->reserved) reservation=v; else intent=v;
+        }
         if(!v->live && !v->pending && !v->wait_pending) free_slot=v;
     }
     if(!r->task || !r->process || !r->creator || !r->intent || r->kind<AC_ROOT || r->kind>AC_RAW) goto bad;
     if(r->op==AC_INTENT) {
         if(r->intent!=r->sequence || (s && s->pending)) goto bad;
+        int native=s==NULL;
         if(!s) {
             if(!free_slot || r->task<=c->next_incarnation || r->kind==AC_GUEST || r->pid || r->creator!=c->binding.creator || r->process!=r->task) goto bad;
             s=free_slot; memset(s,0,sizeof(*s)); s->task=r->task; s->process=r->process;
@@ -130,13 +147,14 @@ static int consume(struct ac_channel *c,const struct ac_record *r) {
             c->next_incarnation=r->task;
         }
         if(s->process!=r->process || s->creator!=r->creator || s->kind!=r->kind || s->pid!=(pid_t)r->pid) goto bad;
+        if(!native && !reserve_guest(c,s,r->intent)) return c->error;
         s->native_intent=s->pid==0; s->intent=r->intent; s->pending=1; return 0;
     }
     if(r->op==AC_TASK) {
-        if(!intent || s || !free_slot || r->task<=c->next_incarnation || r->creator!=intent->task || r->related!=(uint32_t)intent->pid || r->kind!=AC_GUEST || !r->pid || (r->process!=r->task && r->process!=intent->process)) goto bad;
-        s=free_slot; memset(s,0,sizeof(*s)); s->task=r->task; s->process=r->process; s->creator=r->creator;
+        if(!intent || s || !reservation || reservation->task!=r->task || reservation->creator!=r->creator || r->creator!=intent->task || r->related!=(uint32_t)intent->pid || r->kind!=AC_GUEST || !r->pid || (r->process!=r->task && r->process!=intent->process)) goto bad;
+        s=reservation; memset(s,0,sizeof(*s)); s->task=r->task; s->process=r->process; s->creator=r->creator;
         s->intent=r->intent; s->pid=(pid_t)r->pid; s->kind=r->kind; s->live=1; s->wait_pending=1;
-        intent->pending=0; c->next_incarnation=r->task; return 0;
+        intent->pending=0; return 0;
     }
     if(!s || s->process!=r->process || s->creator!=r->creator || s->kind!=r->kind || s->intent!=r->intent) goto bad;
     if(r->op==AC_RESULT) {
@@ -145,7 +163,10 @@ static int consume(struct ac_channel *c,const struct ac_record *r) {
             if(r->result>0 && r->pid==(uint32_t)r->result) s->pid=(pid_t)r->pid;
             else if(r->result<0 && !r->pid) { s->live=0; s->wait_pending=0; }
             else goto bad;
-        } else if(r->result>=0) goto bad;
+        } else {
+            if(r->result>=0 || !reservation || reservation->creator!=s->task) goto bad;
+            memset(reservation,0,sizeof(*reservation));
+        }
         s->pending=0; return 0;
     }
     if(s->pid!=(pid_t)r->pid) goto bad;
@@ -241,6 +262,7 @@ int ac_birth_enter(pid_t pid) {
     if(ac_proot_require()) return ac_proot_require();
     struct ac_slot *s=slot(pid);
     if(!s || s->pending) { ac_loss(producer,EPROTO); return EPROTO; }
+    if(!reserve_guest(producer,s,producer->tx+1)) return producer->error;
     s->native_intent=0; s->pending=1; s->intent=producer->tx+1;
     return emit(s,AC_INTENT,0,0);
 }
@@ -248,15 +270,27 @@ void ac_birth_result(pid_t pid,long result) {
     struct ac_slot *s=slot(pid);
     if(!s || !s->pending) return;
     /* Successful birth is resolved only by attach_child with exact identity. */
-    if(result<0) { if(!emit(s,AC_RESULT,result,0)) s->pending=0; }
+    if(result<0 && !emit(s,AC_RESULT,result,0)) {
+        for(unsigned i=0;i<AC_CAPACITY;i++) {
+            struct ac_slot *v=&producer->slots[i];
+            if(v->reserved && v->creator==s->task && v->intent==s->intent)
+                memset(v,0,sizeof(*v));
+        }
+        s->pending=0;
+    }
 }
 int ac_task(pid_t parent,pid_t pid,int thread) {
     if(ac_proot_require()) return ac_proot_require();
     struct ac_slot *p=slot(parent);
     if(!p || !p->pending) { ac_loss(producer,EPROTO); return EPROTO; }
-    struct ac_slot *s=allocate(pid,AC_GUEST,0,thread?p->process:0);
-    if(!s) return producer->error;
-    s->intent=p->intent; s->creator=p->task;
+    struct ac_slot *s=NULL;
+    for(unsigned i=0;i<AC_CAPACITY;i++) {
+        struct ac_slot *v=&producer->slots[i];
+        if(v->reserved && v->creator==p->task && v->intent==p->intent) s=v;
+    }
+    if(!s || slot(pid)) { ac_loss(producer,EPROTO); return EPROTO; }
+    s->pid=pid; s->process=thread?p->process:s->task;
+    s->reserved=0; s->pending=0; s->live=1; s->wait_pending=1;
     if(emit(s,AC_TASK,0,parent)) return producer->error;
     p->pending=0;
     /* Linux may report the child's initial stop before its creator event.

@@ -14,7 +14,7 @@ struct ac_binding { unsigned char source[32], contract[32], run[16];
 struct ac_record { uint64_t sequence, intent, task, process, creator, monotonic_ns;
     uint32_t op, kind, pid, related; int32_t result, error, secondary; };
 struct ac_slot { uint64_t task, process, intent, creator; pid_t pid; unsigned kind;
-    int live, pending, direct, wait_pending, native_intent; };
+    int live, pending, direct, wait_pending, native_intent, reserved; };
 struct ac_channel { int fd, error, secondary, lost; uint64_t tx, rx, acknowledged,
     next_incarnation, rx_monotonic; struct { pid_t pid; int status; } early[AC_CAPACITY];
     struct ac_binding binding; struct ac_slot slots[AC_CAPACITY]; };

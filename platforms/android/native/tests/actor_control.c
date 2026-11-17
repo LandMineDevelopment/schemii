@@ -92,7 +92,7 @@ static struct ac_channel writer, reader;
 static const char *scenario, *fixture_binary;
 extern char **environ;
 static pid_t owned[256];
-static unsigned owned_count, event_count, task_count, exec_count, wait_count;
+static unsigned owned_count, event_count, task_count, exec_count, wait_count, scripted_resumes;
 static int sentinel=-1, scripted, event_index, scripted_count, loop_wait_calls;
 static pid_t helper_pid, script_event_pid;
 static int last_kernel_status;
@@ -155,6 +155,7 @@ long __wrap_ptrace(enum __ptrace_request req,...) {
     va_list ap; va_start(ap,req); pid_t pid=va_arg(ap,pid_t); void *a=va_arg(ap,void *), *b=va_arg(ap,void *); va_end(ap);
     if(!strcmp(scenario,"root-options-failure") && req==PTRACE_SETOPTIONS) {errno=EACCES;return -1;}
     if(scripted) {
+        if(req==PTRACE_CONT || req==PTRACE_SYSCALL) scripted_resumes++;
         if(req==PTRACE_GETEVENTMSG) *(unsigned long *)b=(unsigned long)script_event_pid;
         else if(req==PTRACE_GETREGS) memcpy(b,&register_source->_regs[CURRENT],sizeof(register_source->_regs[CURRENT]));
         return 0; /* Explicit kernel register/event/resume injection, no external target. */
@@ -277,6 +278,67 @@ static Tracee *configure(pid_t pid) {
     root->exe=talloc_strdup(root,"/owned-native-fixture"); root->tool_name="finite-control";
     root->fs->cwd=talloc_strdup(root->fs,"/"); return root;
 }
+static int guest_enter(Tracee *root) {
+    register_source=root;root->restart_how=PTRACE_SYSCALL;
+    set_sysnum(root,PR_clone);poke_reg(root,SYSARG_1,SIGCHLD);save_current_regs(root,ORIGINAL);
+    return translate_syscall_enter(root);
+}
+static int guest_reservations(void) {
+    pid_t parent=ac_native_fork(AC_ROOT);assert(parent>=0);
+    if(!parent) {const int keep[]={0,1,2};if(ac_child_fds(keep,3)) _exit(125);_exit(0);}
+    int status;assert(__real_waitpid(parent,&status,0)==parent);forget(parent);drain();
+    Tracee *root=configure(parent);register_source=root;scripted=1;
+    unsigned fill=!strcmp(scenario,"guest-capacity")?AC_CAPACITY:AC_CAPACITY-1;
+    if(!strcmp(scenario,"guest-incarnation")) fill=1;
+    if(!strcmp(scenario,"guest-reordered") || !strcmp(scenario,"guest-reservation-loss")) fill=2;
+    for(unsigned i=1;i<fill;i++) {
+        assert(!ac_birth_enter(parent));assert(!ac_task(parent,(pid_t)(1000000000+i),0));drain();
+    }
+    if(!strcmp(scenario,"guest-incarnation")) writer.next_incarnation=UINT64_MAX;
+    if(!strcmp(scenario,"guest-rejected")) {
+        assert(!guest_enter(root));drain();uint64_t rejected=writer.next_incarnation;
+        ac_birth_result(parent,-EAGAIN);drain();assert(!writer.lost);
+        Tracee *other=configure(1000000001);assert(!guest_enter(other));
+        assert(!ac_task(other->pid,1500000000,0));drain();
+        assert(writer.next_incarnation==rejected+1 && reader.next_incarnation==writer.next_incarnation);
+        for(unsigned i=0;i<AC_CAPACITY;i++) assert(!writer.slots[i].reserved && !reader.slots[i].reserved);
+        return 0;
+    }
+    if(!strcmp(scenario,"guest-reordered")) {
+        Tracee *other=configure(1000000001);assert(!guest_enter(root));
+        uint64_t first=writer.next_incarnation;assert(!guest_enter(other));
+        assert(!ac_task(other->pid,1500000000,0));drain();
+        assert(!ac_task(parent,1500000001,0));drain();
+        assert(writer.slots[2].task==first && writer.slots[2].pid==1500000001);
+        assert(writer.slots[3].task==first+1 && writer.slots[3].pid==1500000000);
+        unsigned found=0;
+        for(unsigned i=0;i<AC_CAPACITY;i++) {
+            if(reader.slots[i].task==first && reader.slots[i].pid==1500000001) found++;
+            if(reader.slots[i].task==first+1 && reader.slots[i].pid==1500000000) found++;
+        }
+        assert(found==2);
+        assert(reader.next_incarnation==first+1 && !writer.lost);return 0;
+    }
+    if(!strcmp(scenario,"guest-reservation-loss")) {
+        assert(!guest_enter(root));drain();
+        struct ac_slot before[AC_CAPACITY];memcpy(before,writer.slots,sizeof(before));
+        ac_loss(&writer,EIO);ac_birth_result(parent,-EAGAIN);
+        assert(ac_task(parent,1500000000,0)==EIO && !memcmp(before,writer.slots,sizeof(before)));
+        assert(writer.slots[2].reserved && writer.slots[2].pending && ac_highwater(&writer)==EBUSY);
+        assert(ac_highwater(&reader)==EBUSY);return 0;
+    }
+    if(!strcmp(scenario,"guest-competition")) {
+        assert(!guest_enter(root));drain();
+        root=configure(1000000001);register_source=root;
+    }
+    struct ac_slot before[AC_CAPACITY];memcpy(before,writer.slots,sizeof(before));
+    int expected=!strcmp(scenario,"guest-incarnation")?EOVERFLOW:ENOSPC;
+    assert(guest_enter(root)==-expected);
+    assert(writer.lost && writer.error==expected && !restart_tracee(root,0));
+    assert(!scripted_resumes && !memcmp(before,writer.slots,sizeof(before)));
+    assert(ac_highwater(&writer)==EBUSY);
+    printf("%s before-resume-refusal=1 prior-slots-preserved=1\n",scenario);return 0;
+}
 static int script_matrix(void) {
     pid_t parent=ac_native_fork(AC_ROOT); assert(parent>=0);
     if(!parent) {const int keep[]={0,1,2}; if(ac_child_fds(keep,3)) _exit(125); _exit(0);}
@@ -297,9 +359,16 @@ static int script_matrix(void) {
     if(is_exec) {
         assert(new_child(root,0)==0); /* whole attach path before remap */
         if(collision) {
+            Tracee *thread=get_tracee(root,child,false);assert(thread);
+            Tracee *relative=get_tracee(root,1000000000,true);assert(relative);relative->parent=root;
+            pid_t root_pid=root->pid,thread_pid=thread->pid;
+            Tracee *thread_parent=thread->parent;
+            struct ac_slot before[AC_CAPACITY];memcpy(before,writer.slots,sizeof(before));
             assert(get_execve_tracee(root)==root);
             assert(writer.lost && writer.error==ESTALE);
-            assert(root->pid==parent);drain();return 0;
+            assert(root->pid==root_pid && thread->pid==thread_pid && thread->parent==thread_parent);
+            assert(relative->parent==root && !memcmp(before,writer.slots,sizeof(before)));
+            drain();return 0;
         }
         queue(parent,((SIGTRAP|PTRACE_EVENT_EXEC<<8)<<8)|0x7f);
         queue(parent,parent_status);
@@ -365,6 +434,7 @@ int main(int argc,char **argv) {
     if(!strcmp(scenario,"tracer-live-helper-loss")) return tracer_loss();
     initialize();
     sentinel=open("/dev/null",O_RDONLY|O_CLOEXEC); assert(sentinel>=0);
+    if(!strncmp(scenario,"guest-",6)) return guest_reservations();
     if(!strncmp(scenario,"script-",7)) return script_matrix();
     if(!strncmp(scenario,"f2fs-",5)) {
         unsetenv("PROOT_F2FS_WORKAROUND");Tracee *t=configure(0);

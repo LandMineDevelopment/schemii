@@ -103,7 +103,7 @@
 +#ifdef SCHEMII_MANAGED_ACTORS
 +#include "actor_channel.h"
 +#endif
-@@ -431,0 +435,3 @@
+@@ -425,0 +429,3 @@
 +#ifdef SCHEMII_MANAGED_ACTORS
 +	if (ac_exec(thread->pid, leader->pid)) return leader;
 +#endif
