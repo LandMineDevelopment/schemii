@@ -783,11 +783,12 @@ public class MalformedControl {
     )
 
 
+@pytest.mark.parametrize("fault", ["none", "holder", "set", "get", "remove"])
 @pytest.mark.parametrize(
     "mode,reason", [("application", 1), ("storage", 2), ("loader", 3)]
 )
 def test_actual_framework_producer_retains_finite_failure_reason(
-    tmp_path, mode, reason
+    tmp_path, mode, reason, fault
 ):
     """Actual framework validator, negative fake-framework edges only.
 
@@ -850,6 +851,29 @@ public class ReasonControl {
   catch (java.io.IOException expected) { if (InstalledSource.frameworkReason()!=Integer.parseInt(args[0])) throw new AssertionError("finite reason lost"); if(InstalledSource.frameworkReason()!=0) throw new AssertionError("stale phase reused"); }
  }
 } """)
+    installed_source = HOST / "InstalledSource.java"
+    if fault != "none":
+        # Only the ThreadLocal allocation/storage edge is injected in a private
+        # source copy; actual framework guards and catch/consume code stay exact.
+        # No product setter, hook, injected source or class is packaged.
+        copied = installed_source.read_text()
+        if fault == "holder":
+            allocation = 'throw new OutOfMemoryError("SECRET-phase-holder");'
+        else:
+            signature = {
+                "set": "void set(Integer value)",
+                "get": "Integer get()",
+                "remove": "void remove()",
+            }[fault]
+            allocation = (
+                "return new ThreadLocal<Integer>() { @Override public "
+                + signature
+                + ' { throw new OutOfMemoryError("SECRET-phase-edge"); } };'
+            )
+        assert "return new ThreadLocal<Integer>();" in copied
+        copied = copied.replace("return new ThreadLocal<Integer>();", allocation)
+        installed_source = tmp_path / "InstalledSource.java"
+        installed_source.write_text(copied)
     classes = tmp_path / "classes"
     classes.mkdir()
     run_java(
@@ -862,10 +886,10 @@ public class ReasonControl {
             "-d",
             str(classes),
             *sources,
+            str(installed_source),
             *[
                 str(HOST / n)
                 for n in (
-                    "InstalledSource.java",
                     "StorageProfile.java",
                     "NativeOwner.java",
                     "HostService.java",
@@ -882,6 +906,6 @@ public class ReasonControl {
             "-cp",
             str(classes),
             PACKAGE + ".ReasonControl",
-            str(reason),
+            str(reason if fault == "none" else 0),
         ]
     )

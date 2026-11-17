@@ -81,7 +81,9 @@ A logical mode or identity refusal does not invent a syscall errno.
 
 `InstalledSource` now has one ThreadLocal integer phase; it retains no Context,
 Throwable or package/loader data. Its new class initializer only allocates that
-scalar holder, not a loader/worker. This refines the earlier runtime guide's
+scalar holder, not a loader/worker. Holder/set/get/remove failures disable phase
+observation as explicit reason0/unknown; they do not replace a framework guard
+result or escape as a new acquisition exception. This refines the earlier runtime guide's
 pre-diagnostic initializer inventory. The JNI getter reads a finite phase only
 after clearing an original framework exception and consumes it. JNI consumes any
 old phase before an invocation, so a failed invocation cannot inherit a prior
