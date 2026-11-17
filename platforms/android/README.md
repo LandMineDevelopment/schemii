@@ -99,7 +99,9 @@ are captured by the sole Java worker, cloned and retained through disposal.
 Own-process tag `SchemiiAcquire` emits bounded ASCII scalar records (v1/profile,
 fixed source or explicit unknown, service incarnation/operation sequence,
 record/phase, Java/native monotonic timing, finite failure fields, cancellation
-request, completion-point observation and raw34 pre/post values). Begin can be
+request, completion-point observation and raw34 pre/post values). Java begin/end use elapsedRealtimeNanos (including
+suspend); native31/32 use CLOCK_MONOTONIC. Never subtract across those clocks.
+Begin can be
 source-unbound while storage selection is pending; later records bind that same
 operation to the fixed source. A completion point is not thread death, a join,
 service shutdown or durable recovery. No path/package/signer/raw exception,
@@ -111,7 +113,8 @@ never wrap/reuse.
 Each record is limited2048 characters. Failed/short log writes increment a loss
 counter and surface observation loss; a positive log return **does not prove
 delivery**. Every record states `delivery=unverified`, sequences expose missing
-captures, incomplete begin/end remain explicit, and a final lost record may
+captures, incomplete begin/end remain explicit (Java clock failures return -1 without
+skipping guard work or cleanup; clock reads stay outside lifecycle locks), and a final lost record may
 require the UI observation-loss notice. Logcat rotation/drop/collection loss
 must be reported externally, bound to actual installed bytes; this is not a
 private durable export/recovery mechanism. No background control/start surface,

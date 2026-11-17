@@ -88,7 +88,7 @@ public class Notification {
     }
 }
 """,
-    "android/os/SystemClock.java": """package android.os; public class SystemClock { public static long elapsedRealtimeNanos() { return System.nanoTime(); } }""",
+    "android/os/SystemClock.java": """package android.os; public class SystemClock { public static long elapsedRealtimeNanos() { if (Boolean.getBoolean("fixture.clockfail")) throw new SecurityException("SECRET-clock"); return System.nanoTime(); } }""",
     "android/util/Log.java": """
 package android.util;
 public class Log {
@@ -684,6 +684,8 @@ def test_legacy_activity_routes_with_its_own_profile(java_bootstrap, tmp_path, a
         "first-stage",
         "flaky",
         "logloss",
+        "clock",
+        "source",
     ],
 )
 def test_observation_failure_never_skips_native_cleanup(tmp_path, mode):
@@ -715,7 +717,9 @@ def test_observation_failure_never_skips_native_cleanup(tmp_path, mode):
     )
     owner = owner.replace(
         "static native String observationSource();",
-        'static String observationSource() { return "' + "f" * 40 + '"; }',
+        'static String observationSource() { if (System.getProperty("mode").equals("source")) return "SECRET-source"; return "'
+        + "f" * 40
+        + '"; }',
     )
     owner = owner.replace(
         "static native long[] status();",
@@ -758,7 +762,7 @@ public class MalformedControl {
   ExecutorService work=(ExecutorService)field.get(s);work.shutdown();
   if (!work.awaitTermination(5,TimeUnit.SECONDS) || NativeOwner.closes!=1) throw new AssertionError("cleanup skipped");
   Field pending=HostService.class.getDeclaredField("outstanding");pending.setAccessible(true);
-  boolean malformed=!System.getProperty("mode").equals("valid") && !System.getProperty("mode").equals("logloss");
+  boolean malformed=!System.getProperty("mode").equals("valid") && !System.getProperty("mode").equals("logloss") && !System.getProperty("mode").equals("clock");
   if ((pending.get(null)!=null)!=malformed || !HostService.status().contains("First error 13.")) throw new AssertionError("unknown report released or first failure erased");
   if (System.getProperty("mode").equals("logloss") && !HostService.status().contains("Observation loss detected")) throw new AssertionError("loss not surfaced");
   for (String line:android.util.Log.records) if(line.contains("SECRET") || line.contains(args[0])) throw new AssertionError("redaction");
@@ -775,6 +779,7 @@ public class MalformedControl {
             "java",
             "-Dmode=" + mode,
             "-Dfixture.logloss=" + str(mode == "logloss").lower(),
+            "-Dfixture.clockfail=" + str(mode == "clock").lower(),
             "-cp",
             str(classes),
             PACKAGE + ".MalformedControl",

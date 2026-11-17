@@ -106,6 +106,18 @@ public final class HostService extends Service {
         try { return NativeOwner.Observation.decode(NativeOwner.observation()); }
         catch (Exception | LinkageError | OutOfMemoryError error) { return null; }
     }
+    private static long observationTime() {
+        try { return android.os.SystemClock.elapsedRealtimeNanos(); }
+        catch (RuntimeException | LinkageError | OutOfMemoryError error) { return -1; }
+    }
+    private static boolean fixedSource(String source) {
+        if (source == null || source.length() != 40) return false;
+        for (int i = 0; i < 40; i++) {
+            char c = source.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        }
+        return true;
+    }
     private static void observe(Operation operation, int phase) {
         try { emitObservation(operation, phase); }
         catch (RuntimeException | LinkageError | OutOfMemoryError error) {
@@ -156,7 +168,7 @@ public final class HostService extends Service {
         try { source = NativeOwner.observationSource(); }
         catch (Exception | LinkageError | OutOfMemoryError error) { /* unbound observation, no guard change */ }
         synchronized (lifecycle) {
-            operation.source = source != null && source.matches("[a-f0-9]{40}") ? source : "unknown";
+            operation.source = fixedSource(source) ? source : "unknown";
         }
         int result = NativeOwner.open();
         synchronized (lifecycle) {
@@ -197,10 +209,11 @@ public final class HostService extends Service {
                 synchronized (lifecycle) { operation.unresolved = true; }
             }
         }
+        long end = observationTime();
         synchronized (lifecycle) {
             if (outstanding != operation) return;
             operation.completed = operation.workerStarted; // observed task completion point, not thread death
-            operation.end = android.os.SystemClock.elapsedRealtimeNanos();
+            operation.end = end;
             operation.javaStage = 5;
             boolean cancelled = operation.cancelled || operation.service.destroyed || operation.service.replaced;
             statusText = operation.refusal
@@ -252,7 +265,8 @@ public final class HostService extends Service {
         }
         try {
             work.execute(() -> {
-                synchronized (lifecycle) { operation.workerStarted = true; operation.begin = android.os.SystemClock.elapsedRealtimeNanos(); }
+                long begin = observationTime();
+                synchronized (lifecycle) { operation.workerStarted = true; operation.begin = begin; }
                 observe(operation, 1);
                 try { prepare(operation); }
                 catch (Exception | LinkageError error) {
