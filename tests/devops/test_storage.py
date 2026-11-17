@@ -465,6 +465,8 @@ def test_run_status_and_acceptance_preserve_producer_assertions(collector):
 
 def test_migration_reapply_guards_and_rollback(fixture, monkeypatch):
     assert operate(fixture, "migrate")["applied_versions"] == []
+    original = storage.migration_files()
+    latest = original[-1][0]
     with psycopg.connect(**fixture[1]["admin"], autocommit=True) as admin:
         before = storage.catalog_digest(admin)
         for name, ident in [
@@ -476,19 +478,23 @@ def test_migration_reapply_guards_and_rollback(fixture, monkeypatch):
             assert exc.value.reason == "wrong-target"
             assert storage.catalog_digest(admin) == before
         for column, value, reason in [
-            ("version", "2", "divergent-version"),
+            ("version", str(latest + 1), "divergent-version"),
             ("checksum", "'" + "0" * 64 + "'", "divergent-version"),
             ("schema_digest", "'" + "0" * 64 + "'", "divergent-schema"),
         ]:
             old = admin.execute(
-                sql.SQL("SELECT {} FROM devops_control.migrations").format(
-                    sql.Identifier(column)
-                )
+                sql.SQL(
+                    "SELECT {} FROM devops_control.migrations WHERE version=%s"
+                ).format(sql.Identifier(column)),
+                (latest,),
             ).fetchall()[0][0]
             admin.execute(
-                sql.SQL("UPDATE devops_control.migrations SET {}=" + value).format(
-                    sql.Identifier(column)
-                )
+                sql.SQL(
+                    "UPDATE devops_control.migrations SET {}="
+                    + value
+                    + " WHERE version=%s"
+                ).format(sql.Identifier(column)),
+                (latest,),
             )
             try:
                 with pytest.raises(storage.Refusal) as exc:
@@ -496,10 +502,10 @@ def test_migration_reapply_guards_and_rollback(fixture, monkeypatch):
                 assert exc.value.reason == reason
             finally:
                 admin.execute(
-                    sql.SQL("UPDATE devops_control.migrations SET {}=%s").format(
-                        sql.Identifier(column)
-                    ),
-                    (old,),
+                    sql.SQL(
+                        "UPDATE devops_control.migrations SET {}=%s WHERE version=%s"
+                    ).format(sql.Identifier(column)),
+                    (old, latest + 1 if column == "version" else latest),
                 )
         admin.execute("ALTER TABLE devops.ci_runs ADD COLUMN drift integer")
         try:
@@ -537,13 +543,13 @@ def test_migration_reapply_guards_and_rollback(fixture, monkeypatch):
             assert exc.value.reason == "divergent-schema"
         finally:
             admin.execute("ALTER TABLE devops.test_attempts ENABLE TRIGGER a_revision")
-        original = storage.migration_files()
         broken = "CREATE TABLE devops.rollback_probe(id integer); SELECT missing_column FROM devops.rollback_probe;"
         monkeypatch.setattr(
             storage,
             "migration_files",
             lambda: (
-                original + [(2, hashlib.sha256(broken.encode()).hexdigest(), broken)]
+                original
+                + [(latest + 1, hashlib.sha256(broken.encode()).hexdigest(), broken)]
             ),
         )
         with pytest.raises(psycopg.errors.UndefinedColumn):
@@ -554,12 +560,9 @@ def test_migration_reapply_guards_and_rollback(fixture, monkeypatch):
             ]
             is None
         )
-        assert (
-            admin.execute("SELECT count(*) FROM devops_control.migrations").fetchall()[
-                0
-            ][0]
-            == 1
-        )
+        assert admin.execute(
+            "SELECT count(*) FROM devops_control.migrations"
+        ).fetchall()[0][0] == len(original)
         assert storage.catalog_digest(admin) == before
 
 
@@ -614,13 +617,17 @@ def new_database(fixture, suffix):
 
 def test_first_apply_failure_and_empty_target(fixture, monkeypatch):
     name = new_database(fixture, "apply_")
+    original = storage.migration_files()
+    versions = [version for version, _, _ in original]
     with psycopg.connect(
         **(fixture[1]["migrator"] | {"dbname": name}), autocommit=True
     ) as conn:
-        assert storage.operate(
-            conn, "plan", name, uuid.UUID(fixture[0]["database_id"])
-        )["pending_versions"] == [1]
-        original = storage.migration_files()
+        assert (
+            storage.operate(conn, "plan", name, uuid.UUID(fixture[0]["database_id"]))[
+                "pending_versions"
+            ]
+            == versions
+        )
         broken = original[0][2] + "SELECT nonexistent FROM devops.ci_runs;"
         monkeypatch.setattr(
             storage,
@@ -631,9 +638,12 @@ def test_first_apply_failure_and_empty_target(fixture, monkeypatch):
             storage.operate(conn, "migrate", name, uuid.UUID(fixture[0]["database_id"]))
         assert conn.execute("SELECT to_regnamespace('devops')").fetchall()[0][0] is None
         monkeypatch.setattr(storage, "migration_files", lambda: original)
-        assert storage.operate(
-            conn, "migrate", name, uuid.UUID(fixture[0]["database_id"])
-        )["applied_versions"] == [1]
+        assert (
+            storage.operate(
+                conn, "migrate", name, uuid.UUID(fixture[0]["database_id"])
+            )["applied_versions"]
+            == versions
+        )
         assert (
             storage.operate(
                 conn, "migrate", name, uuid.UUID(fixture[0]["database_id"])
