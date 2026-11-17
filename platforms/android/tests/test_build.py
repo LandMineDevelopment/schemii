@@ -39,6 +39,86 @@ def elf(machine=183, alignment=16384, flags=5):
     return bytes(result)
 
 
+HISTORICAL_NATIVE = "906fc49667a4ac103d403e376c061fde110cf9c5"
+
+
+def synthetic_native_donor(root, commit):
+    """Immutable Git inputs plus synthetic ELF bytes; never runtime provenance.
+
+    The production guard reads the actual committed builder itself. No mocked
+    source lookup, recipe comparison, hash guard or ELF inspection is used.
+    """
+
+    def git_bytes(name):
+        return subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(build.ROOT),
+                "show",
+                commit + ":platforms/android/" + name,
+            ]
+        )
+
+    inputs = [
+        "build.py",
+        "native/runtime_probe.c",
+        "native/replace.h",
+        "native/proot-string-header.patch",
+    ]
+    if commit != HISTORICAL_NATIVE:
+        inputs += [
+            "native/proot-actor-channel.patch",
+            "native/host/actor_channel.c",
+            "native/host/actor_channel.h",
+            "native/host/actor-channel-v1.json",
+        ]
+    native = {
+        "adapter_dirty": False,
+        "compile_sdk": 36,
+        "target_sdk": 36,
+        "min_sdk": 29,
+        "toolchain_lock_sha256": hashlib.sha256(
+            git_bytes("toolchain.lock.json")
+        ).hexdigest(),
+        "source_commit": commit,
+        "abis": ["arm64-v8a"],
+        "native_files": {},
+        "adapter_sources": {
+            "platforms/android/" + name: hashlib.sha256(git_bytes(name)).hexdigest()
+            for name in inputs
+        },
+    }
+    files = {
+        "lib/arm64-v8a/" + name: elf()
+        for name in ["libproot.so", "libproot_loader.so", "libruntime_probe.so"]
+    }
+    apk, receipt = root / "donor.apk", root / "receipt.json"
+
+    def rebind():
+        native["native_files"] = {
+            k: hashlib.sha256(v).hexdigest() for k, v in files.items()
+        }
+        encoded = json.dumps(native).encode()
+        with zipfile.ZipFile(apk, "w") as z:
+            z.writestr("assets/runtime/native-provenance.json", encoded)
+            for k, v in files.items():
+                z.writestr(k, v)
+        receipt.write_text(
+            json.dumps(
+                {
+                    "apk": str(apk),
+                    "apk_sha256": build.digest(apk),
+                    "native_provenance_sha256": hashlib.sha256(encoded).hexdigest(),
+                    "native": native,
+                }
+            )
+        )
+
+    rebind()
+    return native, files, apk, receipt, rebind
+
+
 class BuildControls(unittest.TestCase):
     def test_native_reuse_recipe_binds_flags_and_abi_mapping(self):
         source = "ABI_TRIPLES = {'x': 'triple'}\ndef run(): pass\ndef digest(): pass\ndef native(cache, out, abi):\n return ['-fPIE']\n"
@@ -60,6 +140,14 @@ class BuildControls(unittest.TestCase):
                 source.replace("def run(): pass", "def run(): return 1")
             ),
         )
+
+        managed = (HERE / "build.py").read_text()
+        for before, after in [("--fuzz=0", "--fuzz=1"), ("return lock", "return {}")]:
+            self.assertIn(before, managed)
+            self.assertNotEqual(
+                build.native_recipe(managed),
+                build.native_recipe(managed.replace(before, after)),
+            )
 
     def test_native_reuse_requires_unambiguous_recipe(self):
         for source in [
@@ -90,65 +178,10 @@ class BuildControls(unittest.TestCase):
             patch.dict(sys.modules, {"verify_apk": verify}),
         ):
             root = Path(directory)
-            source = subprocess.check_output(
-                [
-                    "git",
-                    "-C",
-                    str(build.ROOT),
-                    "show",
-                    "906fc49667a4ac103d403e376c061fde110cf9c5:platforms/android/build.py",
-                ]
-            )
-            native = {
-                "adapter_dirty": False,
-                "compile_sdk": 36,
-                "target_sdk": 36,
-                "min_sdk": 29,
-                "toolchain_lock_sha256": build.digest(HERE / "toolchain.lock.json"),
-                "source_commit": "906fc49667a4ac103d403e376c061fde110cf9c5",
-                "abis": ["arm64-v8a"],
-                "native_files": {},
-                "adapter_sources": {
-                    "platforms/android/build.py": hashlib.sha256(source).hexdigest()
-                },
-            }
-            for name in [
-                "native/runtime_probe.c",
-                "native/replace.h",
-                "native/proot-string-header.patch",
-            ]:
-                native["adapter_sources"]["platforms/android/" + name] = build.digest(
-                    HERE / name
-                )
-            files = {
-                "lib/arm64-v8a/" + name: elf()
-                for name in ["libproot.so", "libproot_loader.so", "libruntime_probe.so"]
-            }
-            apk, receipt = root / "donor.apk", root / "receipt.json"
-
-            def rebind():
-                native["native_files"] = {
-                    k: hashlib.sha256(v).hexdigest() for k, v in files.items()
-                }
-                encoded = json.dumps(native).encode()
-                with zipfile.ZipFile(apk, "w") as z:
-                    z.writestr("assets/runtime/native-provenance.json", encoded)
-                    for k, v in files.items():
-                        z.writestr(k, v)
-                receipt.write_text(
-                    json.dumps(
-                        {
-                            "apk": str(apk),
-                            "apk_sha256": build.digest(apk),
-                            "native_provenance_sha256": hashlib.sha256(
-                                encoded
-                            ).hexdigest(),
-                            "native": native,
-                        }
-                    )
-                )
-
-            rebind()
+            commit = subprocess.check_output(
+                ["git", "-C", str(build.ROOT), "rev-parse", "HEAD"], text=True
+            ).strip()
+            native, files, apk, receipt, rebind = synthetic_native_donor(root, commit)
             anchor = build.digest(
                 receipt
             )  # Selected before the supplied donor changes.
@@ -170,6 +203,39 @@ class BuildControls(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "independently selected receipt"):
                 build.reuse_native(receipt, root / "rebound", ["arm64-v8a"], anchor)
             self.assertFalse((root / "rebound").exists())
+
+    def test_historical_unpatched_native_donor_is_refused(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(sys.modules, {"verify_apk": verify}),
+        ):
+            root = Path(directory)
+            _, _, _, receipt, _ = synthetic_native_donor(root, HISTORICAL_NATIVE)
+            with self.assertRaisesRegex(ValueError, "compiler recipe drift"):
+                build.reuse_native(
+                    receipt, root / "refused", ["arm64-v8a"], build.digest(receipt)
+                )
+            self.assertFalse((root / "refused").exists())
+
+    def test_managed_native_donor_protocol_input_drift_is_refused(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(sys.modules, {"verify_apk": verify}),
+        ):
+            root = Path(directory)
+            commit = subprocess.check_output(
+                ["git", "-C", str(build.ROOT), "rev-parse", "HEAD"], text=True
+            ).strip()
+            native, _, _, receipt, rebind = synthetic_native_donor(root, commit)
+            native["adapter_sources"][
+                "platforms/android/native/host/actor-channel-v1.json"
+            ] = "0" * 64
+            rebind()
+            with self.assertRaisesRegex(ValueError, "source input drift"):
+                build.reuse_native(
+                    receipt, root / "refused", ["arm64-v8a"], build.digest(receipt)
+                )
+            self.assertFalse((root / "refused").exists())
 
     def test_sdk_unix_link_preserved(self):
         with tempfile.TemporaryDirectory() as temp:

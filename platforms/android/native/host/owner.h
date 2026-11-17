@@ -3,7 +3,8 @@
 #include <stdint.h>
 /* Source-only connected owner. No API imports C/A, freshness or closure claims.
  * Directory is borrowed for the call; an independent CLOEXEC description is
- * retained. No child inherits control/journal FDs. No managed birth is currently
+ * retained. Private actor endpoints are reserved before the worker starts;
+ * no endpoint is exported and no child launch API exists. No managed birth is currently
  * admitted by the production comparator or pinned PRoot helper inventory. */
 struct apk_owner;
 enum apk_owner_phase { APK_IDLE, APK_PENDING, APK_REFUSED, APK_CLOSING };
@@ -15,6 +16,14 @@ struct apk_owner_status {
     int32_t journal_status, journal_effect, boot_relation, boot_reason;
     int32_t births, closure_known;
 };
+struct apk_owner_errors {
+    int error, close_error, secondary_close_error, close_failures;
+};
+/* Private source diagnostics only; no trust or admission input. */
+int apk_owner_open_diagnostic(int borrowed_dirfd, struct apk_owner **out,
+                              struct apk_owner_errors *errors);
+int apk_owner_close_diagnostic(struct apk_owner **owner,
+                               struct apk_owner_errors *errors);
 int apk_owner_open(int borrowed_dirfd, struct apk_owner **out);
 /* Private bounded AF_UNIX channel; exact op1 Start, op2 Stop. Status never waits
  * on a writer syscall. Pending work retains the sole lease; no replacement. */

@@ -1,0 +1,162 @@
+{
+  "schema": 1,
+  "name": "schemii-private-actor-v1",
+  "transport": "AF_UNIX SOCK_SEQPACKET socketpair; native in-memory attachment only",
+  "frame_bytes": 224,
+  "maximum_bytes": 4096,
+  "byte_order": "big-endian",
+  "profile": 1,
+  "fields": {
+    "magic": [
+      0,
+      4
+    ],
+    "version": [
+      4,
+      2
+    ],
+    "length": [
+      6,
+      2
+    ],
+    "operation": [
+      8,
+      4
+    ],
+    "source_sha256": [
+      16,
+      32
+    ],
+    "contract_sha256": [
+      48,
+      32
+    ],
+    "run": [
+      80,
+      16
+    ],
+    "generation": [
+      96,
+      8
+    ],
+    "owner_creator_incarnation": [
+      104,
+      8
+    ],
+    "profile": [
+      112,
+      4
+    ],
+    "sequence": [
+      120,
+      8
+    ],
+    "intent_sequence": [
+      128,
+      8
+    ],
+    "task_incarnation": [
+      136,
+      8
+    ],
+    "process_incarnation": [
+      144,
+      8
+    ],
+    "creator_incarnation": [
+      152,
+      8
+    ],
+    "monotonic_ns": [
+      160,
+      8
+    ],
+    "kind": [
+      168,
+      4
+    ],
+    "pid_observation": [
+      172,
+      4
+    ],
+    "related_pid_or_wait_kind": [
+      176,
+      4
+    ],
+    "signed_result": [
+      180,
+      4
+    ],
+    "errno": [
+      184,
+      4
+    ],
+    "secondary_errno": [
+      188,
+      4
+    ]
+  },
+  "reserved_zero": [
+    [
+      12,
+      4
+    ],
+    [
+      116,
+      4
+    ],
+    [
+      192,
+      32
+    ]
+  ],
+  "operations": {
+    "intent": 1,
+    "result": 2,
+    "task": 3,
+    "ptrace_observation": 4,
+    "direct_wait": 5,
+    "exec_remap": 6,
+    "resume": 7,
+    "receipt_ack": 8,
+    "reserved_highwater": 9
+  },
+  "kinds": {
+    "root": 1,
+    "guest": 2,
+    "sysvipc_direct_helper": 3,
+    "f2fs_direct_helper": 4,
+    "raw": 5
+  },
+  "sequence": "Each direction starts at 1, exact next uint64, no wrap, duplicate or gap; ACK intent_sequence is strictly increasing observed opposite-direction sequence, never durability or terminal evidence",
+  "pressure": "Nonblocking send/receive; 128 finite task slots; full send/slot/wrap/malformed/ancillary/peer loss latches UNKNOWN, no retry/reconnect or eviction of unresolved slots",
+  "highwater": "Local observation only: all sent frames receipt-ACKed, no loss/gap/live task/helper/pending intent/wait. Reserved wire highwater refused; no CLEAN/network or restart grant",
+  "clone_policy": {
+    "clone_untraced": "EPERM before kernel resume",
+    "clone3_all_forms": "ENOSYS before reading mutable args; legacy libc fallback permitted"
+  },
+  "fd_allowlists": {
+    "owner": "selected directory lease, journal/private state when implemented, Java control, both unexported actor endpoints",
+    "proot": "0,1,2 and designated actor endpoint plus explicit mount inputs only, future native custody transfer required",
+    "root_before_traceme": [
+      0,
+      1,
+      2
+    ],
+    "sysvipc_before_dup": "0,1,2 and two service pipe ends only",
+    "sysvipc_service_noexec": [
+      0,
+      1,
+      2
+    ],
+    "f2fs_noexec": [
+      0,
+      1,
+      2
+    ],
+    "future_python": "0,1,2 plus designated guest lease only; no actor, journal, predecessor or owner controls; subprocesses close guest lease"
+  },
+  "authority": "NONE: source producer only, APK C/A and all production births unconditionally refused",
+  "conversion": "Java uses JNI scalar methods; the native internal pair carries four native-endian uint32 fields. Python FD3 uses 16-byte big-endian SCH1 frames (!4sIII); actor frames use 224-byte big-endian SCA1. These protocols are disconnected and production launch remains REFUSED. Future native custody requires an explicit versioned guest-lease conversion after genuine C/A and durable journal admission; no current handshake",
+  "guest_reservation": "Accepted guest INTENT reserves one free slot and the next unique incarnation before kernel resume. Both channel ends derive it in exact INTENT sequence order; TASK attaches by that intent even when attachments arrive out of order. Only an observed negative birth result releases its reservation; lost or unresolved intents retain it. Native allocations and all guest creators share the same finite slots and counter; no wrap or unresolved reuse."
+}

@@ -52,7 +52,15 @@
     "descendant_identity": "UNKNOWN; pinned PRoot birth/export race and native helpers not closed",
     "shutdown": "bounded graceful stop; no forced PostgreSQL cleanup",
     "ready": false,
-    "native_owner": "FGS + private native AF_UNIX lease; R-only observation; C/A UNKNOWN; no birth or journal grant"
+    "native_owner": "FGS + private native AF_UNIX lease; R-only observation; C/A UNKNOWN; no birth or journal grant",
+    "actor_producer": {
+      "profile": "source-only-managed-actors-refused",
+      "contract": "platforms/android/native/host/actor-channel-v1.json",
+      "proot_commit": "52d65a4dc140ca554d241a1438ddd4f6b00c9813",
+      "admission": "REFUSED",
+      "guest_wait_closure": "pending actual real-parent guest wait producer; ptrace terminal alone retains wait uncertainty",
+      "native_attachment": "source-only in-memory, no CLI/env/Java/FD-number or Python handshake"
+    }
   },
   "runtime_acceptance": "pending"
 }

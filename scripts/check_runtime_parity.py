@@ -89,6 +89,46 @@ def source_module(root: Path, name: str):
     return module
 
 
+def check_actor_producer(root: Path) -> None:
+    """Source identity only. Never converts source agreement into authority."""
+    android = root / "platforms/android"
+    lock = json.loads((android / "runtime/payload.lock.json").read_text())[
+        "actor_producer"
+    ]
+    require(
+        lock["profile"] == "source-only-managed-actors-refused", "actor profile drift"
+    )
+    toolchain = json.loads((android / "toolchain.lock.json").read_text())
+    require(
+        lock["proot_commit"] == toolchain["sources"]["proot"]["commit"],
+        "actor PRoot pin drift",
+    )
+    expected = {
+        "platforms/android/native/host/actor_channel.c",
+        "platforms/android/native/host/actor_channel.h",
+        "platforms/android/native/host/actor-channel-v1.json",
+        "platforms/android/native/proot-actor-channel.patch",
+    }
+    require(set(lock["inputs"]) == expected, "actor producer inventory drift")
+    for name, digest in lock["inputs"].items():
+        require(
+            hashlib.sha256((root / name).read_bytes()).hexdigest() == digest,
+            "actor source drift: " + name,
+        )
+    interface = json.loads((android / "runtime-interface.json").read_text())
+    require(
+        interface["control"]["actor_producer"]["admission"] == "REFUSED",
+        "actor admission drift",
+    )
+    wire = json.loads((android / "native/host/actor-channel-v1.json").read_text())
+    require(
+        wire["frame_bytes"] == 224
+        and wire["maximum_bytes"] <= 4096
+        and wire["byte_order"] == "big-endian",
+        "actor wire drift",
+    )
+
+
 def check(root: Path = ROOT) -> dict:
     contract = json.loads((root / "dev/runtime-contract.json").read_text())
     require(contract["schema"] == 1, "unsupported runtime contract")
@@ -867,6 +907,7 @@ def main() -> int:
         )
     previous = os.umask(0o077)
     try:
+        check_actor_producer(args.root)
         result = check(args.root)
         if args.apk_source_manifest:
             result["apk_sources"] = check_apk_sources(
