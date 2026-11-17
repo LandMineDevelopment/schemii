@@ -923,8 +923,11 @@ remain part of actual ELF readback, not an inferred Android observation. No Go
 runtime or other application-controlled loader is included.
 
 Build order is acyclic: exact source/contract/profile/public signer -> binary
-manifest and exact Java/DEX -> native expectation header -> owner ELF -> stored
-APK. Native pins cover every ordinary member except its own owner member. The
+manifest, compiled resource table and exact Java/DEX -> native expectation
+header -> owner ELF -> stored APK. The exact ordinary-content set includes
+AndroidManifest.xml, resources.arsc, classes.dex and assets/closed-build.json;
+every byte of the compiled resource table is pinned alongside the other content.
+Native pins cover every ordinary member except its own owner member. The
 owner member must instead equal the held extracted module byte-for-byte; this
 **does not independently seal the owner or whole signed product**. Native checks
 local/central ZIP agreement, stored members, exact ordered inventory, content

@@ -403,6 +403,13 @@ class BootOnlyControls(unittest.TestCase):
 
 
 class ClosedHostControls(unittest.TestCase):
+    # Captured empty resources.arsc emitted by the pinned aapt2 for this
+    # resource-free closed manifest. Recipe tools remain explicit edge doubles.
+    RESOURCE_TABLE = bytes.fromhex(
+        "02000c00280000000000000001001c001c000000"
+        "0000000000000000000100001c00000000000000"
+    )
+
     def test_closed_exact_sources_and_manifest(self):
         import xml.etree.ElementTree as ET
 
@@ -436,14 +443,46 @@ class ClosedHostControls(unittest.TestCase):
             out = Path(directory)
             entries = {
                 "AndroidManifest.xml": b"binary manifest",
+                "resources.arsc": self.RESOURCE_TABLE,
                 "classes.dex": b"compiled dex",
                 "assets/closed-build.json": b"bindings",
             }
             target = build.closed_pins(out, entries, "a" * 64, {"commit": "b" * 40})
             text = target.read_text()
-            self.assertIn(hashlib.sha256(entries["classes.dex"]).hexdigest(), text)
+            for content in entries.values():
+                self.assertIn(hashlib.sha256(content).hexdigest(), text)
             self.assertIn('{"lib/arm64-v8a/libschemii_owner.so",NULL}', text)
             self.assertNotIn("HostAnchors", text)
+
+    def test_closed_pins_require_resources_and_refuse_unknown_members(self):
+        # Explicit compiler-edge bytes: full actual aapt/DEX proof is separate.
+        entries = {
+            "AndroidManifest.xml": b"binary manifest",
+            "resources.arsc": self.RESOURCE_TABLE,
+            "classes.dex": b"compiled dex",
+            "assets/closed-build.json": b"bindings",
+        }
+        cases = {
+            "missing-resource-table": {
+                k: v for k, v in entries.items() if k != "resources.arsc"
+            },
+            **{
+                "extra-" + name: {**entries, name: b"unselected"}
+                for name in (
+                    "classes2.dex",
+                    "res/unselected.bin",
+                    "lib/arm64-v8a/libschemii_owner.so",
+                )
+            },
+        }
+        for case, content in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                out = Path(directory)
+                with self.assertRaisesRegex(
+                    ValueError, "Closed content inventory refused"
+                ):
+                    build.closed_pins(out, content, "a" * 64, {"commit": "b" * 40})
+                self.assertFalse((out / "closed_pins.h").exists())
 
     def test_closed_refuses_extensions_before_tools(self):
         base = dict(
@@ -508,6 +547,7 @@ class ClosedHostControls(unittest.TestCase):
                 if tool == "aapt2":
                     with zipfile.ZipFile(argv[argv.index("-o") + 1], "w") as apk:
                         apk.writestr("AndroidManifest.xml", b"fixture manifest")
+                        apk.writestr("resources.arsc", self.RESOURCE_TABLE)
                 elif tool == "javac":
                     (Path(argv[argv.index("-d") + 1]) / "Fixture.class").write_bytes(
                         b"fixture class"
@@ -562,6 +602,7 @@ class ClosedHostControls(unittest.TestCase):
                     apk.namelist(),
                     [
                         "AndroidManifest.xml",
+                        "resources.arsc",
                         "classes.dex",
                         "assets/closed-build.json",
                         "lib/arm64-v8a/libschemii_owner.so",
