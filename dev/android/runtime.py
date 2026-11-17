@@ -1747,7 +1747,7 @@ class Runtime:
             "physical_device_acceptance": "pending",
             "security_profile": "trusted-owner",
             "native_tailnet_verified": bool(self._native_tailnet_identity())
-            if self.tailnet_config()
+            if self.profile == "termux" and self.tailnet_config()
             else False,
             "pending": [
                 "authenticated API family acceptance",

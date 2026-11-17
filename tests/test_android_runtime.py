@@ -1937,6 +1937,43 @@ def test_apk_never_falls_back_to_termux_process_or_recovery_policy(
     assert not instance.state.exists()
 
 
+@pytest.mark.parametrize(
+    "profile,configured,native_present,expected_verified",
+    [
+        ("apk", True, True, False),
+        ("apk", False, True, False),
+        ("termux", True, True, True),
+        ("termux", True, False, False),
+        ("termux", False, True, False),
+    ],
+)
+def test_doctor_keeps_native_identity_verification_within_termux_profile(
+    tmp_path, monkeypatch, profile, configured, native_present, expected_verified
+):
+    instance = android.Runtime(tmp_path / "state", profile=profile)
+    monkeypatch.setattr(
+        instance, "tailnet_config", lambda: {"synthetic": True} if configured else {}
+    )
+    legacy_calls = []
+
+    def legacy_identity():
+        assert profile == "termux", "APK doctor must not use the legacy resolver"
+        legacy_calls.append(True)
+        return {"pid": 123} if native_present else None
+
+    monkeypatch.setattr(instance, "_native_tailnet_identity", legacy_identity)
+    monkeypatch.setattr(
+        android, "process_identity", lambda *a, **k: pytest.fail("proc inference")
+    )
+    result = instance.doctor()
+    assert result["native_tailnet_verified"] is expected_verified
+    assert len(legacy_calls) == int(profile == "termux" and configured)
+    if profile == "apk":
+        assert result["status"]["ownership"] == "UNKNOWN"
+        assert result["status"]["ready"] is False
+    assert not instance.state.exists()
+
+
 def test_endpoint_conflict_preserves_uninitialized_state(tmp_path):
     import socket
 
