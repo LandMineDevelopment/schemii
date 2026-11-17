@@ -639,11 +639,14 @@ def connected_native(cache, out, abis):
                     "owner.c",
                     "actor_channel.c",
                     "owner_jni.c",
+                    "native_bootstrap.c",
+                    "installed_provenance.c",
                     "boot_compare.c",
                     "boot_authority.c",
                     "boot_identity.c",
                 )
             ],
+            "-ldl",
             "-o",
             target,
         )
@@ -799,7 +802,246 @@ def packaged_readback(extracted, provenance, shared_record):
     return result
 
 
+CLOSED_JAVA = tuple(
+    "app/src/main/java/development/landmine/schemii/android/host/" + name + ".java"
+    for name in (
+        "HostActivity",
+        "HostService",
+        "StorageProfile",
+        "InstalledSource",
+        "NativeOwner",
+    )
+)
+CLOSED_NATIVE = tuple(
+    "native/host/" + name + ".c"
+    for name in (
+        "owner",
+        "owner_jni",
+        "native_bootstrap",
+        "installed_provenance",
+        "boot_authority",
+        "boot_compare",
+        "boot_identity",
+    )
+)
+CLOSED_PACKAGE = "development.landmine.schemii.connectedhost"
+
+
+def closed_admission(args):
+    if not getattr(args, "closed_connected_host", False):
+        return None
+    if (
+        not args.non_debuggable
+        or args.abi != ["arm64-v8a"]
+        or not re.fullmatch(r"[a-f0-9]{64}", args.connected_host_signer_sha256 or "")
+        or not re.fullmatch(r"[a-f0-9]{40}", args.expected_adapter_commit or "")
+        or args.packaged_shared_runtime
+        or args.guest_payload
+        or args.guest_manifest_sha256
+        or args.native_donor
+        or args.native_donor_receipt_sha256
+        or args.network_handoff
+        or args.network_checkout
+        or args.process_head
+        or args.process_checkout
+        or args.subreaper_handoff
+        or args.subreaper_checkout
+        or args.integration_probes
+        or args.boot_identity_only
+        or args.wrapper_controls_only
+        or args.log_report
+    ):
+        raise ValueError(
+            "Closed host requires exact committed ARM64 nondebug source and public signer; no diagnostic/peer/payload extensions"
+        )
+    return committed_adapter_sources(args.expected_adapter_commit)
+
+
+def closed_manifest():
+    # Explicit selected input, independent of the diagnostic manifest. No
+    # transform/fallback can inherit diagnostic components or source extensions.
+    return """<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="development.landmine.schemii.connectedhost">
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="36" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <application android:label="Schemii host prerequisites" android:debuggable="false"
+        android:allowBackup="false" android:fullBackupContent="false"
+        android:restoreAnyVersion="false" android:hasCode="true"
+        android:usesCleartextTraffic="false" android:extractNativeLibs="true" android:supportsRtl="true">
+        <service android:name="development.landmine.schemii.android.host.HostService"
+            android:exported="false" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started private experimental Schemii server host" />
+        </service>
+        <activity android:name="development.landmine.schemii.android.host.HostActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+"""
+
+
+def closed_pins(out, entries, signer, bindings):
+    """DEX/manifest/content first, native pins second, self member last.
+
+    Signing is external and subsequent. Never pin the final APK to itself.
+    The self member is compared byte-for-byte with the held loaded module.
+    """
+    if set(entries) != {
+        "AndroidManifest.xml",
+        "classes.dex",
+        "assets/closed-build.json",
+    } or not re.fullmatch(r"[a-f0-9]{64}", signer):
+        raise ValueError("Closed content inventory refused")
+    target = out / "closed_pins.h"
+    source = '#include "installed_provenance.h"\n'
+    source += "static const char closed_package[]=" + json.dumps(CLOSED_PACKAGE) + ";\n"
+    source += "static const char closed_signer[]=" + json.dumps(signer) + ";\n"
+    source += "static const struct installed_pin closed_pins[]={\n"
+    for name, data in entries.items():
+        source += (
+            "{"
+            + json.dumps(name)
+            + ","
+            + json.dumps(hashlib.sha256(data).hexdigest())
+            + "},\n"
+        )
+    source += '{"lib/arm64-v8a/libschemii_owner.so",NULL}\n};\n'
+    target.write_text(source)
+    (out / "build-bindings.json").write_text(json.dumps(bindings, indent=2) + "\n")
+    return target
+
+
+def closed_build(args, cache, bindings):
+    # A separate finite source product, sharing the production host adapter.
+    # No Go/PRoot/shared runtime campaign, signing key, install or device access.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", args.build_id):
+        raise ValueError("Build ID refused")
+    out = cache / "builds" / args.build_id
+    out.mkdir(parents=True)
+    sdk = cache / "sdk"
+    for item in LOCK["archives"][:3]:
+        if item["package"] == "emulator":
+            continue
+        archive = cache / "downloads" / item["url"].rsplit("/", 1)[-1]
+        if digest(archive) != item["sha256"]:
+            raise ValueError("Closed SDK archive drift")
+        verify_extracted_archive(archive, sdk)
+    bt = sdk / "android-16"
+    android = sdk / "android-36/android.jar"
+    manifest = out / "AndroidManifest.xml"
+    manifest.write_text(closed_manifest())
+    resource = out / "resources.apk"
+    run(bt / "aapt2", "link", "-o", resource, "-I", android, "--manifest", manifest)
+    classes = out / "classes"
+    classes.mkdir()
+    run(
+        "javac",
+        "-source",
+        "8",
+        "-target",
+        "8",
+        "-bootclasspath",
+        str(android) + os.pathsep + str(bt / "core-lambda-stubs.jar"),
+        "-classpath",
+        classes,
+        "-sourcepath",
+        classes,
+        "-implicit:none",
+        "-d",
+        classes,
+        *[HERE / p for p in CLOSED_JAVA],
+    )
+    dex = out / "dex"
+    dex.mkdir()
+    run(
+        bt / "d8",
+        "--min-api",
+        "29",
+        "--lib",
+        android,
+        "--output",
+        dex,
+        *sorted(classes.rglob("*.class")),
+    )
+    with zipfile.ZipFile(resource) as apk:
+        entries = {name: apk.read(name) for name in apk.namelist()}
+    entries["classes.dex"] = (dex / "classes.dex").read_bytes()
+    binding = {
+        "schema": 1,
+        "profile": "closed-connected-host-v1",
+        "commit": args.expected_adapter_commit,
+        "adapter_sources": bindings,
+        "contract_sha256": digest(HERE / "runtime-interface.json"),
+        "java": list(CLOSED_JAVA),
+        "native": list(CLOSED_NATIVE),
+        "signer": args.connected_host_signer_sha256,
+        "C": "UNPROVED",
+        "A": "UNPROVED",
+        "births": "REFUSED",
+    }
+    entries["assets/closed-build.json"] = (
+        json.dumps(binding, sort_keys=True) + "\n"
+    ).encode()
+    closed_pins(out, entries, args.connected_host_signer_sha256, binding)
+    target = out / "libschemii_owner.so"
+    tc = sdk / "android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    run(
+        tc / "aarch64-linux-android29-clang",
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-fPIC",
+        "-shared",
+        "-pthread",
+        "-DSCHEMII_CLOSED_PINS",
+        "-I",
+        out,
+        "-I",
+        HERE / "native/host",
+        "-Wl,-z,defs",
+        "-Wl,-z,noexecstack",
+        "-Wl,-z,max-page-size=16384",
+        *[HERE / p for p in CLOSED_NATIVE],
+        "-ldl",
+        "-o",
+        target,
+    )
+    entries["lib/arm64-v8a/libschemii_owner.so"] = target.read_bytes()
+    # Fixed ZIP_STORED order/dialect is consumed by native, not ZipFile reopen.
+    unsigned = out / "unsigned.apk"
+    with zipfile.ZipFile(unsigned, "w", compression=zipfile.ZIP_STORED) as apk:
+        for name, data in entries.items():
+            apk.writestr(name, data)
+    if bindings != committed_adapter_sources(args.expected_adapter_commit):
+        raise ValueError("Closed source changed during build")
+    (out / "receipt.json").write_text(
+        json.dumps(
+            {
+                **binding,
+                "unsigned_sha256": digest(unsigned),
+                "module_sha256": digest(target),
+                "pins_sha256": digest(out / "closed_pins.h"),
+                "state": "UNSIGNED_NOT_INSTALLED; no C/A/runtime acceptance",
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return out
+
+
 def build(args, cache):
+    closed = closed_admission(args)
+    if closed is not None:
+        return closed_build(args, cache, closed)
     if bool(args.native_donor) != bool(args.native_donor_receipt_sha256):
         raise ValueError(
             "Native donor and independent receipt SHA256 must be supplied together"
@@ -1341,6 +1583,7 @@ def main():
     )
     b = sub.add_parser("build")
     b.add_argument("--build-id", required=True)
+    b.add_argument("--closed-connected-host", action="store_true")
     b.add_argument(
         "--connected-host-signer-sha256",
         help="Public certificate pin; absent keeps installed host closed",
@@ -1392,7 +1635,8 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     if args.action == "build":
-        packaged_admission(args)
+        if closed_admission(args) is None:
+            packaged_admission(args)
     cache = args.cache.resolve()
     cache.mkdir(parents=True, exist_ok=True)
     (cache / "downloads").mkdir(exist_ok=True)

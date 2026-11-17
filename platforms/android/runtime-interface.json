@@ -62,5 +62,23 @@
       "native_attachment": "source-only in-memory, no CLI/env/Java/FD-number or Python handshake"
     }
   },
-  "runtime_acceptance": "pending"
+  "runtime_acceptance": "pending",
+  "closed_connected_host": {
+    "profile": "closed-connected-host-v1",
+    "application_id": "development.landmine.schemii.connectedhost",
+    "entry": "HostActivity + nonexported HostService; default framework Application/factory; no providers/receivers/instrumentation",
+    "java": "five fixed host classes only; no HostAnchors, diagnostics, peer Java or dynamic loaders",
+    "native": "seven fixed owner/JNI/bootstrap/installed/authority/comparator/reader units; platform libc/libdl; accepted owner retained dormant; no actor/Go/PRoot",
+    "build_order": [
+      "exact committed adapter + public signer",
+      "API36 Java/DEX and binary manifest",
+      "native content pins",
+      "owner module",
+      "stored-only unsigned APK",
+      "separate reviewed signing/install/process proof"
+    ],
+    "admission": "R unchanged; C/A UNPROVED; journal/births REFUSED",
+    "composition": "InstalledSource.compose pathname API unreachable from selected entry; no source/state creation",
+    "history": "held current objects do not establish historical A"
+  }
 }

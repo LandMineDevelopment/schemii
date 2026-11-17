@@ -15,6 +15,62 @@ public final class InstalledSource {
     private static final long MAX_FILE = 16L * 1024 * 1024;
     private static final long MAX_TOTAL = 128L * 1024 * 1024;
 
+    /** Fixed reviewed framework edge. Observations only; native pins decide. */
+    static final class Framework {
+        final String packageName, signer, apk, data, module;
+        Framework(String p, String s, String a, String d, String m) {
+            packageName=p; signer=s; apk=a; data=d; module=m;
+        }
+    }
+    static Framework framework(android.content.Context app) throws Exception {
+        if (app == null || app.getApplicationContext() != app
+            || !app.getClass().getName().equals("android.app.Application"))
+            throw new IOException("Framework application refused");
+        StorageProfile.select(app, false);
+        ClassLoader loader = app.getClassLoader();
+        if (loader == null || !loader.getClass().getName().equals("dalvik.system.PathClassLoader")
+            || loader.getParent() == null || !loader.getParent().getClass().getName().equals("java.lang.BootClassLoader")
+            || HostActivity.class.getClassLoader() != loader || HostService.class.getClassLoader() != loader || NativeOwner.class.getClassLoader() != loader
+            || InstalledSource.class.getClassLoader() != loader || StorageProfile.class.getClassLoader() != loader)
+            throw new IOException("Loader refused");
+        String name = app.getPackageName();
+        android.content.pm.PackageManager pm = app.getPackageManager();
+        android.content.pm.PackageInfo p = pm.getPackageInfo(name,
+            android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+            | android.content.pm.PackageManager.GET_ACTIVITIES | android.content.pm.PackageManager.GET_SERVICES
+            | android.content.pm.PackageManager.GET_PROVIDERS | android.content.pm.PackageManager.GET_RECEIVERS
+            | android.content.pm.PackageManager.GET_INSTRUMENTATION | android.content.pm.PackageManager.GET_SHARED_LIBRARY_FILES);
+        android.content.pm.ApplicationInfo a = p.applicationInfo;
+        if (a == null || !name.equals(p.packageName) || !name.equals(a.packageName)
+            || a.targetSdkVersion != 36 || a.uid != android.os.Process.myUid()
+            || (a.flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+            || a.className != null || a.appComponentFactory != null || !name.equals(a.processName)
+            || (a.splitSourceDirs != null && a.splitSourceDirs.length != 0)
+            || (a.splitPublicSourceDirs != null && a.splitPublicSourceDirs.length != 0)
+            || (a.sharedLibraryFiles != null && a.sharedLibraryFiles.length != 0)
+            || (p.splitNames != null && p.splitNames.length != 0)
+            || (p.providers != null && p.providers.length != 0)
+            || (p.receivers != null && p.receivers.length != 0)
+            || (p.instrumentation != null && p.instrumentation.length != 0)
+            || p.activities == null || p.activities.length != 1
+            || !p.activities[0].name.equals(HostActivity.class.getName())
+            || !p.activities[0].exported || !name.equals(p.activities[0].processName)
+            || p.services == null || p.services.length != 1
+            || !p.services[0].name.equals(HostService.class.getName())
+            || p.services[0].exported || !name.equals(p.services[0].processName)
+            || p.signingInfo == null || p.signingInfo.hasMultipleSigners())
+            throw new IOException("Closed package refused");
+        android.content.pm.Signature[] signers = p.signingInfo.getApkContentsSigners();
+        if (signers == null || signers.length != 1) throw new IOException("Current signer refused");
+        android.content.pm.ApplicationInfo current = app.getApplicationInfo();
+        if (a.sourceDir == null || !a.sourceDir.equals(a.publicSourceDir)
+            || !a.sourceDir.equals(current.sourceDir) || a.nativeLibraryDir == null
+            || !a.nativeLibraryDir.equals(current.nativeLibraryDir) || a.dataDir == null
+            || !a.dataDir.equals(app.getDataDir().getAbsolutePath())) throw new IOException("Package objects refused");
+        return new Framework(name,hex(MessageDigest.getInstance("SHA-256").digest(signers[0].toByteArray())),
+            a.sourceDir,a.dataDir,a.nativeLibraryDir + "/libschemii_owner.so");
+    }
+
     static String safe(String name) throws IOException {
         if (name.length() == 0 || name.length() > 1024 || !name.matches("[A-Za-z0-9_.@/+\\-]+")
             || name.startsWith("/") || name.endsWith("/") || name.contains("//"))

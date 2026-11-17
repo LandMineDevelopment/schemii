@@ -2,10 +2,8 @@ package development.landmine.schemii.android.host;
 
 import android.app.*;
 import android.content.*;
-import android.content.pm.*;
 import android.os.*;
 import java.io.*;
-import java.security.MessageDigest;
 import java.util.concurrent.*;
 
 /** Android lifecycle adapter only. C/A are unproved; every birth is refused. */
@@ -30,7 +28,8 @@ public final class HostService extends Service {
     private static final class Operation {
         final HostService service;
         final Context application;
-        boolean cancelled, failed;
+        boolean cancelled, failed, nativeEntered, unresolved;
+        int firstError, cleanupError;
         Acquisition acquisition;
         String refusal = "Launch refused — private storage unavailable. Data preserved.";
         Operation(HostService service) {
@@ -81,52 +80,56 @@ public final class HostService extends Service {
     }
     public static volatile String statusText = "Launch unavailable — native admission unproved; data preserved";
     public static String status() { return statusText; }
-    private static Object anchor(String field) throws Exception {
-        return Class.forName("development.landmine.schemii.android.host.HostAnchors").getField(field).get(null);
-    }
-    public static boolean available() {
-        try { anchor("COMMIT"); return true; } catch (Exception e) { return false; }
-    }
+    public static boolean available() { return true; }
     private void prepare(Operation operation) throws Exception {
         synchronized (lifecycle) { if (!live(operation)) return; }
         StorageProfile.select(operation.application, false);
         synchronized (lifecycle) {
             if (!live(operation)) return;
             operation.acquisition = new Acquisition(operation.application);
-            operation.refusal = "Launch refused — installed source or signer unavailable. Data preserved.";
+            operation.nativeEntered = true;
+            operation.unresolved = true;
+            operation.refusal = "Launch refused — native acquisition or custody unavailable. Data preserved.";
         }
-        // Retain the existing preliminary signer/profile refusal checks. These
-        // Java observations grant no C/A and are not exported to native.
-        Context app = operation.application;
-        String expected = (String)anchor("SIGNER");
-        if (!expected.matches("[a-f0-9]{64}")) throw new IOException("Independent signer pin required");
-        if ((app.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0 || app.getApplicationInfo().targetSdkVersion != 36
-            || !app.getPackageName().equals(anchor("PACKAGE"))) throw new IOException("Installed package refused");
-        PackageInfo info = app.getPackageManager().getPackageInfo(app.getPackageName(),PackageManager.GET_SIGNING_CERTIFICATES);
-        if (info.signingInfo == null || info.signingInfo.hasMultipleSigners()) throw new IOException("Installed signer refused");
-        Signature[] signers = info.signingInfo.getApkContentsSigners();
-        if (signers.length != 1 || !InstalledSource.hex(MessageDigest.getInstance("SHA-256").digest(signers[0].toByteArray())).equals(expected)) throw new IOException("Installed signer changed");
+        int result = NativeOwner.open();
         synchronized (lifecycle) {
-            if (!live(operation)) return;
-            operation.refusal = "Launch refused — native acquisition disabled; caller and custody unproved. Data preserved.";
+            operation.firstError = result;
+            operation.failed = result != 0;
+            operation.refusal = result == 0
+                ? "Launch refused — current caller and historical admission unproved. Data preserved."
+                : "Launch refused — native acquisition failed (" + result + "). Data preserved.";
         }
-        // Deliberately no NativeOwner.open(int)/request, Diagnostics, compose,
-        // directory creation or lineage initialization. The no-argument native
-        // consumer, held APK/module/root checks and admission are serialized
-        // dependencies. Do not bridge them with a borrowed FD or Java claim.
     }
     private void finish(Operation operation) {
+        // Sole reserving worker owns native cleanup. No lifecycle monitor across
+        // JNI or I/O. A failed/EBUSY close never releases the Java reservation.
+        if (operation.nativeEntered) {
+            try {
+                int cleanup = NativeOwner.close();
+                long[] state = NativeOwner.status();
+                synchronized (lifecycle) {
+                    // close can return a retained operational error after safe disposal.
+                    // The scalar report distinguishes it from actual cleanup failure.
+                    operation.cleanupError = state != null && state.length == 16 ? (int)state[2] : cleanup;
+                    operation.unresolved = state == null || state.length != 16 || state[4] != 0 || state[5] != 0;
+                    if (state != null && state.length == 16 && operation.firstError == 0) operation.firstError = (int)state[0];
+                }
+            } catch (Exception | LinkageError error) {
+                synchronized (lifecycle) { operation.unresolved = true; }
+            }
+        }
         synchronized (lifecycle) {
             if (outstanding != operation) return;
-            // Only Java references were acquired. No native close/cleanup can
-            // be inferred or attempted. Native integration must retain first
-            // and cleanup errors separately and retain unresolved resources.
-            operation.acquisition = null;
-            outstanding = null;
             boolean cancelled = operation.cancelled || operation.service.destroyed || operation.service.replaced;
-            statusText = operation.failed ? operation.refusal + (cancelled ? " Cancellation also observed." : "")
-                : cancelled ? "Preparation cancelled — no native acquisition; ownership/recovery unproved. Data preserved."
-                : operation.refusal;
+            statusText = operation.refusal
+                + (operation.firstError != 0 ? " First error " + operation.firstError + "." : "")
+                + (operation.cleanupError != 0 ? " Cleanup error " + operation.cleanupError + "." : "")
+                + (cancelled ? " Cancellation observed." : "")
+                + (operation.unresolved ? " Cleanup unresolved; reservation retained." : "");
+            if (!operation.unresolved) {
+                operation.acquisition = null;
+                outstanding = null;
+            }
         }
     }
     @Override public int onStartCommand(Intent intent,int flags,int id) {
@@ -142,7 +145,7 @@ public final class HostService extends Service {
                 if (!created || destroyed || replaced || active != this) return START_NOT_STICKY;
                 if (outstanding != null && outstanding.service == this) outstanding.cancelled = true;
                 statusText = outstanding == null
-                    ? "Stop observed — no native acquisition; ownership/recovery unproved"
+                    ? "Stop observed — ownership/recovery unproved"
                     : "Stop observed — preparation pending; reservation retained";
                 return START_NOT_STICKY;
             }
@@ -153,7 +156,7 @@ public final class HostService extends Service {
             }
             operation = new Operation(this);
             outstanding = operation;
-            statusText = "Checking CE storage and installed profile — native acquisition disabled";
+            statusText = "Checking CE storage and installed profile — native acquisition pending";
         }
         try {
             work.execute(() -> {

@@ -1,13 +1,16 @@
 """Finite production-Java ordering controls; not Android or native provenance.
 
-Only Android/framework, generated anchors and native owner are source doubles.
-HostService, StorageProfile and InstalledSource are compiled unchanged. No
+Only Android/framework and the installed framework observation edge are doubles.
+HostService, StorageProfile, NativeOwner and JNI are compiled unchanged. No
 positive native admission, APK build, framework process or device is exercised.
 """
 
 from pathlib import Path
 import shutil
 import stat
+import hashlib
+import os
+import zipfile
 import subprocess
 
 import pytest
@@ -132,14 +135,23 @@ public class HostAnchors {
     public static final String SIGNER = "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a";
 }
 """,
-    "development/landmine/schemii/android/host/NativeOwner.java": """
+    "development/landmine/schemii/android/host/InstalledSource.java": """
 package development.landmine.schemii.android.host;
-public class NativeOwner {
-    public static int calls;
-    public static int open(int fd) { calls++; throw new AssertionError("native open forbidden"); }
-    public static int request(int op) { calls++; throw new AssertionError("native request forbidden"); }
-    public static long[] status() { calls++; throw new AssertionError("native status forbidden"); }
-    public static int close() { calls++; throw new AssertionError("native close forbidden"); }
+import android.content.Context;
+public final class InstalledSource {
+    static final class Framework {
+        final String packageName="fixture.package", signer="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        final String apk, module, data;
+        Framework(Context app) {
+            data=app.getDataDir().getAbsolutePath();
+            apk=data+"/base.apk";
+            module=System.getProperty("fixture.module");
+        }
+    }
+    static Framework framework(Context app) throws Exception {
+        app.getPackageManager().getPackageInfo(app.getPackageName(),0);
+        return new Framework(app);
+    }
 }
 """,
 }
@@ -265,8 +277,11 @@ public class BootstrapControl {
             action(service,"start");
             check(app.entered.await(5,TimeUnit.SECONDS), "production Java reached PM with frozen pair");
             if (stale != null) { action(stale,"stop"); stale.onDestroy(); }
+            check(NativeOwner.open() == 16 && NativeOwner.close() == 16, "pending native resource cannot be replaced/closed by another worker");
+            long[] pending = NativeOwner.status();
+            check(pending.length == 16 && pending[4] == 1 && pending[5] == 1, "pending scalar status responsive");
             absent(); // other thread cannot borrow
-            action(service,null); check(HostService.status().contains("disabled"), "status responsive while worker pending");
+            action(service,null); check(HostService.status().contains("pending"), "status responsive while worker pending");
             if (mode.equals("stop") || mode.equals("pm-error-stop")) action(service,"stop");
             if (mode.equals("destroy") || mode.equals("replace") || mode.equals("link-error-destroy")) service.onDestroy();
             if (mode.equals("replace")) {
@@ -288,8 +303,21 @@ public class BootstrapControl {
             check(invalidated ? app.after == null : app.after == app, "stale callback cannot mix or revive");
             check(!HostService.status().contains("private"), "raw exception redacted");
             boolean failed = mode.startsWith("pm-error") || mode.startsWith("link-error");
-            check(HostService.status().contains(failed ? "signer" : invalidated ? "cancelled" : "disabled"), "honest refusal stage");
-            if (failed && invalidated) check(HostService.status().contains("Cancellation also observed"), "first failure distinct from cancellation; no cleanup attempted");
+            check(HostService.status().contains("refused"), "honest refusal stage");
+            if (failed && invalidated) check(HostService.status().contains("Cancellation observed"), "first failure distinct from cancellation; no cleanup attempted");
+            if (Boolean.getBoolean("fixture.existing") && (mode.equals("normal") || mode.equals("stale-stop") || mode.equals("cleanup-error"))) {
+                long[] state=NativeOwner.status();
+                check(state[6]==3 && state[7]==2 && state[13]==1 && state[14]==1, "real held objects and unchanged UNKNOWN C/A result");
+                if (mode.equals("cleanup-error")) {
+                    check(state[2]!=0 && state[4]==1 && HostService.status().contains("unresolved"), "cleanup error retains native and Java reservation");
+                    action(service,"start"); check(HostService.status().contains("pending"), "no replacement after unresolved cleanup");
+                } else check(state[0]==0 && state[4]==0, "real JNI acquisition/mapping completed and disposed");
+            }
+            if (Boolean.getBoolean("fixture.existing") && mode.equals("custody-error")) {
+                long[] state=NativeOwner.status();
+                check(state[0]==5 && state[2]==0 && state[4]==0, "disposed custody error preserved without cleanup failure");
+                check(HostService.status().contains("First error 5.") && !HostService.status().contains("Cleanup error"), "operation and cleanup diagnostics remain distinct");
+            }
             absent(); service.onDestroy();
             service.onCreate(); action(service,"start"); check(HostService.status().contains("stale"), "destroyed incarnation cannot revive");
             if (replacement != null) replacement.onDestroy();
@@ -298,15 +326,17 @@ public class BootstrapControl {
             Method callback = HostService.class.getDeclaredMethod(method);
             check(!Modifier.isPublic(callback.getModifiers()) && Modifier.isStatic(callback.getModifiers()), "fixed nonpublic no-argument callback");
         }
-        check(NativeOwner.calls == 0, "all native operations remain disabled");
-        System.out.println("PASS " + mode + "; source doubles only; C/A unproved; zero native calls");
+        check(NativeOwner.request(1) != 0, "birth ingress refused");
+        System.out.println("PASS " + mode + "; framework edge doubles; real JNI; C/A unproved");
     }
 }
 """
 
 
-def run_java(command: list[str]) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+def run_java(command: list[str], env=None) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        command, capture_output=True, text=True, timeout=20, env=env
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     return result
 
@@ -334,12 +364,102 @@ def java_bootstrap(tmp_path_factory):
             for name in (
                 "HostService.java",
                 "StorageProfile.java",
-                "InstalledSource.java",
+                "NativeOwner.java",
             )
         ]
         + [str(harness)]
     )
-    return java, classes
+    native = ROOT / "platforms/android/native/host"
+    jdk = Path(javac).resolve().parents[1]
+    pins = work / "closed_pins.h"
+    pins.write_text(
+        '#include "installed_provenance.h"\nstatic const char *closed_package="fixture.package", *closed_signer="'
+        + "a" * 64
+        + '";\nstatic const struct installed_pin closed_pins[]={'
+        + '{"AndroidManifest.xml","'
+        + hashlib.sha256(b"manifest fixture").hexdigest()
+        + '"},'
+        + '{"classes.dex","'
+        + hashlib.sha256(b"dex fixture").hexdigest()
+        + '"},'
+        + '{"lib/arm64-v8a/libschemii_owner.so",NULL}};\n'
+    )
+    # Explicit OS library-inventory edge double. Actual dladdr, current proc
+    # mapping, held ELF, SHA, ZIP, authority lease and JNI remain production.
+    inventory = work / "inventory.c"
+    inventory.write_text("""
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <link.h>
+#include <string.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/file.h>
+static int inventory_calls, armed, flock_calls;
+int __real_flock(int,int);
+int __wrap_flock(int fd,int op) {
+    if (++flock_calls==2 && getenv("SCHEMII_J2_FIXTURE_CUSTODY")) { errno=EIO; return -1; }
+    return __real_flock(fd,op);
+}
+int __real_close(int);
+int __wrap_close(int fd) {
+    int result=__real_close(fd);
+    if (armed) { armed=0; errno=EIO; return -1; }
+    return result;
+}
+extern void Java_development_landmine_schemii_android_host_NativeOwner_open(void);
+int __wrap_dl_iterate_phdr(int (*callback)(struct dl_phdr_info *,size_t,void *), void *arg) {
+    Dl_info image;
+    if (!dladdr((void *)&Java_development_landmine_schemii_android_host_NativeOwner_open,&image)) return 1;
+    struct dl_phdr_info info; memset(&info,0,sizeof(info));
+    info.dlpi_name=image.dli_fname;
+    int result=callback(&info,sizeof(info),arg);
+    if (++inventory_calls==2 && getenv("SCHEMII_J2_FIXTURE_CLEANUP")) armed=1;
+    return result;
+}
+""")
+    library = work / "libschemii_owner.so"
+    run_java(
+        [
+            "cc",
+            "-std=c11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-shared",
+            "-fPIC",
+            "-pthread",
+            "-DSCHEMII_CLOSED_PINS",
+            "-I",
+            str(work),
+            "-I",
+            str(native),
+            "-I",
+            str(jdk / "include"),
+            "-I",
+            str(jdk / "include/linux"),
+            *[
+                str(native / (name + ".c"))
+                for name in (
+                    "owner_jni",
+                    "native_bootstrap",
+                    "installed_provenance",
+                    "boot_authority",
+                    "boot_compare",
+                    "boot_identity",
+                )
+            ],
+            str(inventory),
+            "-Wl,--wrap=dl_iterate_phdr",
+            "-Wl,--wrap=close",
+            "-Wl,--wrap=flock",
+            "-ldl",
+            "-o",
+            str(library),
+        ]
+    )
+    return java, classes, library
 
 
 def snapshot(root: Path) -> dict[str, tuple[int, bytes | None]]:
@@ -372,6 +492,8 @@ def snapshot(root: Path) -> dict[str, tuple[int, bytes | None]]:
         "dispatch-rejected",
         "stale-stop",
         "normal",
+        "cleanup-error",
+        "custody-error",
         "stop",
         "destroy",
         "replace",
@@ -392,21 +514,112 @@ def test_production_ce_bootstrap_refuses_without_mutation(
     data.mkdir(mode=0o700)
     if existing:
         control = data / "files/connected-host-v1/control"
-        control.mkdir(parents=True)
+        control.mkdir(parents=True, mode=0o700)
         # Deliberately not a valid or trusted lineage. Preserve even malformed
         # original bytes and permissions rather than parse/repair/adopt them.
         (control / "lineage-v1").write_bytes(b"retained\x00uncertain\xfflineage\n")
         (control / "lineage-v1").chmod(0o640)
         (control / "owner-events-v1.jsonl").write_bytes(b"retained incomplete event")
+    if not case.startswith("storage:"):
+        with zipfile.ZipFile(
+            data / "base.apk", "w", compression=zipfile.ZIP_STORED
+        ) as apk:
+            apk.writestr("AndroidManifest.xml", b"manifest fixture")
+            apk.writestr("classes.dex", b"dex fixture")
+            apk.writestr(
+                "lib/arm64-v8a/libschemii_owner.so", java_bootstrap[2].read_bytes()
+            )
     before = snapshot(tmp_path)
     selected = data
     if case == "storage:missing-data":
         selected = data / "absent"
     if case == "storage:relative-data":
         selected = Path("relative-data-must-refuse")
-    java, classes = java_bootstrap
+    java, classes, library = java_bootstrap
     result = run_java(
-        [java, "-cp", str(classes), f"{PACKAGE}.BootstrapControl", case, str(selected)]
+        [
+            java,
+            "-Djava.library.path=" + str(library.parent),
+            "-Dfixture.module=" + str(library),
+            "-Dfixture.existing=" + str(existing).lower(),
+            "-cp",
+            str(classes),
+            f"{PACKAGE}.BootstrapControl",
+            case,
+            str(selected),
+        ],
+        env={
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if key
+                not in {"SCHEMII_J2_FIXTURE_CLEANUP", "SCHEMII_J2_FIXTURE_CUSTODY"}
+            },
+            **({"SCHEMII_J2_FIXTURE_CLEANUP": "1"} if case == "cleanup-error" else {}),
+            **({"SCHEMII_J2_FIXTURE_CUSTODY": "1"} if case == "custody-error" else {}),
+        },
     )
     assert f"PASS {case}" in result.stdout
     assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("anchors", [False, True], ids=["diagnostic", "legacy-host"])
+def test_legacy_activity_routes_with_its_own_profile(java_bootstrap, tmp_path, anchors):
+    """Execute the actual diagnostic guard/helper, without Android UI actions.
+
+    The production service is compiled by java_bootstrap. Only the Activity's
+    fixed guard and helper are extracted because its UI/diagnostic SDK surface
+    is outside this host-JVM fixture; the helper bytes are never replaced.
+    """
+    activity = (
+        ROOT
+        / "platforms/android/app/src/main/java/development/landmine/schemii/runtimeprobe/ProbeActivity.java"
+    ).read_text()
+    start = activity.index("    private static boolean hostControlsAvailable() {")
+    end = activity.index("\n    @Override", start)
+    helper = activity[start:end]
+    guard = f"{PACKAGE}.HostService.available() && hostControlsAvailable()"
+    create = activity[activity.index("@Override public void onCreate(Bundle state)") :]
+    assert f"if ({guard}) {{" in create
+    java, classes, _ = java_bootstrap
+    # The general bootstrap fixture has a compile-only HostAnchors stub.
+    # Isolate its classpath and remove only that stub; never modify the shared
+    # fixture or replace the compiled production service/helper under test.
+    route_classes = tmp_path / "classes"
+    anchor_class = Path(*PACKAGE.split(".")) / "HostAnchors.class"
+    for compiled in classes.rglob("*.class"):
+        relative = compiled.relative_to(classes)
+        if relative == anchor_class:
+            continue
+        target = route_classes / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(compiled.read_bytes())
+    assert not (route_classes / anchor_class).exists()
+    sources = []
+    if anchors:
+        anchor = tmp_path / "HostAnchors.java"
+        anchor.write_text(
+            f'package {PACKAGE}; public class HostAnchors {{ public static final String COMMIT="fixture"; }}'
+        )
+        sources.append(str(anchor))
+    harness = tmp_path / "LegacyRoute.java"
+    harness.write_text(
+        "public class LegacyRoute {\n"
+        + helper
+        + "\npublic static void main(String[] ignored) { System.out.println("
+        + guard
+        + ' ? "host" : "diagnostic"); }\n}\n'
+    )
+    run_java(
+        [
+            "javac",
+            "-cp",
+            str(route_classes),
+            "-d",
+            str(route_classes),
+            *sources,
+            str(harness),
+        ]
+    )
+    result = run_java([java, "-cp", str(route_classes), "LegacyRoute"])
+    assert result.stdout.strip() == ("host" if anchors else "diagnostic")

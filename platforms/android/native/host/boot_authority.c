@@ -130,9 +130,15 @@ static struct boot_compare_result unavailable(void) {
   return r;
 }
 
-struct boot_compare_result boot_authority_compare(struct boot_authority *o) {
-  if (!o || atomic_exchange(&o->busy, 1))
+struct boot_compare_result boot_authority_compare_report(
+    struct boot_authority *o, struct boot_authority_errors *report) {
+  if (report)
+    memset(report, 0, sizeof(*report));
+  if (!o || atomic_exchange(&o->busy, 1)) {
+    if (report)
+      report->error = o ? EBUSY : EINVAL;
     return unavailable();
+  }
   struct boot_compare_result r = unavailable();
   if (!selected_current(o)) {
     o->lost = 1;
@@ -153,8 +159,14 @@ struct boot_compare_result boot_authority_compare(struct boot_authority *o) {
    * Even absent cancellation C/A remain unproved at this source boundary. */
   if (atomic_load(&o->cancelled))
     o->lost = 1;
+  if (report)
+    *report = o->errors;
   atomic_store(&o->busy, 0);
   return r;
+}
+
+struct boot_compare_result boot_authority_compare(struct boot_authority *o) {
+  return boot_authority_compare_report(o, NULL);
 }
 
 void boot_authority_cancel(struct boot_authority *o) {

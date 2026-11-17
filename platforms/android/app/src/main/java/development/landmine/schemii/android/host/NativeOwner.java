@@ -3,8 +3,8 @@ package development.landmine.schemii.android.host;
 public final class NativeOwner {
     private NativeOwner() {}
     static { System.loadLibrary("schemii_owner"); }
-    public static native int open(int borrowedDirectoryFd);
-    public static native int request(int operation);
-    public static native long[] status();
-    public static native int close();
+    static native int open();
+    static native int request(int operation);
+    static native long[] status();
+    static native int close();
 }
