@@ -887,13 +887,14 @@ def closed_manifest():
 
 
 def closed_pins(out, entries, signer, bindings):
-    """DEX/manifest/content first, native pins second, self member last.
+    """DEX/manifest/resources/content first, native pins second, self member last.
 
     Signing is external and subsequent. Never pin the final APK to itself.
     The self member is compared byte-for-byte with the held loaded module.
     """
     if set(entries) != {
         "AndroidManifest.xml",
+        "resources.arsc",
         "classes.dex",
         "assets/closed-build.json",
     } or not re.fullmatch(r"[a-f0-9]{64}", signer):

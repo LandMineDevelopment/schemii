@@ -71,7 +71,7 @@
     "native": "seven fixed owner/JNI/bootstrap/installed/authority/comparator/reader units; platform libc/libdl; accepted owner retained dormant; no actor/Go/PRoot",
     "build_order": [
       "exact committed adapter + public signer",
-      "API36 Java/DEX and binary manifest",
+      "API36 Java/DEX, binary manifest and compiled resource table",
       "native content pins",
       "owner module",
       "stored-only unsigned APK",
