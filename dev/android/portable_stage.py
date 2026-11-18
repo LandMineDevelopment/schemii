@@ -126,26 +126,32 @@ def _owner_record(path: Path) -> dict | None:
 
 def _assert_prior_stages_resolved(parent: Path) -> None:
     """Block on retained uncertainty without consulting or signaling a recorded PID."""
-    for root in parent.glob(".schemii-portable-*"):
-        if root.is_symlink() or not root.is_dir():
-            continue
-        try:
-            attempt = _owner_record(root / "attempt.json")
-        except StageError:
-            attempt = None
-        postmasters = (
-            root / f"{plane}-pgdata" / "postmaster.pid"
-            for plane in recovery.PORTABLE_CLUSTERS
-        )
-        if (
-            attempt is None
-            or attempt.get("format") != ATTEMPT_FORMAT
-            or attempt.get("status") not in ("quarantined", "verified")
-            or attempt.get("processes") != {}
-            or attempt.get("reason") == UNRESOLVED_SHUTDOWN
-            or any(path.exists() or path.is_symlink() for path in postmasters)
-        ):
-            raise StageError(f"Unresolved custody in prior portable stage: {root}")
+    try:
+        for root in parent.iterdir():
+            if not root.name.startswith(".schemii-portable-") or not stat.S_ISDIR(
+                root.lstat().st_mode
+            ):
+                continue
+            try:
+                attempt = _owner_record(root / "attempt.json")
+            except StageError:
+                attempt = None
+            if (
+                attempt is None
+                or attempt.get("format") != ATTEMPT_FORMAT
+                or attempt.get("status") not in ("quarantined", "verified")
+                or attempt.get("processes") != {}
+                or attempt.get("reason") == UNRESOLVED_SHUTDOWN
+            ):
+                raise StageError(f"Unresolved custody in prior portable stage: {root}")
+            for plane in recovery.PORTABLE_CLUSTERS:
+                try:
+                    (root / f"{plane}-pgdata" / "postmaster.pid").lstat()
+                except FileNotFoundError:
+                    continue
+                raise StageError(f"Unresolved custody in prior portable stage: {root}")
+    except OSError:
+        raise StageError("Cannot verify prior portable stages") from None
 
 
 def _assert_destination_stopped(runtime: guest.Runtime, control: Path) -> None:

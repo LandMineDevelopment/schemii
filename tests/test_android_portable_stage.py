@@ -1,5 +1,6 @@
 """Stage-only launcher dispatch, ownership, and disposable PostgreSQL checks."""
 
+import errno
 import hashlib
 import json
 import os
@@ -397,6 +398,90 @@ def test_prior_stage_with_incomplete_custody_blocks_before_transfer(
         stage._stage(active, tmp_path / "missing-bundle", control, runtime.PG_BIN)
     assert stage_path(active) == [prior]
     assert not active.state.exists()
+
+
+@pytest.mark.parametrize("listing_error", [True, False])
+def test_stage_listing_must_succeed_before_bundle_work(
+    destination, synthetic_bundle, monkeypatch, listing_error
+):
+    active, control = destination
+    active.state.mkdir(parents=True)
+    sentinel = active.state / "config.json"
+    write_private(sentinel, b"active fixture")
+    inode = sentinel.stat().st_ino
+    parent = active.state.parent
+    prior = parent / ".schemii-portable-retained"
+    prior.mkdir(mode=0o700)
+    journal = prior / "attempt.json"
+    original = json.dumps(
+        {
+            "format": stage.ATTEMPT_FORMAT,
+            "status": "quarantined",
+            "processes": {
+                "target": {"observed_pid": 424242, "signal_authority": "none"}
+            }
+            if listing_error
+            else {},
+        }
+    ).encode()
+    write_private(journal, original)
+    original_scandir = os.scandir
+    original_listdir = os.listdir
+
+    def fail_listing(listing):
+        def list_entries(path):
+            if not isinstance(path, int) and Path(os.fsdecode(path)) == parent:
+                raise OSError(errno.EIO, "injected stage listing error")
+            return listing(path)
+
+        return list_entries
+
+    def forbid_work(*_args, **_kwargs):
+        pytest.fail("Unexpected stage work or access to a diagnostic PID")
+
+    monkeypatch.setattr(runtime, "process_identity", forbid_work)
+    monkeypatch.setattr(os, "kill", forbid_work)
+    monkeypatch.setattr(os, "killpg", forbid_work)
+    monkeypatch.setattr(stage.subprocess, "Popen", forbid_work)
+    with (
+        active._file_lock("native-host"),
+        active._file_lock("supervisor"),
+        active.recovery_lock(),
+        active.lock(),
+    ):
+        pass
+    before = set(original_listdir(parent))
+    if listing_error:
+        monkeypatch.setattr(os, "scandir", fail_listing(original_scandir))
+        monkeypatch.setattr(os, "listdir", fail_listing(original_listdir))
+        monkeypatch.setattr(recovery, "verify_portable", forbid_work)
+        monkeypatch.setattr(stage.tempfile, "mkdtemp", forbid_work)
+        monkeypatch.setattr(stage, "_copy_bundle", forbid_work)
+        # A listing error leaves these direct reads available.
+        assert journal.read_bytes() == original
+        with pytest.raises(
+            stage.StageError, match="Cannot verify prior portable stages"
+        ):
+            stage._stage(active, synthetic_bundle, control, runtime.PG_BIN)
+    else:
+
+        def require_tools(self):
+            assert recovery.verify_portable(self.root / "bundle")
+            raise stage.StageError("admitted to tool checks")
+
+        monkeypatch.setattr(stage.Stage, "require_tools", require_tools)
+        with pytest.raises(stage.StageError, match="admitted to tool checks"):
+            stage._stage(active, synthetic_bundle, control, runtime.PG_BIN)
+    assert (
+        sentinel.read_bytes() == b"active fixture" and sentinel.stat().st_ino == inode
+    )
+    assert journal.read_bytes() == original
+    created = set(original_listdir(parent)) - before
+    if listing_error:
+        assert not created
+    else:
+        [new_stage] = created
+        assert new_stage.startswith(".schemii-portable-")
 
 
 @pytest.fixture(scope="module")
