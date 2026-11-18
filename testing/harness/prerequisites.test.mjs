@@ -1,3 +1,4 @@
+import { disposableGuestBinding, correlateGuestRequests, assertDisposableSource } from './deployment.mjs';
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { assertProviderAvailable, expandFixtureScenario, assertScenarioPrerequisite, readinessChecks } from './prerequisites.mjs';
@@ -63,4 +64,39 @@ test('retained legacy claim metadata supports recovery without claiming new init
   const retained={agent:'actual-previous-owner',checks:[initial],scenarios:[]};
   assert.equal(readinessChecks(retained).phase,'recovery');
   assert.equal(readinessChecks({checks:[initial],scenarios:[]}).phase,'initial');
+});
+
+
+const binding = {
+  bootId:'12345678-1234-1234-1234-123456789012', commit:'a'.repeat(40), certificateSha256:'b'.repeat(64),
+};
+
+test('guest binding refuses network overrides, dirty source, wrong boot, and a non-VM runner', () => {
+  const identity = {commit:binding.commit, dirty:false};
+  assert.deepEqual(disposableGuestBinding(binding), binding);
+  assert.throws(() => disposableGuestBinding({...binding, origin:'https://other.test.ts.net'}), /VM boot ID/);
+  assert.throws(() => disposableGuestBinding({...binding, certificateSha256:'bad'}), /certificate SHA-256/);
+  assert.doesNotThrow(() => assertDisposableSource(binding, identity, binding.bootId, true));
+  assert.throws(() => assertDisposableSource(binding, {...identity,dirty:true}, binding.bootId, true), /clean checkout/);
+  assert.throws(() => assertDisposableSource(binding, {...identity,commit:'b'.repeat(40)}, binding.bootId, true), /clean checkout/);
+  assert.throws(() => assertDisposableSource(binding, identity, 'different-boot', true), /bound VM boot/);
+  assert.throws(() => assertDisposableSource(binding, identity, binding.bootId, false), /bound VM boot/);
+});
+
+test('guest responses require fresh paired ingress/upstream records for each canonical endpoint', () => {
+  const endpoints = [
+    {url:'https://localhost:8001/',status:200,requestId:'a'.repeat(32)},
+    {url:'https://localhost:8001/api-map',status:401,requestId:'b'.repeat(32)},
+  ];
+  const events = endpoints.map(({url,status,requestId}) => ({
+    request_id:requestId, application_request_id:requestId, method:'GET', path:new URL(url).pathname, status,
+  }));
+  assert.equal(correlateGuestRequests(endpoints, [], events).length, 2);
+  assert.throws(() => correlateGuestRequests(endpoints, [events[1]], events), /fresh request/);
+  assert.throws(() => correlateGuestRequests(endpoints, [], [events[0]]), /fresh request/);
+  assert.throws(() => correlateGuestRequests(endpoints, [], [...events, events[1]]), /fresh request/);
+  for (const mismatch of [{application_request_id:'different'}, {method:'POST'}, {path:'/'}, {status:200}]) {
+    assert.throws(() => correlateGuestRequests(endpoints, [], [events[0],{...events[1],...mismatch}]), /owned ingress and application/);
+  }
+  assert.throws(() => correlateGuestRequests([endpoints[0],endpoints[0]], [], events), /distinct ingress/);
 });

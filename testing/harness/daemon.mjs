@@ -7,8 +7,8 @@ import { CodexWorkers } from './workers.mjs';
 import { BrowserFleet } from './browser.mjs';
 import { assertScenarioPrerequisite, readinessChecks } from './prerequisites.mjs';
 import { assertLaneReadyToClaim, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
-import { startDeployment, sourceIdentity } from './deployment.mjs';
-import { nativeMode, recoverNativeLane, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, acceptance } from './native.mjs';
+import { startDeployment, sourceIdentity, revalidateDisposableGuest } from './deployment.mjs';
+import { nativeMode, recoverNativeLane, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, assertReviewerLane, reviewAttemptImages, acceptance } from './native.mjs';
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
 
 process.umask(0o077);
@@ -25,7 +25,7 @@ const browserRoot = nativeBrowserRoots(root);
 const equal = (a,b) => typeof a==='string' && typeof b==='string' && /^[a-f0-9]{64}$/.test(a) && /^[a-f0-9]{64}$/.test(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const terminalStatus = () => run.lanes.filter(x=>x.role!=='reviewer').every(x=>x.scenarios.every(s=>s.functional==='passed'&&s.visual==='passed'))?'execution-complete':'finished-with-gaps';
 const safeError = error => error?.name === 'TimeoutError' || /Call log:|locator\.|page\./.test(error?.message || '') ? 'Browser action failed or timed out. Inspect the current page before repeating a write.' : String(error?.message || 'Unknown error').split('\n')[0];
-const fleet = new BrowserFleet({baseURL:run.baseURL,runDir:dir,headless:run.headless,
+const fleet = new BrowserFleet({baseURL:run.baseURL,runDir:dir,headless:run.headless, ignoreHTTPSErrors:!run.guestBinding,
   onLaunch: async ({laneId,...ownership}) => {
     const l=lane(laneId);l.browser=ownership;l.browserLaunchPending=false;await persist();
   },
@@ -55,6 +55,7 @@ const workers = new CodexWorkers({root,runDir:dir,model:run.agentModel,reasoning
   }
 });
 async function claim(l,agent) {
+  await checkGuestReadiness();
   assertLaneReadyToClaim(l);
   if(!agent||typeof agent!=='string'||agent.length>200)throw new Error('Claim requires the actual assigned agent ID.');
   if(run.lanes.some(x=>x.status==='claimed'&&x.agent===agent))throw new Error('Agent already owns an active lane.');
@@ -83,8 +84,20 @@ function assertLease(req) {
   l.heartbeatAt=stamp();return l;
 }
 function queueLane(id,fn){const task=(operations.get(id)||Promise.resolve()).then(fn);operations.set(id,task.catch(()=>{}));return task;}
-async function checkSource(){const actual=sourceIdentity(root);if(run.deployment&&actual.fingerprint!==run.deployment.identity.fingerprint)throw new Error('Source changed since startup. Stop and prepare a new run; the tested build is no longer attributable to this checkout.');}
+async function checkSource() {
+  const actual = sourceIdentity(root);
+  const expected = run.deployment?.identity;
+  if (expected && (actual.commit !== expected.commit || actual.fingerprint !== expected.fingerprint)) {
+    throw new Error('Source changed since startup. Stop and prepare a new run; the tested build is no longer attributable to this checkout.');
+  }
+}
+async function checkGuestReadiness() {
+  if (!run.guestBinding) return;
+  run.deployment.localVerification = await revalidateDisposableGuest(root, run.deployment);
+  await persist();
+}
 async function readyLane(l) {
+  await checkGuestReadiness();
   const readiness=readinessChecks(l);
   l.status='preparing';l.generation++;tokens.delete(l.id);l.browserLaunchPending=true;await persist();
   if(stopping)throw new Error('Controller is stopping.');
@@ -179,6 +192,7 @@ async function workerRequest(req){
       if(req.targetLane) {
         if(l.role!=='reviewer')throw new Error('Only the assigned reviewer may inspect another lane evidence.');
         target=lane(req.targetLane);
+        if(run.guestBinding && target!==l)assertReviewerLane(run,l,target);
       }
       const capture=(target.captures||[]).find(c=>c.path===req.evidence[0]);
       if(!capture||capture.kind!=='image')throw new Error('Inspect needs a registered image.');
@@ -198,7 +212,21 @@ async function workerRequest(req){
       if(nativeMode(run))await assertNativeConnection(l,browserRoot);
       const evidence=await ownedEvidence(req.evidence,l);
       for(const path of evidence)currentCapture(run,l,path,{inspection:true});
-      const receipt=recordReview(run,l,lane(req.targetLane),req.scenario,{...req.args,verdict:req.verdict,note:req.note,evidence,finding:req.finding});await persist();return receipt;
+      const target=lane(req.targetLane);
+      let verifiedImages;
+      if(run.guestBinding) {
+        assertReviewerLane(run,l,target);
+        const {images}=reviewAttemptImages(run,l,target,req.scenario);
+        verifiedImages=new Map();
+        for(const image of images) {
+          const [file]=await ownedEvidence([image.path],target);
+          const sha256=createHash('sha256').update(await readFile(resolve(dir,file))).digest('hex');
+          if(sha256!==image.sha256)throw new Error('Target image changed after independent inspection.');
+          verifiedImages.set(image.path,sha256);
+        }
+      }
+      const receipt=recordReview(run,l,target,req.scenario,{...req.args,verdict:req.verdict,note:req.note,evidence,finding:req.finding},verifiedImages);
+      await persist();return receipt;
     }
     if(req.command==='action') {
       if(nativeMode(run))throw new Error('Native lanes use their own schemii_browser connection; legacy action handles cannot drive it.');
@@ -256,7 +284,7 @@ async function workerRequest(req){
       await event(dir,{kind:'checkpoint',lane:l.id,scenario:s.id,functional:s.functional,visual:s.visual});await persist();return s;
     }
     if(req.command==='finish') {
-      if(l.role!=='reviewer'&&l.scenarios.some(s=>s.functional==='not-run'||s.visual==='not-run'))throw new Error('Every scenario needs explicit results; use blocked for unavailable checks.');
+      if((l.role!=='reviewer'||run.guestBinding)&&l.scenarios.some(s=>s.functional==='not-run'||s.visual==='not-run'))throw new Error('Every scenario needs explicit results; use blocked for unavailable checks.');
       if(nativeMode(run))await closeNativeReceipt(l);
       else await fleet.closeLane(l.id);
       if(l.worker)recordWorkerBrowserClosure(l,{...l.worker,generation:l.worker.generation??l.generation});
@@ -277,7 +305,7 @@ async function controllerRequest(req){
   if(req.command==='ping')return {alive:true};
   if(stopping&&['stop','cleanup'].includes(req.command))return {status:'stopping',preserved:'QA accounts, app data, credentials, evidence and reports'};
   if(starting || stopping)throw new Error(starting?'Startup is still running; inspect status.':'Controller is stopping.');
-  if(req.command==='run')return {status:'awaiting-agent-dispatch',available:run.lanes.filter(l=>l.status==='ready'&&l.role!=='reviewer').map(brief),reviewer:run.lanes.filter(l=>l.status==='ready'&&l.role==='reviewer').map(brief),queued:run.lanes.filter(l=>l.status==='queued').map(l=>l.id),requiredSlots:'One coordinator + requested active testers + independent verifier. Check actual runtime availability before claim.'};
+  if(req.command==='run'){await checkGuestReadiness();return {status:'awaiting-agent-dispatch',available:run.lanes.filter(l=>l.status==='ready'&&l.role!=='reviewer').map(brief),reviewer:run.lanes.filter(l=>l.status==='ready'&&l.role==='reviewer').map(brief),queued:run.lanes.filter(l=>l.status==='queued').map(l=>l.id),requiredSlots:'One coordinator + requested active testers + independent verifier. Check actual runtime availability before claim.'};}
   const task=transition.then(async()=>{
     if(req.command==='claim'){
       return claim(lane(req.laneId),req.agent);
@@ -390,7 +418,7 @@ try{
     for(const l of run.lanes)if(l.status!=='complete'){l.status='queued';l.generation++;tokens.delete(l.id);}
     // Resume verifies the active deployment or rebuilds through the supported launcher.
   }
-  run.deployment=await startDeployment({root,runDir:dir});
+  run.deployment=await startDeployment({root,runDir:dir,localURL:run.baseURL,previewURL:run.previewURL,guestBinding:run.guestBinding});
   if(stopping)throw new Error('Controller was stopped during startup.');
   for(const l of run.lanes)if(l.status==='preparing')l.status='queued';
   await prepareWave();starting=false;

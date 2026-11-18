@@ -42,7 +42,7 @@ def launcher_fixture():
             qa_state_directory=directory / "qa",
         )
         for key in tuple(environment):
-            if key.startswith("CI_TELEMETRY_") or key.startswith("GITHUB_"):
+            if key.startswith(("CI_TELEMETRY_", "GITHUB_", "COMPOSE_")):
                 environment.pop(key)
         environment["SCHEMII_SECRET_DIRECTORY"] = str(directory / "secrets")
         environment["FAKE_BLOCK_MARKER"] = str(directory / "blocked")
@@ -443,3 +443,294 @@ def test_only_clean_matching_hosted_source_can_claim_immutable_identity(clean):
         assert value["source_sha"] == ("a" * 40 if clean else None)
         assert value["run_id"] == (123 if clean else 0)
         assert value["project"] == "desktop-chromium" and value["shard"] == 2
+
+
+def prepare_qa_overlay_fixture(root, environment):
+    (root / "testing").mkdir()
+    for name in ("launcher.sh", "compose.yaml", "egress.yaml"):
+        shutil.copy2(ROOT / "testing" / name, root / "testing" / name)
+    qa = Path(environment["SCHEMII_QA_STATE_DIRECTORY"])
+    qa.mkdir(mode=0o700)
+    registry = qa / "registry.json"
+    mock_bin = Path(environment["PATH"].split(":")[0])
+    docker = mock_bin / "docker"
+    docker.write_text(docker.read_text().replace(
+        'case "$*" in',
+        'case "$*" in\n'
+        '  info) if [ "$FAKE_PUBLISH_QA" = info ]; then '
+        'printf "{}\\n" > "$SCHEMII_QA_STATE_DIRECTORY/registry.json"; fi ;;\n'
+        "esac\n"
+        'case "$*" in\n'
+        "  *' config --format json') printf '%s\\n' "
+        "'{\"services\":{\"schemii\":{\"environment\":"
+        "{\"SCHEMII_ALLOWED_TARGET_HOSTS\":\"desktop.internal\"}}}}'; exit 0 ;;\n"
+        "  *' build schemii ai-prototype-runtime') "
+        'printf "%s|%s\\n" "$*" "${SCHEMII_QA_EFFECTIVE_ALLOWED_TARGET_HOSTS-}" '
+        '>> "$FAKE_QA_BUILD_PROOF" ;;\n'
+        "esac\n"
+        'case "$*" in',
+        1,
+    ))
+    openssl = shutil.which("openssl")
+    assert openssl is not None
+    shim = mock_bin / "openssl"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = req ] && [ "$FAKE_PUBLISH_QA" = openssl ]; then\n'
+        '  printf "{}\\n" > "$SCHEMII_QA_STATE_DIRECTORY/registry.json"\n'
+        "fi\n"
+        f'exec "{openssl}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    proof = qa.parent / "qa-build-proof"
+    return registry, proof
+
+
+def test_guest_registry_publication_refuses_unapproved_overlay_or_keeps_safe_selection():
+    for publication in ("info", "openssl"):
+        with launcher_fixture() as (root, environment, commands, _):
+            registry, proof = prepare_qa_overlay_fixture(root, environment)
+            assert not registry.exists()
+            result = run_launcher(
+                root,
+                environment,
+                SCHEMII_QA_GUEST_TARGET_HOSTS="fixture.internal",
+                SCHEMII_ALLOWED_TARGET_HOSTS="fixture.internal",
+                FAKE_PUBLISH_QA=publication,
+                FAKE_QA_BUILD_PROOF=str(proof),
+            )
+            assert registry.is_file()
+            if publication == "info":
+                assert result.returncode == 1
+                assert "requires exact approval of qa-postgres" in result.stderr
+                assert commands.read_text().splitlines() == ["version:disabled", "info:disabled"]
+                assert not Path(environment["SCHEMII_SECRET_DIRECTORY"]).exists()
+                assert not (registry.parent / "writable-credentials.tsv").exists()
+                assert not proof.exists()
+            else:
+                assert result.returncode == 0, result.stderr
+                args, hosts = proof.read_text().strip().split("|")
+                assert "testing/compose.yaml" not in args
+                assert "testing/egress.yaml" not in args
+                assert hosts == ""
+
+
+def test_registered_overlay_uses_approved_guest_hosts_and_preserves_desktop_union():
+    for guest in (True, False):
+        with launcher_fixture() as (root, environment, _, _):
+            registry, proof = prepare_qa_overlay_fixture(root, environment)
+            registry.write_text("{}\n")
+            bound = "fixture.internal,qa-postgres"
+            guest_options = {
+                "SCHEMII_QA_GUEST_TARGET_HOSTS": bound,
+                "SCHEMII_ALLOWED_TARGET_HOSTS": bound,
+            } if guest else {}
+            result = run_launcher(
+                root, environment, FAKE_QA_BUILD_PROOF=str(proof), **guest_options
+            )
+            assert result.returncode == 0, result.stderr
+            args, hosts = proof.read_text().strip().split("|")
+            assert "testing/compose.yaml" in args
+            assert "testing/egress.yaml" in args
+            assert hosts == (bound if guest else "desktop.internal,qa-postgres")
+
+
+def test_fixture_ca_requires_preheld_locks_and_ignores_late_compose_inputs():
+    with launcher_fixture() as (root, environment, commands, _):
+        _, proof = prepare_qa_overlay_fixture(root, environment)
+        mock_bin = Path(environment["PATH"].split(":")[0])
+        vm = mock_bin / "systemd-detect-virt"
+        vm.write_text("#!/bin/sh\nexit 0\n")
+        vm.chmod(0o755)
+        node = mock_bin / "node"
+        node.write_text(
+            "#!/bin/sh\n"
+            'mkdir -p .schemii\n'
+            'printf "services: {}\\n" > .schemii/compose.local.yaml\n'
+            'printf "SCHEMII_ALLOWED_TARGET_HOSTS=foreign.internal\\n" > .env\n'
+            'printf "%s\\n" "$PWD/.schemii/staged-ca.json"\n'
+        )
+        node.chmod(0o755)
+        binding = root.parent / "binding.json"
+        binding.write_text("{}\n")
+        env = {
+            **environment,
+            "DOCKER_HOST": "unix:///var/run/docker.sock",
+            "SCHEMII_QA_FIXTURE_CA_BINDING": str(binding),
+            "SCHEMII_QA_LEASE_FD": "3",
+            "SCHEMII_QA_GATE_FD": "4",
+            "SCHEMII_QA_LEASE_MODE": "exclusive",
+            "FAKE_QA_BUILD_PROOF": str(proof),
+        }
+        for hold in ("", "flock -x 3; flock -x 4; "):
+            result = subprocess.run(
+                ["bash", "-ec",
+                 'exec 3>"$FAKE_GIT_COMMON_DIRECTORY/qa-deployment.lock"; '
+                 'exec 4>"$FAKE_GIT_COMMON_DIRECTORY/qa-startup.lock"; '
+                 + hold + 'exec ./start.sh'],
+                cwd=root, env=env, capture_output=True, text=True, timeout=10,
+            )
+            if not hold:
+                assert result.returncode == 1
+                assert "pre-held exclusive deployment and startup locks" in result.stderr
+                assert not commands.exists()
+            else:
+                assert result.returncode == 0, result.stderr
+                assert (root / ".schemii/compose.local.yaml").is_file()
+                assert (root / ".env").is_file()
+                build = proof.read_text()
+                assert "--env-file /dev/null" in build
+                assert "--file " + str(root / ".schemii/staged-ca.json") in build
+                assert "compose.local.yaml" not in build
+
+
+@pytest.mark.parametrize(
+    "setting", ["COMPOSE_PROFILES", "COMPOSE_FILE", "COMPOSE_ENV_FILES", "COMPOSE_PROJECT_NAME"]
+)
+@pytest.mark.parametrize("value", ["", "PRIVATE_COMPOSE_SENTINEL"])
+def test_fixture_ca_refuses_inherited_compose_settings_before_preflight(setting, value):
+    with launcher_fixture() as (root, environment, commands, _):
+        result = run_launcher(
+            root,
+            environment,
+            SCHEMII_QA_FIXTURE_CA_BINDING="/private/fixture-binding.json",
+            SCHEMII_QA_LEASE_FD="3",
+            SCHEMII_QA_GATE_FD="4",
+            SCHEMII_QA_LEASE_MODE="exclusive",
+            DOCKER_HOST="unix:///var/run/docker.sock",
+            **{setting: value},
+        )
+        assert result.returncode == 1
+        assert "fixture CA refuses inherited Compose settings" in result.stderr
+        assert "PRIVATE_COMPOSE_SENTINEL" not in result.stdout + result.stderr
+        assert not commands.exists()
+        assert not list(Path(environment["FAKE_GIT_COMMON_DIRECTORY"]).glob("qa-*.lock"))
+        assert not Path(environment["SCHEMII_LAUNCH_LOCK_FILE"]).exists()
+        assert not Path(environment["SCHEMII_SECRET_DIRECTORY"]).exists()
+
+
+def test_stock_launcher_retains_compose_configuration_without_fixture_ca():
+    with launcher_fixture() as (root, environment, _, _):
+        _, proof = prepare_qa_overlay_fixture(root, environment)
+        result = run_launcher(
+            root,
+            environment,
+            COMPOSE_PROFILES="PRIVATE_COMPOSE_SENTINEL",
+            COMPOSE_FILE="PRIVATE_COMPOSE_SENTINEL",
+            FAKE_QA_BUILD_PROOF=str(proof),
+        )
+        assert result.returncode == 0, result.stderr
+        assert "--file " + str(root / "compose.test.yaml") in proof.read_text()
+        assert "PRIVATE_COMPOSE_SENTINEL" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "failure", ["", "staging", "local-bases", "configuration", "build", "compose-drift"]
+)
+def test_offline_guest_never_falls_back_and_cleans_before_replacement(failure):
+    with launcher_fixture() as (root, environment, commands, _):
+        mock_bin = Path(environment["PATH"].split(":")[0])
+        vm = mock_bin / "systemd-detect-virt"
+        vm.write_text("#!/bin/sh\nexit 0\n")
+        vm.chmod(0o755)
+        staging = root.parent / "staging-path"
+        node = mock_bin / "node"
+        node.write_text(
+            "#!/bin/sh\n"
+            'case "$2" in\n'
+            "  stage-offline-build)\n"
+            '    printf "%s\n" "$4" > "$FAKE_STAGE_PATH"\n'
+            '    if [ "$FAKE_OFFLINE_FAILURE" = staging ]; then exit 1; fi\n'
+            '    mkdir "$4/context"\n'
+            '    cp "$3/compose.test.yaml" "$4/compose.test.yaml"\n'
+            '    printf "{}\n" > "$4/compose.json" ;;\n'
+            '  require-offline-local-bases) [ "$FAKE_OFFLINE_FAILURE" != local-bases ] ;;\n'
+            '  verify-offline-compose) cmp -s "$3/compose.test.yaml" "$4/compose.test.yaml" ;;\n'
+            "  verify-offline-build)\n"
+            '    [ "$FAKE_OFFLINE_FAILURE" != configuration ] && [ "$(cat)" = "{}" ] ;;\n'
+            "  *) exit 72 ;;\n"
+            "esac\n"
+        )
+        node.chmod(0o755)
+        docker = mock_bin / "docker"
+        docker.write_text(
+            docker.read_text()
+            .replace(
+                'case "$*" in',
+                'stage=$(cat "$FAKE_STAGE_PATH")\n'
+                'case "$*" in\n'
+                '  *" config --format json"|*" build schemii ai-prototype-runtime"|*" rm --stop --force"*|*" up --detach "*)\n'
+                '    case "$*" in *"--project-directory $PWD --file $stage/compose.test.yaml --env-file /dev/null"*) ;; *) exit 71 ;; esac ;;&\n'
+                '  *" config --format json")\n'
+                '    case "$*" in *"--file $stage/compose.json"*) ;; *) exit 71 ;; esac\n'
+                '    printf "{}\n"; exit 0 ;;\n'
+                '  *" build schemii ai-prototype-runtime")\n'
+                '    case "$*" in *"--file $stage/compose.json"*) ;; *) exit 71 ;; esac\n'
+                '    if [ "$FAKE_OFFLINE_FAILURE" = build ]; then\n'
+                '      printf "build:failed\n" >> "$COMMAND_LOG"; exit 1\n'
+                "    fi\n"
+                '    if [ "$FAKE_OFFLINE_FAILURE" = compose-drift ]; then\n'
+                '      printf "# late drift\n" >> "$PWD/compose.test.yaml"\n'
+                "    fi ;;\n"
+                '  *" rm --stop --force"*)\n'
+                '    [ ! -e "$stage/context" ] && [ ! -e "$stage/compose.json" ] || exit 71 ;;\n'
+                '  *" up --detach "*)\n'
+                '    case "$*" in *"--no-build --pull never") ;; *) exit 71 ;; esac\n'
+                '    case "$*" in *"--file $stage/compose.json"*) exit 71 ;; esac ;;\n'
+                "esac\n"
+                'case "$*" in',
+                1,
+            )
+            .replace("#!/bin/sh", "#!/bin/bash", 1)
+        )
+        binding = root.parent / "binding.json"
+        binding.write_text("{}\n")
+        config = root.parent / "client-config"
+        config.mkdir(mode=0o700)
+        env = {
+            **environment,
+            "DOCKER_HOST": "unix:///var/run/docker.sock",
+            "DOCKER_CONFIG": str(config),
+            "SCHEMII_TEST_APP_PORT": "8001",
+            "SCHEMII_QA_OFFLINE_BUILD_BINDING": str(binding),
+            "SCHEMII_QA_LEASE_FD": "3",
+            "SCHEMII_QA_GATE_FD": "4",
+            "SCHEMII_QA_LEASE_MODE": "exclusive",
+            "FAKE_STAGE_PATH": str(staging),
+            "FAKE_OFFLINE_FAILURE": failure,
+        }
+        result = subprocess.run(
+            [
+                "bash",
+                "-ec",
+                'exec 3>"$FAKE_GIT_COMMON_DIRECTORY/qa-deployment.lock"; '
+                'exec 4>"$FAKE_GIT_COMMON_DIRECTORY/qa-startup.lock"; '
+                "flock -x 3; flock -x 4; exec ./start.sh",
+            ],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert staging.is_file(), result.stderr
+        assert not Path(staging.read_text().strip()).exists()
+        observed = commands.read_text() if commands.exists() else ""
+        if failure:
+            assert result.returncode == 1, result.stderr
+            assert "replacement" not in observed
+            assert "readiness" not in observed
+            assert ("build:disabled" in observed) == (failure == "compose-drift")
+            assert observed.count("build:failed") == (failure == "build")
+            if failure in {"staging", "local-bases"}:
+                assert observed == ""
+                assert not Path(environment["SCHEMII_SECRET_DIRECTORY"]).exists()
+            if failure == "local-bases":
+                assert "no verified local-only builder source" in result.stderr
+            if failure == "compose-drift":
+                assert "Compose inputs changed before runtime" in result.stderr
+        else:
+            assert result.returncode == 0, result.stderr
+            assert observed.count("build:disabled") == 1
+            assert "replacement" in observed
+            assert "readiness" in observed

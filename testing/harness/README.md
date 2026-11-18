@@ -176,6 +176,152 @@ exact QA scopes and writes this entry into the generated private fixtures.
 Use `--accounts qa_designer_001` with the provisioned account for a chat lane;
 automatic persona selection may choose a different designer.
 
+## Disposable guest
+
+Use `--disposable-guest-binding FILE` with `plan`, `doctor` or `prepare` only
+inside an explicitly approved disposable Linux VM. Give the VM its own engine,
+Git checkout and locks, metadata and target databases, fixture accounts, browser
+storage and backup destinations. Run the controller and isolated Playwright
+processes in that VM. The binding does not enable native-thread mode or a
+remote route. The default desktop and CI preview gates still apply to their
+own workflows.
+
+Start only through `./start.sh`. Install the guest launcher’s public localhost
+certificate as a trusted TLS peer in the guest’s Chromium NSS store
+(`certutil -A -t "P,,"` against the applicable NSS database). For the
+Playwright API client, set `NODE_EXTRA_CA_CERTS` to the same certificate before
+starting the controller. Use separate guest-owned browser profiles and leave TLS
+verification enabled. The harness checks the declared certificate against the
+launcher’s canonical certificate and verifies HTTPS without relaxing trust.
+
+Provide a mode-0600 JSON file in private storage outside Git with these required
+fields.
+
+| Field | Value |
+| --- | --- |
+| `bootId` | Guest’s `/proc/sys/kernel/random/boot_id` |
+| `commit` | Full commit from the clean guest checkout |
+| `certificateSha256` | Lowercase SHA-256 fingerprint of the launcher’s `.schemii/tls/localhost.crt` in DER form |
+
+The controller verifies kernel-held deployment locks, checks the clean source and
+VM boot against a launcher receipt, and correlates fresh HTTPS response IDs with
+the owned ingress records and their upstream application IDs. Correlation and
+live process/cgroup checks are repeated before dispatch and lane claims. The
+mode refuses machine-local Compose overrides and noncanonical launcher settings.
+A shared deployment must have the same guest binding. Prepare a new run after
+rebooting the guest. The receipt covers local readiness only and records remote
+preview as untested.
+
+The harness pins the launcher to the VM’s system engine endpoint with an
+empty private Docker client configuration. Persistent client contexts do not
+select the engine. Do not supply Docker or Compose overrides, inherited demo
+reset, alternate secret/lock paths, or other launcher overrides. The supported
+fixture settings are the database and role variables (`SCHEMII_TEST_POSTGRES_DB`,
+`SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`,
+`SCHEMII_METADATA_APP_USER`), and optional fixture egress. To approve
+fixture egress, add a private `fixture` object containing `mode` (`internal-only`
+or `external`) and `hosts` (a bounded array of exact approved hostnames or IP
+addresses). The launcher receives those values as `SCHEMII_TARGET_EGRESS_MODE`
+and `SCHEMII_ALLOWED_TARGET_HOSTS`. Inherited versions of those settings must
+match the binding exactly. If the standard QA database registry exists at
+`.schemii/testing/registry.json`, explicitly include `qa-postgres` in
+`fixture.hosts` because the overlay uses that host. The launcher selects the overlay under its
+lock, checks the binding before mutation, and uses that same decision and the
+approved host list throughout startup.
+
+For one approved private PostgreSQL endpoint that uses a fixture CA, set
+`fixture.mode` to `external`, list only that endpoint in `fixture.hosts`, and
+add `fixture.ca` with an absolute private PEM `path` and the file's lowercase
+`sha256`. Use a mode-0600 file containing only a currently valid self-signed CA
+certificate. The launcher verifies the file again under its exclusive guest
+lease, rechecks the binding's boot and clean source, and snapshots the CA to a
+read-only application-container mount for libpq. CA launch omits machine-local
+Compose overrides and disables automatic `.env` loading. Use the canonical
+lowercase host spelling without trailing dots (or a canonical IP address).
+The CA option is incompatible with the registered QA database overlay and
+shared deployment reuse. Continue to use a managed profile with
+`verify-full`, matching the exact fixture server name or IP in its certificate.
+The guest's system and browser trust are unchanged. Keep the staged CA
+snapshot with the disposable guest disk until the application is torn down.
+
+### Offline build inputs for a disposable guest
+
+This optional input is for the owned Linux amd64 guest with host-enforced
+offline networking, a clean checkout, and a fresh exclusive startup and
+deployment lease. **Offline launches currently stop before engine access.**
+The recorded guest Compose setup reported missing Buildx, and the intake has
+no verified builder-local base-image source. Engine image inventory,
+`pull: false` and build-step network isolation do not enforce local-only image
+resolution.
+
+To enable the path, first qualify an exact Compose, Buildx and BuildKit
+combination that consumes verified digest-pinned Linux amd64 Python and Node
+content as explicit local inputs. One candidate is local OCI layout named
+contexts, with the pinned index or manifest, platform manifest, config and
+every layer verified before use. Demonstrate local refusal for missing or
+damaged content, including through the selected Dockerfile frontend. Verify
+the pinned PostgreSQL and ingress runtime images separately in the guest
+engine for startup with pulls disabled. Keep the guest offline during
+qualification and startup.
+
+Add `"offlineBuild": {"manifest": "/absolute/private/bundle/manifest.json",
+"sha256": "<manifest SHA-256>"}` to the fresh guest binding. Stage the bundle
+outside the checkout in owner-only directories and give every input file
+mode 0600 or 0400. Copy only the verified package members, without npm
+indexes, config, logs, credentials, or extra files. The version 1 manifest
+contains exactly these fields.
+
+| Field | Value |
+| --- | --- |
+| `version` | `1` |
+| `locks` | SHA-256 lookup keyed by `ai/prototype/package-lock.json`, `constraints.docker.txt` and `pyproject.toml` |
+| `images` | The `node`, `python`, `postgres` and `ingress` references from the exact checkout's `dev/runtime-contract.json` |
+| `members` | Objects with `path` relative to the bundle, integer `bytes` and lowercase `sha256` |
+
+Use exactly the lockfile's npm SHA-512 content objects at
+`npm-cache/_cacache/content-v2/sha512/XX/YY/REMAINDER` with lowercase hex
+segments. Provide one compatible CPython 3.12 Linux amd64 or pure Python
+wheel per tracked runtime constraint, plus an approved setuptools wheel
+within the tracked build-backend range, under `wheelhouse/`. Verify wheel
+origin and digest when preparing the manifest. The manifest binds the
+reviewed artifacts and the launcher independently checks each member
+before building.
+
+The launcher archives the exact commit into a private temporary context,
+copies only verified read-only artifacts into it, and snapshots the committed
+`compose.test.yaml`. It refuses working Compose drift even when Git status is
+clean. Inspection and build use the snapshot plus the verified generated
+build overlay. Replacement and startup use the same snapshot with pulls and
+implicit builds disabled. All phases keep the checkout as the Compose project
+directory so relative runtime mounts still resolve there. The launcher checks
+the Compose inputs again before replacement.
+
+The build overlay selects network `none` and offline npm and pip. Read-only
+bind mounts keep input packages outside the final images. The launcher removes
+the temporary build context before replacement and removes the remaining
+private staging on exit. After a forced termination, reconcile private
+`/tmp/schemii-qa-build.*` ownership with the guest lease holder before removing
+any residue. Preserve the original bundle and private launch log.
+
+Offline build can be combined with the fixture CA binding. Both options
+require exclusive startup and refuse the registered QA overlay and
+machine-local Compose files. Keep fixture trust and the later HTTPS and
+managed Verify Full checks under their existing gates.
+
+For independent review in the guest, pass `--reviewer-account ACCOUNT` and
+`--runtime-slots N` along with the binding and both accounts. The account must
+be separately selected and claimable. Reviewed guest runs require one tester
+wave. Set `--parallel` to the number of selected testers. Reserve one observed
+slot each for the coordinator and reviewer. Both lanes run their
+configured cases with isolated browser processes. The reviewer uses their own
+claimed session to inspect the tester’s evidence and submit an adjudication.
+The controller rechecks each cited target image’s hash at review time and
+preserves the original checkpoint outcome.
+
+Treat `plan`, `prepare`, `status`, launcher logs and all run receipts as private.
+Clean up the harness lease and its scoped test objects before shutting down the
+guest. Keep backups in that guest’s private storage.
+
 ## Coordinator runbook
 
 1. Read `plan` and `doctor`. With T3, reserve runtime slots for coordination and
