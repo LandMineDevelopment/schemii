@@ -168,3 +168,142 @@ test('granted viewers retain deep links, isolate filters and rows, recover edits
     if (failures.length) throw new AggregateError(failures, 'Shared-report acceptance and cleanup failures');
   }
 });
+
+
+// The coordinator provisions this schema and scoped login on a disposable source
+// server. The suite never grants privileges or modifies launcher/user schemas.
+test('managed developer profile keeps its exact identity through both HTTPS origins and revocation', async ({ browser, request, baseURL }, testInfo) => {
+  test.skip(!process.env.SCHEMII_E2E_MANAGED_WRITER_FILE,
+    'Requires an explicitly provisioned disposable managed-writer fixture');
+  test.setTimeout(180_000);
+  const { stat } = await import('node:fs/promises');
+  const { randomUUID } = await import('node:crypto');
+  const fixtureFile = process.env.SCHEMII_E2E_MANAGED_WRITER_FILE;
+  expect((await stat(fixtureFile)).mode & 0o077, 'fixture credentials must remain private').toBe(0);
+  const fixture = JSON.parse(await readFile(fixtureFile, 'utf8'));
+  expect(fixture.namespace).toMatch(/^qa_managed_writer_[a-f0-9]{16,32}$/);
+  for (const value of [fixture.table, fixture.allowedColumn, fixture.deniedColumn]) expect(value).toMatch(/^[a-z][a-z0-9_]*$/);
+  const suffix = randomUUID().replaceAll('-', '');
+  const credentials = { username: `qa_writer_${suffix}`, password: `QA-${randomUUID()}` };
+  const contexts = [], resources = [], failures = [];
+  let profile, user, role, roleBody;
+  try {
+    profile = await checked(await request.post('/api/v1/admin/schemii-connections', { data: {
+      ...fixture.connection, name: `QA scoped developer ${suffix}`,
+    } }), 201);
+    expect(JSON.stringify(profile)).not.toContain(fixture.connection.password);
+    user = await checked(await request.post('/api/v1/admin/accounts', { data: {
+      ...credentials, display_name: 'QA scoped developer', is_admin: false,
+    } }), 201);
+    roleBody = { name: `QA developer ${suffix}`, capabilities: ['schemii:access'],
+      user_ids: [user.id], connections: [{ connection_id: profile.id, owner_id: profile.ownerId,
+        allow_authoring: true }], dashboards: [] };
+    role = await checked(await request.post('/api/v1/admin/roles', { data: roleBody }), 201);
+    const origins = [...new Set([new URL(baseURL).origin, 'https://omarchy.taile4f57f.ts.net'])];
+    for (const origin of origins) {
+      const { viewport, userAgent, deviceScaleFactor, isMobile, hasTouch } = testInfo.project.use;
+      const context = await browser.newContext({ viewport, userAgent, deviceScaleFactor, isMobile, hasTouch,
+        baseURL: origin, ignoreHTTPSErrors: true, extraHTTPHeaders: { Origin: origin },
+        storageState: { cookies: [], origins: [] } });
+      contexts.push(context);
+      const page = await context.newPage();
+      await page.goto('/login');
+      await page.getByRole('textbox', { name: 'Username', exact: true }).fill(credentials.username);
+      await page.getByLabel('Password', { exact: true }).fill(credentials.password);
+      await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+      await expect(page).not.toHaveURL(/\/login/);
+      const visible = await checked(await context.request.get('/api/v1/connections'));
+      expect(visible.connections.map(item => item.id)).toEqual([profile.id]);
+      expect(JSON.stringify(visible)).not.toContain(fixture.connection.password);
+      expect((await context.request.get('/api/v1/schemoo/models')).status()).toBe(403);
+      expect((await context.request.get('/api/v1/schemer/dashboards')).status()).toBe(403);
+      const importedResponse = await context.request.post('/api/v1/schemii/workspaces/postgres', {
+        data: { connectionId: profile.id, namespace: fixture.namespace },
+      });
+      expect([200, 201]).toContain(importedResponse.status());
+      const workspace = (await importedResponse.json()).workspace;
+      const owned = { context, workspace, session: null, executions: [] };
+      resources.push(owned);
+      expect(workspace.ownerId).toBe(user.id);
+      expect(workspace.connectionOwnerId).toBe(profile.ownerId);
+      await page.goto(`/?workspace=${workspace.id}&layer=sql`);
+      await expect(page.getByRole('heading', { name: 'SQL Console' })).toBeVisible();
+      const editor = page.getByRole('textbox', { name: 'Unsaved SQL draft' });
+      await editor.fill('SELECT current_user::text AS exact_database_identity;');
+      const response = page.waitForResponse(item => item.request().method() === 'POST' && /\/console\/executions$/.test(new URL(item.url()).pathname));
+      await page.getByRole('button', { name: 'Run current statement', exact: true }).click();
+      owned.executions.push((await (await response).json()).id);
+      await expect(page.locator('.sql-result-card tbody')).toContainText(fixture.connection.username);
+      const settings = await checked(await context.request.get('/api/v1/schemii/console/settings'));
+      const base = `/api/v1/schemii/workspaces/${workspace.id}/console/sessions`;
+      const session = await checked(await context.request.post(base, { data: {
+        consoleId: `con_${randomUUID().replaceAll('-', '')}`, expectedWorkspaceRevision: workspace.revision,
+        expectedSettingsRevision: settings.revision,
+      } }), 201);
+      owned.session = `${base}/${session.id}`;
+      const run = async sql => {
+        const receipt = await checked(await context.request.post(`${owned.session}/executions`, {
+          data: { sql, commitMode: 'each_statement' },
+        }), 201);
+        let execution;
+        await expect.poll(async () => {
+          execution = await checked(await context.request.get(`${owned.session}/executions/${receipt.id}`));
+          return ['succeeded', 'failed', 'cancelled', 'uncertain'].includes(execution.status);
+        }).toBe(true);
+        return execution;
+      };
+      const table = `"${fixture.namespace}"."${fixture.table}"`;
+      expect((await run(`UPDATE ${table} SET "${fixture.allowedColumn}"="${fixture.allowedColumn}" WHERE false`)).status).toBe('succeeded');
+      for (const sql of [
+        `SELECT "${fixture.deniedColumn}" FROM ${table}`,
+        `UPDATE ${table} SET "${fixture.deniedColumn}"="${fixture.deniedColumn}" WHERE false`,
+        `ALTER TABLE ${table} DROP COLUMN IF EXISTS qa_absent_${suffix}`,
+      ]) {
+        const denied = await run(sql);
+        expect(denied.status).toBe('failed');
+        expect(denied.sqlstate).toBe('42501');
+      }
+    }
+    await checked(await request.put(`/api/v1/admin/roles/${role.id}`, { data: { ...roleBody, connections: [] } }));
+    for (const { context, session, workspace } of resources) {
+      const denied = await context.request.post(`${session}/executions`, { data: { sql: 'SELECT current_user', commitMode: 'each_statement' } });
+      expect(denied.ok()).toBe(false);
+      expect((await context.request.get('/api/v1/connections')).ok()).toBe(true);
+      const visible = await checked(await context.request.get('/api/v1/connections'));
+      expect(visible.connections).toEqual([]);
+      expect((await context.request.post(`/api/v1/schemii/workspaces/${workspace.id}/console/sessions`, { data: {
+        consoleId: `con_${randomUUID().replaceAll('-', '')}`, expectedWorkspaceRevision: workspace.revision,
+        expectedSettingsRevision: 1,
+      } })).ok()).toBe(false);
+    }
+  } catch (error) { failures.push(error); }
+  finally {
+    const cleanup = async action => { try { await action(); } catch (error) { failures.push(error); } };
+    // Restore only this test's grant for owner-scoped resource deletion.
+    if (role) await cleanup(async () => checked(await request.put(`/api/v1/admin/roles/${role.id}`, { data: roleBody })));
+    for (const { context, session, workspace, executions } of resources) {
+      if (session) await cleanup(async () => {
+        const response = await context.request.delete(session);
+        expect(response.ok() || [404, 410].includes(response.status())).toBe(true);
+      });
+      for (const execution of executions) await cleanup(async () => {
+        const base = `/api/v1/common/query-executions/${execution}`;
+        const response = await context.request.get(base);
+        if ([404, 410].includes(response.status())) return;
+        const receipt = await checked(response);
+        await context.request.delete(base);
+        for (const result of receipt.results || []) await checked(await context.request.delete(`${base}/results/${result.id}`), 204);
+      });
+    }
+    const workspaces = new Map(resources.map(resource => [resource.workspace.id, resource]));
+    for (const { context, workspace } of workspaces.values()) {
+      await cleanup(async () => checked(await context.request.delete(`/api/v1/schemii/workspaces/${workspace.id}?expectedRevision=${workspace.revision}`), 204));
+    }
+    if (role) await cleanup(async () => checked(await request.delete(`/api/v1/admin/roles/${role.id}`), 204));
+    if (user) await cleanup(async () => checked(await request.patch(`/api/v1/admin/accounts/${user.id}`, { data: { disabled: true } })));
+    if (profile) await cleanup(async () => checked(await request.delete(`/api/v1/admin/schemii-connections/${profile.id}?expectedRevision=${profile.revision}`), 204));
+    for (const context of contexts) await cleanup(() => context.close());
+    if (failures.length === 1) throw failures[0];
+    if (failures.length) throw new AggregateError(failures, 'Managed developer acceptance and owned cleanup failed');
+  }
+});

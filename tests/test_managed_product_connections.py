@@ -251,3 +251,60 @@ def test_csv_export_checks_revocation_after_database_fetch_before_emitting_rows(
     assert not gateway.sessions[0].cancelled.is_set()
     service.close_result("friend", receipt.workspace_id, receipt.id, result_id)
     assert gateway.sessions[0].closed
+
+
+def test_provisioner_assigns_managed_developer_login_without_copying_credential():
+    from tests.test_console import console_client
+    from schemii.common.auth.service import COOKIE
+
+    api, _ = console_client()
+    services = api.app.state.services
+    auth = AuthService(enabled=True, setup_token="writer-setup")
+    api.app.state.auth = auth
+    services.connections.set_authority(auth)
+    # Use HTTPS origin/cookies through the real assembled administration routes.
+    from fastapi.testclient import TestClient
+    with TestClient(api.app, base_url="https://localhost:8001",
+                    headers={"Origin": "https://localhost:8001"}) as client:
+        assert client.post("/api/v1/auth/setup", json={
+            "setup_token": "writer-setup", "username": "provisioner",
+            "display_name": "Provisioner", "password": "provisioner-password",
+        }).status_code == 200
+        response = client.post("/api/v1/admin/schemii-connections", json={
+            "name": "Scoped developer", "host": "localhost", "database": "analytics",
+            "username": "scoped_writer", "password": "managed-writer-secret",
+        })
+        assert response.status_code == 201
+        profile = response.json()
+        assert profile["ownership"] == "schemii"
+        assert "managed-writer-secret" not in response.text
+        assert "password" not in profile
+        user = client.post("/api/v1/admin/accounts", json={
+            "username": "developer", "display_name": "Developer", "password": "developer-password",
+        }).json()
+        role = client.post("/api/v1/admin/roles", json={
+            "name": "Scoped developers", "capabilities": ["schemii:access"],
+            "user_ids": [user["id"]], "connections": [{
+                "owner_id": profile["ownerId"], "connection_id": profile["id"], "allow_authoring": True,
+            }],
+        })
+        assert role.status_code == 201
+        provisioner_cookie = client.cookies.get(COOKIE)
+        client.cookies.clear()
+        assert client.post("/api/v1/auth/login", json={
+            "username": "developer", "password": "developer-password",
+        }).status_code == 200
+        visible = client.get("/api/v1/connections")
+        assert [item["id"] for item in visible.json()["connections"]] == [profile["id"]]
+        assert "managed-writer-secret" not in visible.text
+        assert services.connections.list(user["id"]) == []
+        for path in ("/api/v1/admin/schemii-connections", "/api/v1/schemoo/models", "/api/v1/schemer/dashboards"):
+            assert client.get(path).status_code == 403
+        with services.connections.for_product("schemii").use(user["id"], profile["id"]) as selected:
+            assert selected.username == "scoped_writer"
+            assert selected.password.get_secret_value() == "managed-writer-secret"
+        client.cookies.clear()
+        client.cookies.set(COOKIE, provisioner_cookie)
+        assert client.delete("/api/v1/admin/roles/" + role.json()["id"]).status_code == 204
+        with pytest.raises(ConnectionNotFoundError):
+            services.connections.for_product("schemii").get(user["id"], profile["id"])

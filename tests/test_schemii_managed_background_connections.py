@@ -50,13 +50,13 @@ class CatalogGateway:
         return self.catalog
 
 
-def _application():
+def _application(*, postgres=None, username="qa_reader"):
     repository = InMemoryConnectionRepository()
     designs = InMemoryDesignRepository()
     workspaces = InMemoryWorkspaceRepository(designs=designs)
     connections = ConnectionService(repository, (workspaces,))
     ai_repository = InMemoryAiRepository()
-    postgres = CatalogGateway()
+    postgres = postgres or CatalogGateway()
     # The app must bind even prebuilt services to their owning product scope.
     migrations = MigrationService(
         repository=InMemoryMigrationRepository(designs),
@@ -74,7 +74,7 @@ def _application():
     app.state.auth = auth
     connections.set_authority(auth)
     profile = connections.create_schemii_owned(PostgresConnectionCreate(
-        name="QA reports", host="localhost", database="reports", username="qa_reader",
+        name="QA reports", host="localhost", database="reports", username=username,
         password="test-only-password"))
     with auth.store.transaction(write=True) as state:
         state["users"]["reader"] = _user("reader")
@@ -175,3 +175,75 @@ def test_ai_live_context_refresh_and_relation_tools_use_same_revocable_grant():
             "reader", workspace.id, cursor=None, page_size=20, search=None)
     with pytest.raises(ConnectionNotFoundError):
         service._zen_scope("reader", workspace.id)
+
+
+def test_managed_writer_console_and_ai_use_exact_profile_and_do_not_fall_back():
+    from tests.test_console import FakeConsoleTransaction
+    from schemii.common.postgres.console.models import (
+        ConsoleExecutionCreate, ConsoleTransactionCommand, ConsoleTransactionCreate,
+        ConsoleTransactionExecutionCreate,
+    )
+    from schemii.schemii.ai.write_actions import execute_write
+    from schemii.schemii.console.service import ConsoleServiceError
+
+    class WriterGateway(CatalogGateway):
+        def __init__(self):
+            super().__init__()
+            self.opened = []
+            self.transactions = []
+
+        def open_console_transaction(self, connection, namespace):
+            assert namespace == "qa"
+            self.opened.append((connection.owner_id, connection.username))
+            transaction = FakeConsoleTransaction()
+            self.transactions.append(transaction)
+            return transaction
+
+    gateway = WriterGateway()
+    app, auth, profile, workspace, _ = _application(
+        postgres=gateway, username="scoped_writer")
+    services = app.state.services
+    # A stronger personal identity exists, but is never selected for this workspace.
+    personal = services.connections.create("reader", PostgresConnectionCreate(
+        name="Private owner", host="localhost", database="reports",
+        username="database_owner", password="private-owner-password"))
+    console = services.console
+    transaction = console.create_transaction("reader", workspace.id, ConsoleTransactionCreate(
+        console_id="con_" + "a" * 32, expected_workspace_revision=workspace.revision,
+        expected_settings_revision=console.settings("reader").revision))
+    execution = console.reserve_transaction_execution("reader", workspace.id, transaction.id,
+        ConsoleTransactionExecutionCreate(expected_revision=transaction.revision,
+            statements=["UPDATE qa.items SET id=2 WHERE id=1"]))
+    console.run_transaction("reader", execution.id)
+    assert console.get("reader", workspace.id, execution.id).status == "succeeded"
+    current = console.get_transaction("reader", workspace.id, transaction.id)
+    assert console.commit_transaction("reader", workspace.id, transaction.id,
+        ConsoleTransactionCommand(expected_revision=current.revision)).status == "committed"
+    outcome = execute_write(services, "reader", workspace.id, workspace.revision,
+        {"statements": ["UPDATE qa.items SET id=3 WHERE id=2"]})
+    assert outcome["commitOutcome"] == "committed"
+    assert gateway.opened == [(SCHEMII_CONNECTION_OWNER_ID, "scoped_writer")] * 2
+    assert all(transaction.committed for transaction in gateway.transactions)
+    # A writer profile does not weaken the safe-read execution contract.
+    with pytest.raises(ConsoleServiceError):
+        console.reserve("reader", workspace.id, ConsoleExecutionCreate(
+            console_id="con_" + "c" * 32, expected_workspace_revision=workspace.revision,
+            expected_settings_revision=console.settings("reader").revision,
+            mode="managed_read", statements=["UPDATE qa.items SET id=4"]))
+    assert gateway.opened == [(SCHEMII_CONNECTION_OWNER_ID, "scoped_writer")] * 2
+
+    with auth.store.transaction(write=True) as state:
+        state["roles"]["readers"]["connections"] = []
+    for action in (
+        lambda: console.create_transaction("reader", workspace.id, ConsoleTransactionCreate(
+            console_id="con_" + "b" * 32, expected_workspace_revision=workspace.revision,
+            expected_settings_revision=console.settings("reader").revision)),
+        lambda: execute_write(services, "reader", workspace.id, workspace.revision,
+            {"statements": ["UPDATE qa.items SET id=4"]}),
+    ):
+        with pytest.raises(ConsoleServiceError) as revoked:
+            action()
+        assert revoked.value.code == "console_connection_missing"
+    assert gateway.opened == [(SCHEMII_CONNECTION_OWNER_ID, "scoped_writer")] * 2
+    assert services.connections.get("reader", personal.id).username == "database_owner"
+    assert profile.owner_id == SCHEMII_CONNECTION_OWNER_ID
