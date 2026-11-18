@@ -7,7 +7,7 @@ import https from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { checkHTTPS, DESKTOP_PREVIEW, disposableGuestBinding, readPrivateDeploymentJSON, startDeployment, withDisposableLauncher, stageFixtureCA } from './deployment.mjs';
+import { checkHTTPS, DESKTOP_PREVIEW, disposableGuestBinding, readPrivateDeploymentJSON, startDeployment, withDisposableLauncher, stageFixtureCA, stageBoundFixtureCA, assertNoAmbientFixtureCA } from './deployment.mjs';
 
 
 test('a wave starts product streams only after every session passes logout isolation', async () => {
@@ -327,6 +327,10 @@ test('disposable fixture CA is digest-bound, certificate-only and mounted read-o
   const binding=disposableGuestBinding({...guest,fixture});
   assert.throws(()=>disposableGuestBinding({...guest,fixture:{...fixture,hosts:['fixture.internal','peer.internal']}}),/one explicit/);
   assert.throws(()=>disposableGuestBinding({...guest,fixture:{...fixture,hosts:['qa-postgres']}}),/one explicit/);
+  for(const host of ['demo-postgres.','QA-POSTGRES.','Metadata-Postgres...','LOCALHOST.','::1','127.0.0.1']) {
+    assert.throws(()=>disposableGuestBinding({...guest,fixture:{...fixture,hosts:[host]}}),/one explicit/);
+  }
+  assert.throws(()=>assertNoAmbientFixtureCA({SCHEMII_QA_FIXTURE_CA_BINDING:'/private/binding.json'}),/not ambient/);
   const overlay=JSON.parse(await readFile(await stageFixtureCA(root,caPath,sha256),'utf8'));
   assert.deepEqual(Object.keys(overlay.services),['schemii']);
   const service=overlay.services.schemii, [mount]=service.volumes;
@@ -358,15 +362,41 @@ test('disposable fixture CA is digest-bound, certificate-only and mounted read-o
   const neverLaunch=()=>assert.fail('invalid CA reached launcher');
   await assert.rejects(withDisposableLauncher(root,{...binding,fixture:{...fixture,ca:{path:caPath,sha256:'0'.repeat(64)}}},neverLaunch,{}),/approved digest/);
   await assert.rejects(withDisposableLauncher(root,{},neverLaunch,{SCHEMII_QA_FIXTURE_CA_PATH:caPath}),/inherited launcher setting/);
+  const checkout=join(root,'checkout');
+  execFileSync('git',['init','-q',checkout]);
+  await mkdir(join(checkout,'.schemii'),{mode:0o700});
+  await writeFile(join(checkout,'.gitignore'),'.schemii/\n');
+  execFileSync('git',['-C',checkout,'add','.gitignore']);
+  execFileSync('git',['-C',checkout,'-c','user.name=QA','-c','user.email=qa@example.invalid','commit','-qm','fixture']);
+  const commit=execFileSync('git',['-C',checkout,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
+  const bootId=(await readFile('/proc/sys/kernel/random/boot_id','utf8')).trim();
+  const bound=join(root,'binding.json');
+  const env={DOCKER_HOST:'unix:///var/run/docker.sock',SCHEMII_QA_GUEST_TARGET_HOSTS:'fixture.internal',
+    SCHEMII_ALLOWED_TARGET_HOSTS:'fixture.internal',SCHEMII_TARGET_EGRESS_MODE:'external'};
+  const writeBinding = changes=>writeFile(bound,JSON.stringify({...binding,commit,bootId,...changes}),{mode:0o600});
+  for (const changes of [{commit:'f'.repeat(40)},{bootId:guest.bootId}]) {
+    await writeBinding(changes);
+    await assert.rejects(stageBoundFixtureCA(checkout,bound,env),/bound VM boot and clean checkout/);
+  }
+  await writeBinding({});
+  await assert.rejects(stageBoundFixtureCA(checkout,bound,{...env,SCHEMII_ALLOWED_TARGET_HOSTS:'foreign.internal'}),/differ from the approved/);
+  await assert.rejects(stageBoundFixtureCA(checkout,bound,{...env,DOCKER_HOST:'unix:///var/run/other.sock'}),/differ from the approved/);
+  assert.match(await stageBoundFixtureCA(checkout,bound,env),/compose\.json$/);
+
 });
 
 test('launcher rejects fixture CA from default, shared and incomplete guest launch inputs before engine preflight', () => {
-  const marker={SCHEMII_QA_FIXTURE_CA_PATH:'/private/fixture.pem',SCHEMII_QA_FIXTURE_CA_SHA256:'a'.repeat(64)};
+  const marker={SCHEMII_QA_FIXTURE_CA_BINDING:'/private/binding.json'};
   const shared={SCHEMII_QA_LEASE_MODE:'shared',SCHEMII_QA_LEASE_FD:'3',SCHEMII_QA_GATE_FD:'4',
     SCHEMII_QA_GUEST_TARGET_HOSTS:'fixture.internal',SCHEMII_TARGET_EGRESS_MODE:'external',SCHEMII_ALLOWED_TARGET_HOSTS:'fixture.internal'};
-  for(const env of [marker,{...marker,...shared},{...shared,SCHEMII_QA_LEASE_MODE:'exclusive',SCHEMII_QA_FIXTURE_CA_PATH:marker.SCHEMII_QA_FIXTURE_CA_PATH}]) {
+  for(const env of [marker,{...marker,...shared}]) {
     const result=spawnSync('bash',['./start.sh'],{env:{PATH:process.env.PATH,...env},encoding:'utf8'});
     assert.equal(result.status,1);
     assert.match(result.stderr,/fixture CA requires an exclusive disposable guest launch/);
   }
+  const raw=spawnSync('bash',['./start.sh'],{env:{PATH:process.env.PATH,
+    SCHEMII_QA_FIXTURE_CA_PATH:'/private/fixture.pem',SCHEMII_QA_FIXTURE_CA_SHA256:'a'.repeat(64)},encoding:'utf8'});
+  assert.equal(raw.status,1);
+  assert.match(raw.stderr,/requires a private disposable guest binding/);
+
 });

@@ -533,3 +533,52 @@ def test_registered_overlay_uses_approved_guest_hosts_and_preserves_desktop_unio
             assert "testing/compose.yaml" in args
             assert "testing/egress.yaml" in args
             assert hosts == (bound if guest else "desktop.internal,qa-postgres")
+
+
+def test_fixture_ca_requires_preheld_locks_and_ignores_late_compose_inputs():
+    with launcher_fixture() as (root, environment, commands, _):
+        _, proof = prepare_qa_overlay_fixture(root, environment)
+        mock_bin = Path(environment["PATH"].split(":")[0])
+        vm = mock_bin / "systemd-detect-virt"
+        vm.write_text("#!/bin/sh\nexit 0\n")
+        vm.chmod(0o755)
+        node = mock_bin / "node"
+        node.write_text(
+            "#!/bin/sh\n"
+            'mkdir -p .schemii\n'
+            'printf "services: {}\\n" > .schemii/compose.local.yaml\n'
+            'printf "SCHEMII_ALLOWED_TARGET_HOSTS=foreign.internal\\n" > .env\n'
+            'printf "%s\\n" "$PWD/.schemii/staged-ca.json"\n'
+        )
+        node.chmod(0o755)
+        binding = root.parent / "binding.json"
+        binding.write_text("{}\n")
+        env = {
+            **environment,
+            "DOCKER_HOST": "unix:///var/run/docker.sock",
+            "SCHEMII_QA_FIXTURE_CA_BINDING": str(binding),
+            "SCHEMII_QA_LEASE_FD": "3",
+            "SCHEMII_QA_GATE_FD": "4",
+            "SCHEMII_QA_LEASE_MODE": "exclusive",
+            "FAKE_QA_BUILD_PROOF": str(proof),
+        }
+        for hold in ("", "flock -x 3; flock -x 4; "):
+            result = subprocess.run(
+                ["bash", "-ec",
+                 'exec 3>"$FAKE_GIT_COMMON_DIRECTORY/qa-deployment.lock"; '
+                 'exec 4>"$FAKE_GIT_COMMON_DIRECTORY/qa-startup.lock"; '
+                 + hold + 'exec ./start.sh'],
+                cwd=root, env=env, capture_output=True, text=True, timeout=10,
+            )
+            if not hold:
+                assert result.returncode == 1
+                assert "pre-held exclusive deployment and startup locks" in result.stderr
+                assert not commands.exists()
+            else:
+                assert result.returncode == 0, result.stderr
+                assert (root / ".schemii/compose.local.yaml").is_file()
+                assert (root / ".env").is_file()
+                build = proof.read_text()
+                assert "--env-file /dev/null" in build
+                assert "--file " + str(root / ".schemii/staged-ca.json") in build
+                assert "compose.local.yaml" not in build

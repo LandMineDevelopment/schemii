@@ -181,21 +181,16 @@ startup_timing_next() {
   fi
 }
 
-# Only the disposable harness may request application-container fixture trust.
+# CA trust needs the harness's private binding and already held locks.
 if [[ -v SCHEMII_QA_FIXTURE_CA_PATH || -v SCHEMII_QA_FIXTURE_CA_SHA256 ]]; then
+  fail "fixture CA requires a private disposable guest binding"
+fi
+if [[ -v SCHEMII_QA_FIXTURE_CA_BINDING ]]; then
   [[ "$SCHEMII_LAUNCH_ACTION" == start && "${SCHEMII_QA_LEASE_MODE-}" == exclusive \
      && "${SCHEMII_QA_LEASE_FD-}" == 3 && "${SCHEMII_QA_GATE_FD-}" == 4 \
-     && -n "${SCHEMII_QA_FIXTURE_CA_PATH-}" && -n "${SCHEMII_QA_FIXTURE_CA_SHA256-}" \
-     && "${DOCKER_HOST-}" == unix:///var/run/docker.sock && ! -v DOCKER_CONTEXT \
-     && "${SCHEMII_TARGET_EGRESS_MODE-}" == external \
-     && -n "${SCHEMII_QA_GUEST_TARGET_HOSTS-}" && "$SCHEMII_QA_GUEST_TARGET_HOSTS" != *,* \
-     && "$SCHEMII_QA_GUEST_TARGET_HOSTS" == "${SCHEMII_ALLOWED_TARGET_HOSTS-}" ]] \
-    || fail "fixture CA requires an exclusive disposable guest launch for one approved host"
-  case "${SCHEMII_QA_GUEST_TARGET_HOSTS,,}" in
-    localhost|metadata-postgres|postgres|demo-postgres|qa-postgres)
-      fail "fixture CA cannot grant trust to a bundled database"
-      ;;
-  esac
+     && "$SCHEMII_QA_FIXTURE_CA_BINDING" == /* \
+     && "${DOCKER_HOST-}" == unix:///var/run/* && ! -v DOCKER_CONTEXT && ! -v COMPOSE_ENV_FILES ]] \
+    || fail "fixture CA requires an exclusive disposable guest launch"
   systemd-detect-virt --vm --quiet || fail "fixture CA requires a disposable virtual machine"
 fi
 
@@ -226,6 +221,13 @@ if [[ "$SCHEMII_LAUNCH_ACTION" != "logs" ]]; then
   fi
   SCHEMII_QA_LOCK_FILE="${SCHEMII_QA_LOCK_DIRECTORY}/qa-deployment.lock"
   SCHEMII_QA_GATE_FILE="${SCHEMII_QA_LOCK_DIRECTORY}/qa-startup.lock"
+  if [[ -v SCHEMII_QA_FIXTURE_CA_BINDING ]]; then
+    [[ "$(readlink -- "/proc/$$/fd/3" 2>/dev/null || true)" == "$SCHEMII_QA_LOCK_FILE" \
+       && "$(readlink -- "/proc/$$/fd/4" 2>/dev/null || true)" == "$SCHEMII_QA_GATE_FILE" ]] \
+      && grep -Eq '^lock:.*FLOCK +ADVISORY +WRITE[[:space:]]' "/proc/$$/fdinfo/3" \
+      && grep -Eq '^lock:.*FLOCK +ADVISORY +WRITE[[:space:]]' "/proc/$$/fdinfo/4" \
+      || fail "fixture CA requires pre-held exclusive deployment and startup locks"
+  fi
   if [[ -n "${SCHEMII_QA_GATE_FD+x}" ]]; then
     [[ "$SCHEMII_QA_GATE_FD" == "4" && "$(readlink -- /proc/$$/fd/4 2>/dev/null || true)" == "$SCHEMII_QA_GATE_FILE" ]] || fail "inherited QA startup gate does not match this repository"
     flock --nonblock 4 || fail "QA startup gate is unavailable"
@@ -390,13 +392,13 @@ if [[ -v SCHEMII_QA_GUEST_TARGET_HOSTS ]]; then
     fail "disposable QA database overlay requires exact approval of qa-postgres"
   fi
 fi
-if [[ -v SCHEMII_QA_FIXTURE_CA_PATH ]]; then
+if [[ -v SCHEMII_QA_FIXTURE_CA_BINDING ]]; then
   [[ "$qa_database_overlay" == 0 && ! -e "$ROOT_DIR/.env" && ! -L "$ROOT_DIR/.env" \
      && ! -e "$ROOT_DIR/.schemii/compose.local.yaml" && ! -L "$ROOT_DIR/.schemii/compose.local.yaml" ]] \
     || fail "fixture CA requires the stock single-target guest configuration"
   qa_fixture_ca_overlay="$(node "$ROOT_DIR/testing/harness/deployment.mjs" stage-fixture-ca "$ROOT_DIR")" \
     || fail "could not validate the approved disposable fixture CA"
-  compose_args+=(--file "$qa_fixture_ca_overlay")
+  compose_args+=(--env-file /dev/null --file "$qa_fixture_ca_overlay")
 fi
 # Normal --remove-orphans must preserve an initialized testing database.
 if (( qa_database_overlay )); then
@@ -406,7 +408,7 @@ if (( qa_database_overlay )); then
 fi
 export SCHEMII_QA_STATE_DIRECTORY
 # Optional machine-local target networks; never part of the portable base stack.
-if [[ -f "${ROOT_DIR}/.schemii/compose.local.yaml" ]]; then
+if [[ ! -v SCHEMII_QA_FIXTURE_CA_BINDING && -f "${ROOT_DIR}/.schemii/compose.local.yaml" ]]; then
   compose_args+=(--file "${ROOT_DIR}/.schemii/compose.local.yaml")
 fi
 

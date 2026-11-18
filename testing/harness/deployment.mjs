@@ -64,7 +64,11 @@ async function fixtureCertificate(file, digest) {
 export async function stageFixtureCA(root, file, digest) {
   const bytes = await fixtureCertificate(file, digest);
   const privateState = path.join(root, '.schemii');
-  if (await realpath(privateState) !== privateState) throw new Error('Fixture CA state path must be local.');
+  const stateInfo = lstatSync(privateState);
+  if (await realpath(privateState) !== privateState || !stateInfo.isDirectory() ||
+      stateInfo.uid !== process.getuid() || (stateInfo.mode & 0o022)) {
+    throw new Error('Fixture CA state path must be local and owner-controlled.');
+  }
   const dir = await mkdtemp(path.join(privateState, 'qa-fixture-ca-'));
   try {
     const certificate = path.join(dir, 'ca.pem');
@@ -81,6 +85,30 @@ export async function stageFixtureCA(root, file, digest) {
     await rm(dir, {recursive:true,force:true});
     throw error;
   }
+}
+
+function normalizeTargetHost(value) {
+  const host = value.trim().replace(/^\[(.*)\]$/, '$1');
+  return isIP(host) === 6 ? new URL(`http://[${host}]`).hostname.slice(1,-1) : host.replace(/\.+$/, '').toLowerCase();
+}
+
+export function assertNoAmbientFixtureCA(env = process.env) {
+  if (Object.keys(env).some(key => key.startsWith('SCHEMII_QA_FIXTURE_CA_'))) {
+    throw new Error('Fixture CA activation requires the private disposable guest binding, not ambient launcher settings.');
+  }
+}
+
+export async function stageBoundFixtureCA(root, file, env = process.env) {
+  if (await realpath(file) !== file) throw new Error('Fixture CA binding must be a canonical private file.');
+  const approved = disposableGuestBinding(await readPrivateDeploymentJSON(file, 4096));
+  const boot = (await readFile('/proc/sys/kernel/random/boot_id','utf8')).trim();
+  assertDisposableSource(approved, sourceIdentity(root), boot, true);
+  const fixture = approved.fixture;
+  if (!fixture?.ca || env.DOCKER_HOST !== 'unix:///var/run/docker.sock' || env.SCHEMII_QA_GUEST_TARGET_HOSTS !== fixture.hosts[0] ||
+      env.SCHEMII_ALLOWED_TARGET_HOSTS !== fixture.hosts[0] || env.SCHEMII_TARGET_EGRESS_MODE !== fixture.mode) {
+    throw new Error('Fixture CA launcher inputs differ from the approved guest binding.');
+  }
+  return stageFixtureCA(root, fixture.ca.path, fixture.ca.sha256);
 }
 
 export function disposableGuestBinding(value) {
@@ -104,7 +132,8 @@ export function disposableGuestBinding(value) {
       !path.isAbsolute(ca.path) || path.normalize(ca.path) !== ca.path ||
       typeof ca.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(ca.sha256) ||
       fixture.mode !== 'external' || fixture.hosts.length !== 1 ||
-      ['localhost','metadata-postgres','postgres','demo-postgres','qa-postgres'].includes(fixture.hosts[0].toLowerCase()))) {
+      fixture.hosts[0] !== normalizeTargetHost(fixture.hosts[0]) ||
+      ['localhost','127.0.0.1','::1','metadata-postgres','postgres','demo-postgres','qa-postgres'].includes(normalizeTargetHost(fixture.hosts[0])))) {
     throw new Error('Fixture CA binding requires one explicit external fixture host and a private CA path and digest.');
   }
   return { bootId, commit, certificateSha256,
@@ -365,6 +394,7 @@ export async function revalidateDisposableGuest(root, deployment) {
 export async function startDeployment({
   root, runDir, localURL = LOCAL_ORIGIN, previewURL = DESKTOP_PREVIEW, guestBinding,
 }) {
+  assertNoAmbientFixtureCA();
   const binding = guestBinding === undefined ? undefined : disposableGuestBinding(guestBinding);
   if (localURL !== LOCAL_ORIGIN || previewURL !== (binding ? null : DESKTOP_PREVIEW)) {
     throw new Error('QA verification requires canonical localhost and the declared preview origin.');
@@ -393,6 +423,8 @@ export async function startDeployment({
     } else {
       const launchDir = binding ? await mkdtemp(path.join(runDir, 'launcher-')) : runDir;
       const runtimePath = path.join(launchDir, 'runtime.json');
+      const caBinding = binding?.fixture?.ca ? path.join(launchDir, 'fixture-ca-binding.json') : undefined;
+      if (caBinding) await writeFile(caBinding, JSON.stringify(binding), {flag:'wx',mode:0o600});
       logPath = path.join(launchDir, 'start.log');
       const log = await open(logPath, 'w', 0o600);
       let result;
@@ -402,8 +434,7 @@ export async function startDeployment({
             cwd: root,
             env: { ...env, SCHEMII_QA_LEASE_FD: '3', SCHEMII_QA_GATE_FD: '4',
               ...(binding ? { SCHEMII_RUNTIME_RECEIPT: runtimePath } : {}),
-              ...(binding?.fixture?.ca ? { SCHEMII_QA_FIXTURE_CA_PATH: binding.fixture.ca.path,
-                SCHEMII_QA_FIXTURE_CA_SHA256: binding.fixture.ca.sha256 } : {}) },
+              ...(caBinding ? { SCHEMII_QA_FIXTURE_CA_BINDING: caBinding } : {}) },
             stdio: ['ignore', log.fd, log.fd, 3, 4],
           });
           child.once('error', reject);
@@ -444,7 +475,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const [command, root] = process.argv.slice(2);
   if (command !== 'stage-fixture-ca' || !root) process.exitCode = 2;
   else try {
-    console.log(await stageFixtureCA(root, process.env.SCHEMII_QA_FIXTURE_CA_PATH, process.env.SCHEMII_QA_FIXTURE_CA_SHA256));
+    console.log(await stageBoundFixtureCA(root, process.env.SCHEMII_QA_FIXTURE_CA_BINDING));
   } catch {
     process.stderr.write('Disposable fixture CA validation or staging failed.\n');
     process.exitCode = 1;

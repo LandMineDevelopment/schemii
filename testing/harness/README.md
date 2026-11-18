@@ -234,7 +234,10 @@ For one approved private PostgreSQL endpoint that uses a fixture CA, set
 add `fixture.ca` with an absolute private PEM `path` and the file's lowercase
 `sha256`. Use a mode-0600 file containing only a currently valid self-signed CA
 certificate. The launcher verifies the file again under its exclusive guest
-lease and snapshots it to a read-only application-container mount for libpq.
+lease, rechecks the binding's boot and clean source, and snapshots the CA to a
+read-only application-container mount for libpq. CA launch omits machine-local
+Compose overrides and disables automatic `.env` loading. Use the canonical
+lowercase host spelling without trailing dots (or a canonical IP address).
 The CA option is incompatible with the registered QA database overlay and
 shared deployment reuse. Continue to use a managed profile with
 `verify-full`, matching the exact fixture server name or IP in its certificate.
