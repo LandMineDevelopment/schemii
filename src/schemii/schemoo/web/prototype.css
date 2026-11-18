@@ -32,6 +32,26 @@ h1 { margin: 4px 0 0; font-size: 19px; } h2 { margin: 12px 0; font-size: 15px; }
 .model-list-row .model-option { min-width: 0; overflow-wrap: anywhere; }
 .model-list-row .model-option-delete { width: 44px; height: 44px; min-height: 44px; color: #f08088; }
 .model-create-form { display: grid; gap: 12px; margin-top: 20px; }
+.source-selection { display: grid; gap: 10px; min-width: 0; }
+.source-selection h4, .source-selection p { margin: 0; }
+.source-selection-list { max-height: 38dvh; overflow: auto; border: 1px solid var(--line-strong); border-radius: 7px; }
+.source-selection-row { padding: 12px; border-bottom: 1px solid var(--line); }
+.source-selection-row:last-child { border-bottom: 0; }
+.source-selection-source { display: flex; align-items: center; gap: 10px; min-height: 32px; cursor: pointer; }
+.source-selection-source strong { flex: 1; overflow-wrap: anywhere; min-width: 0; }
+.source-selection-source small { color: var(--muted); white-space: nowrap; }
+.source-selection input[type=checkbox] { width: 18px; height: 18px; flex: none; }
+.source-selection input[type=search] { width: 100%; min-width: 0; }
+.source-selection details { margin-top: 8px; }
+.source-selection details[hidden] { display: none; }
+.source-selection summary { cursor: pointer; padding: 8px 0; font-size: 12px; }
+.source-selection-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.source-selection-fields { max-height: 26dvh; overflow: auto; }
+.source-selection-fields label { display: flex; align-items: center; gap: 10px; min-height: 36px; font-size: 12px; cursor: pointer; }
+.source-selection-fields label span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.source-selection-fields label small { color: var(--muted); }
+.source-selection-dialog { width: min(620px, 94vw); max-height: 90dvh; overflow: auto; }
+.source-selection-dialog form { display: grid; gap: 12px; }
 @media (max-width: 650px) { .topbar { flex-wrap: wrap; gap: 8px; padding: 8px 12px; } .topbar #target { order: 3; width: 100%; } #model-name-heading { width: 45vw; } .top-actions { gap: 2px; } }
 .ui-button { font-size: 12px; white-space: nowrap; }
 .ui-button.primary { background: var(--purple); border-color: var(--purple); color: #160e2a; }

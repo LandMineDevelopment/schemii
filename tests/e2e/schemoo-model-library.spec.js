@@ -203,3 +203,62 @@ test("dependency review can be cancelled while loading without reopening the dia
   await expect(dialog).toHaveCount(0); await expect(remove).toBeFocused();
   expect(deletions).toEqual([]);
 });
+
+test("mounted creation selects fields from 101 real tables and a 1,001-field source, then reopens without expansion", async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const { ownedSchemooSource } = await import("./helpers/schemoo-source-fixtures.js");
+  const { chooseModelOption } = await import("./helpers/schemoo-select.js");
+  const source = await ownedSchemooSource(request);
+  try {
+    for (let start = 0; start < 100; start += 10) {
+      await source.sql(Array.from({ length: 10 }, (_, offset) => `CREATE TABLE "${source.namespace}".t${String(start + offset).padStart(3, "0")} (id integer PRIMARY KEY)`).join(";"));
+    }
+    await source.sql(`CREATE TABLE "${source.namespace}".wide (id integer PRIMARY KEY, ${Array.from({ length: 1000 }, (_, i) => `f${String(i).padStart(4, "0")} integer`).join(", ")})`);
+    const catalog = await source.catalog(); expect(catalog.tables).toHaveLength(101);
+    expect(catalog.tables.find(table => table.name === "wide").columns).toHaveLength(1001);
+    await page.goto("/schemoo");
+    const library = page.locator("#model-library");
+    await expect(library).toBeVisible(); await library.getByRole("textbox", { name: "Model name", exact: true }).fill(source.name("large"));
+    await chooseModelOption(page, "Source connection", `${source.connection.name} · ${source.connection.database} · ${source.connection.username}`);
+    await chooseModelOption(page, "Source schema", source.namespace);
+    const create = library.getByRole("button", { name: "Create model", exact: true });
+    await expect(create).toBeDisabled();
+    const picker = library.getByRole("region", { name: "Model sources and fields" });
+    await expect(picker.getByRole("status")).toContainText("0 of 101 sources");
+    await expect(picker.locator(".source-selection-row")).toHaveCount(100);
+    await picker.getByRole("searchbox", { name: "Search sources", exact: true }).fill("wide");
+    const include = picker.getByRole("checkbox", { name: "Include source wide", exact: true });
+    await include.focus(); await include.press("Space"); await expect(include).toBeChecked();
+    await picker.getByRole("button", { name: "Select all fields in wide", exact: true }).click();
+    await expect(create).toBeDisabled(); await expect(picker.getByRole("alert")).toContainText("at most 1,000 exposed fields");
+    await expect(picker.locator(".source-selection-fields label")).toHaveCount(100);
+    await picker.getByRole("button", { name: "Clear fields in wide", exact: true }).click();
+    await picker.getByRole("searchbox", { name: "Search fields in wide", exact: true }).fill("f0999");
+    const field = picker.getByRole("checkbox", { name: "Expose wide.f0999", exact: true });
+    await field.focus(); await field.press("Space"); await expect(field).toBeChecked(); await expect(create).toBeEnabled();
+    const bounds = await library.boundingBox(), viewport = page.viewportSize();
+    expect(bounds.x).toBeGreaterThanOrEqual(0); expect(bounds.x + bounds.width).toBeLessThanOrEqual(viewport.width);
+    expect(bounds.y).toBeGreaterThanOrEqual(0); expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height);
+    await page.screenshot({ path: `artifacts/model-source-selection-${test.info().project.name}.png` });
+    const posted = page.waitForResponse(response => response.url().endsWith("/api/v1/schemoo/models") && response.request().method() === "POST");
+    await create.click(); const response = await posted; expect(response.status()).toBe(201);
+    const model = await response.json(); source.trackModel(model);
+    expect(model.definition.nodes).toHaveLength(1); expect(model.definition.exposedFields.map(field => field.column)).toEqual(["f0999"]);
+    expect(model.definition.sourceContract.scope).toBe("model"); expect(model.definition.sourceContract.tables).toHaveLength(1);
+    expect(model.definition.sourceContract.tables[0].columns.map(column => column.name)).toEqual(["id", "f0999"]);
+    await expect(library).toBeHidden(); await expect(page.locator(".sc-node")).toHaveCount(1);
+    await page.reload(); await expect(page.locator(".sc-node")).toHaveCount(1);
+    await expect(page.locator("#draft-status")).toContainText("Saved");
+    // New sources are added only through the explicit bounded picker.
+    await page.getByRole("button", { name: "Add sources and fields", exact: true }).click();
+    const add = page.getByRole("dialog", { name: "Add model sources and fields", exact: true });
+    await add.getByRole("searchbox", { name: "Search sources", exact: true }).fill("t099");
+    await add.getByRole("checkbox", { name: "Include source t099", exact: true }).check();
+    await add.getByRole("button", { name: "Add selection", exact: true }).click();
+    await expect(page.locator(".sc-node")).toHaveCount(2);
+    await page.getByRole("button", { name: "Save model", exact: true }).click(); await expect(page.locator("#draft-status")).toContainText("Saved");
+    await page.reload(); await expect(page.locator(".sc-node")).toHaveCount(2);
+    const saved = await (await request.get(`/api/v1/schemoo/models/${model.id}`)).json();
+    expect(saved.definition.sourceContract.tables).toHaveLength(2);
+  } finally { await source.cleanup(); }
+});

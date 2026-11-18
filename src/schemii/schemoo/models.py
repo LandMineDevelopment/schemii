@@ -46,6 +46,7 @@ class SourceTableContract(Contract):
     name: Identifier
     columns: list[SourceColumnContract] = Field(default_factory=list, max_length=1000)
     primaryKey: list[Identifier] = Field(default_factory=list, max_length=32)
+    uniqueKeys: list[Annotated[list[Identifier], Field(max_length=32)]] | None = Field(default=None, max_length=1000)
 
 
 class SourceRelationshipContract(Contract):
@@ -57,9 +58,31 @@ class SourceRelationshipContract(Contract):
     targetColumn: Identifier
 
 
+class ParameterDomainContract(Contract):
+    scopeId: Identifier
+    alternativeId: Identifier
+    inputId: Identifier
+    table: Identifier
+    column: Identifier
+    labelColumn: Identifier
+    relationshipId: Identifier | None = None
+    namespace: Identifier | None = None
+
+
 class SourceContract(Contract):
+    # Documents written before scoped contracts tracked the complete catalog.
+    # New writes explicitly identify model dependencies; never infer scope from size.
+    scope: Literal["catalog", "model"] = "catalog"
     tables: list[SourceTableContract] = Field(default_factory=list, max_length=100)
     relationships: list[SourceRelationshipContract] = Field(default_factory=list, max_length=200)
+    parameterDomains: list[ParameterDomainContract] = Field(default_factory=list, max_length=3840)
+
+    @model_validator(mode="after")
+    def unique_parameter_domains(self):
+        keys = [(item.scopeId, item.alternativeId, item.inputId) for item in self.parameterDomains]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Saved parameter lookup bindings must be unique per scope, option and input.")
+        return self
 
 
 class DomainValues(Contract):

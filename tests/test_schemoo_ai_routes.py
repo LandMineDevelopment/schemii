@@ -130,6 +130,17 @@ def test_first_model_chat_adopts_created_model_and_keeps_history(setup):
     adopted = api.get(url).json()
     assert adopted["status"] == "idle" and adopted["modelId"].startswith("model_")
     assert adopted["activity"][0]["operation"] == "create_model"
+    created = api.get(f"/api/v1/schemoo/models/{adopted['modelId']}").json()
+    assert created["definition"]["nodes"] == []
+    assert created["definition"]["sourceContract"] == {"scope": "model", "tables": [], "relationships": [], "parameterDomains": []}
+    filled = api.patch(f"/api/v1/schemoo/models/{adopted['modelId']}", json={
+        "expectedRevision": created["revision"], "root": "people",
+        "nodes": {"upsert": [{"id": "people", "table": "people", "label": "People"}]},
+        "expose": [{"table": "people", "column": "name"}],
+    })
+    assert filled.status_code == 200, filled.text
+    assert filled.json()["definition"]["sourceContract"]["scope"] == "model"
+    assert [table["name"] for table in filled.json()["definition"]["sourceContract"]["tables"]] == ["people"]
     assert api.get(f"/api/v1/schemoo/ai/chats?model_id={adopted['modelId']}").json()["chats"][0]["id"] == chat["id"]
     followup = api.post(url + "/messages", json={"text": "Inspect it",
         "expectedRevision": adopted["revision"]})

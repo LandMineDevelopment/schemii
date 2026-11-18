@@ -32,26 +32,26 @@ test("moved columns disappear from physical and alias outputs without changing r
   const once=structuredClone(draft);reconcileSourceCatalog(draft,current);assert.deepEqual(draft,once);
 });
 
-test("catalog reconciliation adds tables, columns and relationships without enabling paths",()=>{
+test("catalog reconciliation offers omitted tables without adding objects or expanding contracts",()=>{
   const original=catalog(), draft={root:"parent",nodes:[{id:"parent",table:"parent",label:"Parent"}],edges:[],scopes:[],sourceContract:catalogContract({tables:[original.tables[0]],relationships:[]})};
   const result=reconcileSourceCatalog(draft,original);
   assert.deepEqual(result.tables,["child"]);
-  assert.deepEqual(result.relationships,["fk"]);
-  assert.equal(draft.nodes.find(node=>node.id==="child").x,500);
-  assert.deepEqual(draft.edges,[{id:"source_fk_fk",relationshipId:"fk",source:"child",target:"parent",enabled:false}]);
-  assert.deepEqual(draft.sourceContract,catalogContract(original));
+  assert.deepEqual(result.relationships,[]);
+  assert.deepEqual(draft.nodes.map(node=>node.id),["parent"]);
+  assert.deepEqual(draft.edges,[]);
+  assert.deepEqual(draft.sourceContract,catalogContract({tables:[original.tables[0]],relationships:[]}));
 });
 
 test("catalog reconciliation preserves a model that intentionally omits an existing source table",()=>{
   const current=catalog();
   const draft={root:"parent",nodes:[{id:"parent",table:"parent",label:"Parent"}],edges:[],scopes:[],sourceContract:catalogContract(current)};
   const result=reconcileSourceCatalog(draft,current);
-  assert.deepEqual(result.tables,[]);
+  assert.deepEqual(result.tables,["child"]);
   assert.deepEqual(draft.nodes.map(node=>node.id),["parent"]);
   assert.deepEqual(draft.edges,[]);
 });
 
-test("new columns remain an additive contract update and existing relationship assumptions are preserved",()=>{
+test("new columns are offered and existing relationship assumptions are preserved",()=>{
   const current=catalog(), prior=catalog();
   prior.tables[1].columns.pop();
   prior.relationships[0].sourceColumn="old_parent_id";
@@ -79,4 +79,18 @@ test("table drift acknowledgement changes only the reviewed assumption",()=>{
   assert.equal(draft.sourceContract.tables[1].columns[1].dataType,"text");
   assert.equal(acceptSourceIssue(draft,current,{kind:"changed_column",table:"child",column:"parent_id",acknowledge:true}),true);
   assert.equal(draft.sourceContract.tables[1].columns[1].dataType,"uuid");
+});
+
+
+test("legacy unmarked contracts remain reviewable without guessing source scope or expanding",()=>{
+  const current=catalog(),baseline=catalogContract({tables:[current.tables[0]],relationships:[]});delete baseline.scope;
+  const draft={root:"parent",nodes:[{id:"parent",table:"parent"}],edges:[],sourceContract:baseline};
+  const before=structuredClone(draft);reconcileSourceCatalog(draft,current);assert.deepEqual(draft,before);
+});
+
+test("reopening new sources and relationships cannot push a model beyond its bounds",()=>{
+  const current=catalog();current.relationships.push(...Array.from({length:201},(_,i)=>relationship(`new${i}`)));
+  const draft={nodes:current.tables.map(table=>({id:table.name,table:table.name})),edges:[],sourceContract:catalogContract(catalog(),"model")};
+  const before=structuredClone(draft);const result=reconcileSourceCatalog(draft,current);
+  assert.equal(result.relationships.length,202);assert.deepEqual(draft,before);
 });
