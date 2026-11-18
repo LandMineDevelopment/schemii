@@ -1,18 +1,19 @@
 import { createHash, X509Certificate } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { lstatSync, readFileSync, readlinkSync, statSync, closeSync, constants } from 'node:fs';
 import https from 'node:https';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { writeJSON } from './store.mjs';
 import { processIdentity, cgroupIdentity } from '../load/runtime.mjs';
 
 export const LOCAL_ORIGIN = 'https://localhost:8001';
 export const DESKTOP_PREVIEW = 'https://omarchy.taile4f57f.ts.net';
 
-export async function readPrivateDeploymentJSON(file, maximum = 1024 * 1024) {
+async function readPrivateDeploymentFile(file, maximum) {
   const acceptable = stat => stat.isFile() && stat.uid === process.getuid() &&
     !(stat.mode & 0o077) && stat.size <= maximum;
   const entry = lstatSync(file);
@@ -31,8 +32,55 @@ export async function readPrivateDeploymentJSON(file, maximum = 1024 * 1024) {
       offset += bytesRead;
     }
     if (offset > maximum) throw new Error('Deployment input exceeds its size limit.');
-    return JSON.parse(data.toString('utf8', 0, offset));
+    return data.subarray(0, offset);
   } finally { await descriptor.close(); }
+}
+
+export async function readPrivateDeploymentJSON(file, maximum = 1024 * 1024) {
+  return JSON.parse((await readPrivateDeploymentFile(file, maximum)).toString('utf8'));
+}
+
+async function fixtureCertificate(file, digest) {
+  if (!path.isAbsolute(file) || await realpath(file) !== file || !/^[a-f0-9]{64}$/.test(digest)) {
+    throw new Error('Fixture CA requires a canonical private path and SHA-256 digest.');
+  }
+  const bytes = await readPrivateDeploymentFile(file, 16 * 1024);
+  if (createHash('sha256').update(bytes).digest('hex') !== digest) {
+    throw new Error('Fixture CA does not match the approved digest.');
+  }
+  const pem = bytes.toString('ascii');
+  if (!/^-----BEGIN CERTIFICATE-----\r?\n(?:[A-Za-z0-9+/=]+\r?\n)+-----END CERTIFICATE-----\r?\n?$/.test(pem)) {
+    throw new Error('Fixture CA must contain exactly one PEM certificate and no other material.');
+  }
+  const cert = new X509Certificate(bytes);
+  const now = Date.now();
+  if (!cert.ca || !cert.checkIssued(cert) || !cert.verify(cert.publicKey) ||
+      !(Date.parse(cert.validFrom) <= now && now < Date.parse(cert.validTo))) {
+    throw new Error('Fixture CA must be a currently valid self-signed CA.');
+  }
+  return bytes;
+}
+
+export async function stageFixtureCA(root, file, digest) {
+  const bytes = await fixtureCertificate(file, digest);
+  const privateState = path.join(root, '.schemii');
+  if (await realpath(privateState) !== privateState) throw new Error('Fixture CA state path must be local.');
+  const dir = await mkdtemp(path.join(privateState, 'qa-fixture-ca-'));
+  try {
+    const certificate = path.join(dir, 'ca.pem');
+    await writeFile(certificate, bytes, {flag:'wx', mode:0o400});
+    await chmod(certificate, 0o444);
+    const overlay = path.join(dir, 'compose.json');
+    const target = '/run/schemii-qa/fixture-ca.pem';
+    await writeFile(overlay, JSON.stringify({services:{schemii:{
+      environment:{PGSSLROOTCERT:target},
+      volumes:[{type:'bind',source:certificate.replaceAll('$', () => '$$'),target,read_only:true,bind:{create_host_path:false}}],
+    }}}), {flag:'wx', mode:0o600});
+    return overlay;
+  } catch (error) {
+    await rm(dir, {recursive:true,force:true});
+    throw error;
+  }
 }
 
 export function disposableGuestBinding(value) {
@@ -43,7 +91,7 @@ export function disposableGuestBinding(value) {
       typeof certificateSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(certificateSha256)) {
     throw new Error('Disposable guest binding requires a VM boot ID, clean commit and exact certificate SHA-256.');
   }
-  if (fixture !== undefined && (!fixture || Object.keys(fixture).length !== 2 ||
+  if (fixture !== undefined && (!fixture || Object.keys(fixture).length !== (fixture.ca === undefined ? 2 : 3) ||
       !['internal-only', 'external'].includes(fixture.mode) ||
       !Array.isArray(fixture.hosts) || !fixture.hosts.length ||
       !fixture.hosts.every(host => typeof host === 'string' && host.length <= 253 &&
@@ -51,8 +99,17 @@ export function disposableGuestBinding(value) {
       fixture.hosts.join(',').length > 2048)) {
     throw new Error('Disposable QA fixture binding requires a mode and a bounded list of exact target hosts.');
   }
+  const ca = fixture?.ca;
+  if (ca !== undefined && (!ca || Object.keys(ca).length !== 2 || typeof ca.path !== 'string' ||
+      !path.isAbsolute(ca.path) || path.normalize(ca.path) !== ca.path ||
+      typeof ca.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(ca.sha256) ||
+      fixture.mode !== 'external' || fixture.hosts.length !== 1 ||
+      ['localhost','metadata-postgres','postgres','demo-postgres','qa-postgres'].includes(fixture.hosts[0].toLowerCase()))) {
+    throw new Error('Fixture CA binding requires one explicit external fixture host and a private CA path and digest.');
+  }
   return { bootId, commit, certificateSha256,
-    ...(fixture === undefined ? {} : {fixture:{mode:fixture.mode, hosts:[...fixture.hosts]}}) };
+    ...(fixture === undefined ? {} : {fixture:{mode:fixture.mode, hosts:[...fixture.hosts],
+      ...(ca ? {ca:{path:ca.path,sha256:ca.sha256}} : {})}}) };
 }
 
 export function assertDisposableSource(binding, identity, bootId, virtualMachine) {
@@ -98,6 +155,8 @@ function checkDisposableConfiguration(root, env, binding) {
 
 export async function withDisposableLauncher(root, binding, action, ambient = process.env) {
   checkDisposableConfiguration(root, ambient, binding);
+  const ca = binding.fixture?.ca;
+  if (ca) await fixtureCertificate(ca.path, ca.sha256);
   const config = await mkdtemp(path.join(tmpdir(), 'schemii-qa-docker-'));
   try {
     const env = {};
@@ -320,6 +379,7 @@ export async function startDeployment({
     const ledgerPath = path.join(path.dirname(lockPath), 'qa-deployment.json');
     const reused = process.env.SCHEMII_QA_LEASE_MODE === 'shared';
     if (reused) {
+      if (binding?.fixture?.ca) throw new Error('Fixture CA requires an exclusive guest deployment; shared reuse is unsupported.');
       let prior;
       try { prior = await readPrivateDeploymentJSON(ledgerPath); }
       catch { throw new Error('The active deployment has no readable QA identity; stop its owner and prepare again.'); }
@@ -341,7 +401,9 @@ export async function startDeployment({
           const child = spawn('./start.sh', [], {
             cwd: root,
             env: { ...env, SCHEMII_QA_LEASE_FD: '3', SCHEMII_QA_GATE_FD: '4',
-              ...(binding ? { SCHEMII_RUNTIME_RECEIPT: runtimePath } : {}) },
+              ...(binding ? { SCHEMII_RUNTIME_RECEIPT: runtimePath } : {}),
+              ...(binding?.fixture?.ca ? { SCHEMII_QA_FIXTURE_CA_PATH: binding.fixture.ca.path,
+                SCHEMII_QA_FIXTURE_CA_SHA256: binding.fixture.ca.sha256 } : {}) },
             stdio: ['ignore', log.fd, log.fd, 3, 4],
           });
           child.once('error', reject);
@@ -374,5 +436,17 @@ export async function startDeployment({
   } finally {
     try { execFileSync('flock', ['-u', '4'], { stdio: ['ignore','pipe','pipe','ignore',4] }); }
     finally { closeSync(4); }
+  }
+}
+
+// Called only by the canonical launcher, after validating its inherited lease.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const [command, root] = process.argv.slice(2);
+  if (command !== 'stage-fixture-ca' || !root) process.exitCode = 2;
+  else try {
+    console.log(await stageFixtureCA(root, process.env.SCHEMII_QA_FIXTURE_CA_PATH, process.env.SCHEMII_QA_FIXTURE_CA_SHA256));
+  } catch {
+    process.stderr.write('Disposable fixture CA validation or staging failed.\n');
+    process.exitCode = 1;
   }
 }

@@ -229,6 +229,18 @@ match the binding exactly. If the standard QA database registry exists at
 lock, checks the binding before mutation, and uses that same decision and the
 approved host list throughout startup.
 
+For one approved private PostgreSQL endpoint that uses a fixture CA, set
+`fixture.mode` to `external`, list only that endpoint in `fixture.hosts`, and
+add `fixture.ca` with an absolute private PEM `path` and the file's lowercase
+`sha256`. Use a mode-0600 file containing only a currently valid self-signed CA
+certificate. The launcher verifies the file again under its exclusive guest
+lease and snapshots it to a read-only application-container mount for libpq.
+The CA option is incompatible with the registered QA database overlay and
+shared deployment reuse. Continue to use a managed profile with
+`verify-full`, matching the exact fixture server name or IP in its certificate.
+The guest's system and browser trust are unchanged. Keep the staged CA
+snapshot with the disposable guest disk until the application is torn down.
+
 For independent review in the guest, pass `--reviewer-account ACCOUNT` and
 `--runtime-slots N` along with the binding and both accounts. The account must
 be separately selected and claimable. Reviewed guest runs require one tester

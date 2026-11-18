@@ -181,6 +181,24 @@ startup_timing_next() {
   fi
 }
 
+# Only the disposable harness may request application-container fixture trust.
+if [[ -v SCHEMII_QA_FIXTURE_CA_PATH || -v SCHEMII_QA_FIXTURE_CA_SHA256 ]]; then
+  [[ "$SCHEMII_LAUNCH_ACTION" == start && "${SCHEMII_QA_LEASE_MODE-}" == exclusive \
+     && "${SCHEMII_QA_LEASE_FD-}" == 3 && "${SCHEMII_QA_GATE_FD-}" == 4 \
+     && -n "${SCHEMII_QA_FIXTURE_CA_PATH-}" && -n "${SCHEMII_QA_FIXTURE_CA_SHA256-}" \
+     && "${DOCKER_HOST-}" == unix:///var/run/docker.sock && ! -v DOCKER_CONTEXT \
+     && "${SCHEMII_TARGET_EGRESS_MODE-}" == external \
+     && -n "${SCHEMII_QA_GUEST_TARGET_HOSTS-}" && "$SCHEMII_QA_GUEST_TARGET_HOSTS" != *,* \
+     && "$SCHEMII_QA_GUEST_TARGET_HOSTS" == "${SCHEMII_ALLOWED_TARGET_HOSTS-}" ]] \
+    || fail "fixture CA requires an exclusive disposable guest launch for one approved host"
+  case "${SCHEMII_QA_GUEST_TARGET_HOSTS,,}" in
+    localhost|metadata-postgres|postgres|demo-postgres|qa-postgres)
+      fail "fixture CA cannot grant trust to a bundled database"
+      ;;
+  esac
+  systemd-detect-virt --vm --quiet || fail "fixture CA requires a disposable virtual machine"
+fi
+
 # A QA coordinator holds this lease for its whole run, including manual testing.
 # Resolve through Git so all linked worktrees protect the same deployment.
 # FD 3 is deliberately inherited across the launcher's stale-group re-exec.
@@ -371,6 +389,14 @@ if [[ -v SCHEMII_QA_GUEST_TARGET_HOSTS ]]; then
   if (( qa_database_overlay )) && [[ ",$SCHEMII_QA_GUEST_TARGET_HOSTS," != *,qa-postgres,* ]]; then
     fail "disposable QA database overlay requires exact approval of qa-postgres"
   fi
+fi
+if [[ -v SCHEMII_QA_FIXTURE_CA_PATH ]]; then
+  [[ "$qa_database_overlay" == 0 && ! -e "$ROOT_DIR/.env" && ! -L "$ROOT_DIR/.env" \
+     && ! -e "$ROOT_DIR/.schemii/compose.local.yaml" && ! -L "$ROOT_DIR/.schemii/compose.local.yaml" ]] \
+    || fail "fixture CA requires the stock single-target guest configuration"
+  qa_fixture_ca_overlay="$(node "$ROOT_DIR/testing/harness/deployment.mjs" stage-fixture-ca "$ROOT_DIR")" \
+    || fail "could not validate the approved disposable fixture CA"
+  compose_args+=(--file "$qa_fixture_ca_overlay")
 fi
 # Normal --remove-orphans must preserve an initialized testing database.
 if (( qa_database_overlay )); then

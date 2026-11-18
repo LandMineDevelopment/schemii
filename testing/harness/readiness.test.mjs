@@ -6,7 +6,8 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile, symlink } from 
 import https from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkHTTPS, DESKTOP_PREVIEW, disposableGuestBinding, readPrivateDeploymentJSON, startDeployment, withDisposableLauncher } from './deployment.mjs';
+import { createHash } from 'node:crypto';
+import { checkHTTPS, DESKTOP_PREVIEW, disposableGuestBinding, readPrivateDeploymentJSON, startDeployment, withDisposableLauncher, stageFixtureCA } from './deployment.mjs';
 
 
 test('a wave starts product streams only after every session passes logout isolation', async () => {
@@ -309,4 +310,63 @@ test('registered QA overlay may only append a host already approved in the guest
     assert.equal(env.SCHEMII_QA_GUEST_TARGET_HOSTS,accepted.fixture.hosts.join(','));
     assert.equal(env.SCHEMII_ALLOWED_TARGET_HOSTS,env.SCHEMII_QA_GUEST_TARGET_HOSTS);
   },{});
+});
+
+test('disposable fixture CA is digest-bound, certificate-only and mounted read-only for the app', async t => {
+  const root=await mkdtemp(join(tmpdir(),'qa-fixture-ca-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,'.schemii'),{mode:0o700});
+  const caPath=join(root,'root.pem'), key=join(root,'private.pem');
+  execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',caPath,
+    '-days','1','-subj','/CN=Disposable QA test CA','-addext','basicConstraints=critical,CA:TRUE'],{stdio:'ignore'});
+  execFileSync('chmod',['600',caPath]);
+  const digest=async file=>createHash('sha256').update(await readFile(file)).digest('hex');
+  const sha256=await digest(caPath);
+  const guest={bootId:'12345678-1234-1234-1234-123456789012',commit:'a'.repeat(40),certificateSha256:'b'.repeat(64)};
+  const fixture={mode:'external',hosts:['fixture.internal'],ca:{path:caPath,sha256}};
+  const binding=disposableGuestBinding({...guest,fixture});
+  assert.throws(()=>disposableGuestBinding({...guest,fixture:{...fixture,hosts:['fixture.internal','peer.internal']}}),/one explicit/);
+  assert.throws(()=>disposableGuestBinding({...guest,fixture:{...fixture,hosts:['qa-postgres']}}),/one explicit/);
+  const overlay=JSON.parse(await readFile(await stageFixtureCA(root,caPath,sha256),'utf8'));
+  assert.deepEqual(Object.keys(overlay.services),['schemii']);
+  const service=overlay.services.schemii, [mount]=service.volumes;
+  assert.equal(service.environment.PGSSLROOTCERT,mount.target);
+  assert.equal(mount.read_only,true);
+  assert.equal(mount.bind.create_host_path,false);
+  assert.equal((await stat(mount.source)).mode & 0o777,0o444);
+  assert.equal(await digest(mount.source),sha256);
+  await assert.rejects(stageFixtureCA(root,caPath,'0'.repeat(64)),/approved digest/);
+  await assert.rejects(stageFixtureCA(root,key,await digest(key)),/no other material/);
+  await assert.rejects(stageFixtureCA(root,join(root,'absent.pem'),sha256),{code:'ENOENT'});
+  const link=join(root,'link.pem'), oversized=join(root,'oversized.pem'), leaf=join(root,'leaf.pem');
+  await symlink(caPath,link);
+  await assert.rejects(stageFixtureCA(root,link,sha256),/canonical private path/);
+  await writeFile(oversized,Buffer.alloc(17*1024),{mode:0o600});
+  await assert.rejects(stageFixtureCA(root,oversized,await digest(oversized)),/bounded private/);
+  execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',join(root,'leaf.key'),'-out',leaf,
+    '-days','1','-subj','/CN=fixture.internal','-addext','basicConstraints=critical,CA:FALSE'],{stdio:'ignore'});
+  execFileSync('chmod',['600',leaf]);
+  await assert.rejects(stageFixtureCA(root,leaf,await digest(leaf)),/self-signed CA/);
+  const csr=join(root,'fixture.csr'), server=join(root,'fixture.pem');
+  execFileSync('openssl',['req','-new','-key',join(root,'leaf.key'),'-out',csr,'-subj','/CN=fixture.internal'],{stdio:'ignore'});
+  execFileSync('openssl',['x509','-req','-in',csr,'-CA',caPath,'-CAkey',key,'-CAcreateserial',
+    '-days','1','-out',server],{stdio:'ignore'});
+  const verify=(trust,host)=>spawnSync('openssl',['verify','-CAfile',trust,'-verify_hostname',host,server],{encoding:'utf8'});
+  assert.equal(verify(mount.source,'fixture.internal').status,0);
+  assert.notEqual(verify(mount.source,'foreign.internal').status,0);
+  assert.notEqual(verify(leaf,'fixture.internal').status,0);
+  const neverLaunch=()=>assert.fail('invalid CA reached launcher');
+  await assert.rejects(withDisposableLauncher(root,{...binding,fixture:{...fixture,ca:{path:caPath,sha256:'0'.repeat(64)}}},neverLaunch,{}),/approved digest/);
+  await assert.rejects(withDisposableLauncher(root,{},neverLaunch,{SCHEMII_QA_FIXTURE_CA_PATH:caPath}),/inherited launcher setting/);
+});
+
+test('launcher rejects fixture CA from default, shared and incomplete guest launch inputs before engine preflight', () => {
+  const marker={SCHEMII_QA_FIXTURE_CA_PATH:'/private/fixture.pem',SCHEMII_QA_FIXTURE_CA_SHA256:'a'.repeat(64)};
+  const shared={SCHEMII_QA_LEASE_MODE:'shared',SCHEMII_QA_LEASE_FD:'3',SCHEMII_QA_GATE_FD:'4',
+    SCHEMII_QA_GUEST_TARGET_HOSTS:'fixture.internal',SCHEMII_TARGET_EGRESS_MODE:'external',SCHEMII_ALLOWED_TARGET_HOSTS:'fixture.internal'};
+  for(const env of [marker,{...marker,...shared},{...shared,SCHEMII_QA_LEASE_MODE:'exclusive',SCHEMII_QA_FIXTURE_CA_PATH:marker.SCHEMII_QA_FIXTURE_CA_PATH}]) {
+    const result=spawnSync('bash',['./start.sh'],{env:{PATH:process.env.PATH,...env},encoding:'utf8'});
+    assert.equal(result.status,1);
+    assert.match(result.stderr,/fixture CA requires an exclusive disposable guest launch/);
+  }
 });
