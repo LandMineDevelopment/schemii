@@ -349,6 +349,72 @@ def flock(root, name):
         yield
 
 
+def advance_planned_base(root):
+    commit = git(root, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "advance base")
+    git(root, "update-ref", "refs/heads/planned-base", commit)
+
+
+def test_browser_prep_refuses_competing_process_only_in_its_own_worktree(
+    repository, monkeypatch
+):
+    monkeypatch.setenv("SCHEMII_E2E_BOOTSTRAP", "1")
+    linked = repository / ".schemii/linked"
+    git(repository, "worktree", "add", "--quiet", "--detach", str(linked), "HEAD")
+    git_dir = Path(git(repository, "rev-parse", "--absolute-git-dir"))
+    linked_git_dir = Path(git(linked, "rev-parse", "--absolute-git-dir"))
+    assert linked_git_dir != git_dir
+    assert git(
+        linked, "rev-parse", "--path-format=absolute", "--git-common-dir"
+    ) == str(git_dir)
+    owner = """
+import fcntl, sys
+from pathlib import Path
+locks = []
+for name in ('qa-browser-worktree.lock', 'qa-startup.lock', 'qa-deployment.lock'):
+    lock = (Path(sys.argv[1]) / name).open('a')
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    locks.append(lock)
+print('ready', flush=True)
+sys.stdin.read()
+"""
+    seen = controlled(monkeypatch)
+    commands = runner.commands("e2e-tests", "HEAD")[1:]
+    startup = commands.index(["./start.sh"])
+    with subprocess.Popen(
+        [sys.executable, "-c", owner, str(git_dir)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as peer:
+        try:
+            assert peer.stdout.readline().strip() == "ready"
+            code, path, receipt = execute(
+                repository, selected(repository, "e2e-tests", commands)
+            )
+            assert code == 2 and receipt["reason"] == "browser-worktree-leased"
+            assert receipt["status"] == "pending" and receipt["acceptance"] is False
+            assert receipt["pending_commands"] == list(range(len(commands)))
+            assert receipt["commands"][0]["reason"] == "browser-worktree-leased"
+            assert seen == [] and not (path.parent / "lease-admission.json").exists()
+
+            code, _, receipt = execute(linked, selected(linked, "e2e-tests", commands))
+            assert code == 2 and receipt["reason"] == "deployment-leased"
+            assert receipt["acceptance"] is False
+            assert receipt["pending_commands"] == list(range(startup, len(commands)))
+            assert seen[0] == runner.planner.BROWSER_BOUNDARY and len(seen) == startup
+            assert peer.poll() is None
+            with (linked_git_dir / "qa-browser-worktree.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with (
+                pytest.raises(BlockingIOError),
+                flock(repository, "qa-browser-worktree.lock"),
+            ):
+                pass
+        finally:
+            peer.communicate(timeout=5)
+    assert peer.returncode == 0
+
+
 @pytest.mark.parametrize("occupied", ["qa-startup.lock", "qa-deployment.lock"])
 def test_occupied_lease_leaves_startup_and_mounted_inventory_pending(
     repository, monkeypatch, occupied
@@ -364,9 +430,11 @@ def test_occupied_lease_leaves_startup_and_mounted_inventory_pending(
     original_flock = fcntl.flock
 
     def observe(fd, operation):
-        assert len(seen) == startup
         assert operation == fcntl.LOCK_EX | fcntl.LOCK_NB
-        attempted.append(Path(os.readlink(f"/proc/self/fd/{fd}")).name)
+        name = Path(os.readlink(f"/proc/self/fd/{fd}")).name
+        if name in names:
+            assert len(seen) == startup
+            attempted.append(name)
         return original_flock(fd, operation)
 
     with flock(repository, occupied):
@@ -425,16 +493,7 @@ def test_startup_admission_refuses_drift_after_passing_offline_prep(
             if drift == "source":
                 (repository / "source.txt").write_text("changed before startup")
             elif drift == "base-moved":
-                commit = git(
-                    repository,
-                    "commit-tree",
-                    "HEAD^{tree}",
-                    "-p",
-                    "HEAD",
-                    "-m",
-                    "advance base",
-                )
-                git(repository, "update-ref", "refs/heads/planned-base", commit)
+                advance_planned_base(repository)
             else:
                 git(repository, "update-ref", "-d", "refs/heads/planned-base")
 
@@ -458,6 +517,77 @@ def test_startup_admission_refuses_drift_after_passing_offline_prep(
     )
     assert (runner.source_identity(repository) == plan["source"]) == (drift != "source")
     assert not (path.parent / "lease-admission.json").exists()
+
+
+@pytest.mark.parametrize("drift", ["source", "comparison"])
+@pytest.mark.parametrize("stage", ["before-launch", "before-deployment-evidence"])
+def test_leased_startup_refuses_drift_and_withholds_deployment_evidence(
+    repository, monkeypatch, drift, stage
+):
+    monkeypatch.setenv("SCHEMII_E2E_BOOTSTRAP", "1")
+    git(repository, "branch", "planned-base")
+    commands = runner.commands("e2e-tests", "planned-base")[1:]
+    plan = selected(repository, "e2e-tests", commands)
+    startup = commands.index(["./start.sh"])
+    seen = controlled(monkeypatch)
+    original_write = runner.write_json
+    prelaunch = stage == "before-launch"
+
+    def mutate():
+        for name in ("qa-startup.lock", "qa-deployment.lock"):
+            with pytest.raises(BlockingIOError), flock(repository, name):
+                pass
+        if drift == "source":
+            (repository / "source.txt").write_text("changed while deployment leased")
+        else:
+            advance_planned_base(repository)
+
+    def write(path, value):
+        original_write(path, value)
+        if (
+            path.name == "receipt.json"
+            and value["commands"][startup]["status"] == "running"
+        ):
+            monkeypatch.setattr(runner, "write_json", original_write)
+            mutate()
+
+    def verify():
+        if prelaunch:
+            pytest.fail("drifted startup reached route verification")
+        mutate()
+        return [{"url": runner.LOCAL_URL, "status": 200}]
+
+    if prelaunch:
+        monkeypatch.setattr(runner, "write_json", write)
+    monkeypatch.setattr(runner, "verify_deployment", verify)
+    code, path = runner.run_selected(
+        repository, plan, feedback=False, base="planned-base"
+    )
+    receipt = json.loads(path.read_text())
+    assert code == 1 and receipt["acceptance"] is False
+    assert receipt["status"] == "source-changed"
+    assert receipt["reason"] == f"{drift}-changed-{stage}"
+    assert receipt["pending_commands"] == list(range(startup, len(commands)))
+    assert (
+        "deployment" not in receipt and not (path.parent / "deployment.json").exists()
+    )
+    assert (
+        json.loads((path.parent / "lease-admission.json").read_text())["status"]
+        == "acquired"
+    )
+    entry = receipt["commands"][startup]
+    if prelaunch:
+        assert entry["status"] == "pending" and entry["duration_ms"] is None
+        assert "executed_command" not in entry and "exit_code" not in entry
+        assert len(seen) == startup
+    else:
+        assert entry["status"] == "source-changed" and entry["exit_code"] == 0
+        assert seen[startup:] == [["./start.sh"]]
+    with (
+        runner.deployment_lease(repository),
+        flock(repository, "qa-browser-worktree.lock"),
+    ):
+        pass
 
 
 def test_launcher_receives_actual_owned_lease_descriptors(repository):
@@ -488,6 +618,8 @@ def test_backups_use_new_run_directory_and_hold_lease(repository, monkeypatch):
     seen = []
 
     def invoke(root, command, environment, lease):
+        with pytest.raises(BlockingIOError), flock(root, "qa-browser-worktree.lock"):
+            pass
         launcher = command[0] == "./start.sh"
         mounted = launcher or command[1] == "scripts/ci/run-browser-shard.mjs"
         assert (lease is not None) == launcher
@@ -553,7 +685,10 @@ def test_backups_use_new_run_directory_and_hold_lease(repository, monkeypatch):
         deployment = json.loads((path.parent / "deployment.json").read_text())
         assert deployment == receipt["deployment"]
         assert deployment["source"] == receipt["source"]
-        with runner.deployment_lease(repository):
+        with (
+            runner.deployment_lease(repository),
+            flock(repository, "qa-browser-worktree.lock"),
+        ):
             pass
         paths.append(path)
         assert seen[-2][2] == seen[-1][2] == str(path.parent / "recovery")

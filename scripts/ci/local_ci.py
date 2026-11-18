@@ -141,6 +141,16 @@ def comparison_matches(root: Path, base: str, head: str, classification: dict) -
     return merge_bases == [classification["comparison_base"]]
 
 
+def launch_drift(
+    root: Path, base: str, identity: dict, classification: dict
+) -> str | None:
+    if source_identity(root) != identity:
+        return "source"
+    if not comparison_matches(root, base, identity["commit"], classification):
+        return "comparison"
+    return None
+
+
 def private_directory(path: Path) -> None:
     for parent in (path, *path.parents):
         if parent.is_symlink():
@@ -331,6 +341,24 @@ def invoke(
 
 
 @contextmanager
+def browser_worktree_lease(root: Path):
+    # Linked worktrees share deployments, but each owns its node_modules and outputs.
+    git_dir = Path(
+        os.fsdecode(git(root, "rev-parse", "--absolute-git-dir").removesuffix(b"\n"))
+    )
+    descriptor = os.open(
+        git_dir / "qa-browser-worktree.lock",
+        os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
 def deployment_lease(root: Path):
     common = Path(
         git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -463,7 +491,7 @@ def run_selected(
     write_json(receipt_path, receipt)
     print(f"Local CI receipt: {receipt_path}", flush=True)
     started = time.perf_counter()
-    lease_context = ExitStack()
+    locks = ExitStack()
     lease = None
     code = 2
 
@@ -527,6 +555,7 @@ def run_selected(
             write_json(path, selected["classification"])
         for index, argv in enumerate(executed):
             entry = entries[index]
+            canonical_start = argv == ["./start.sh"]
             if source_identity(root) != identity:
                 receipt.update(
                     status="source-changed", reason="source-changed-before-command"
@@ -538,7 +567,18 @@ def run_selected(
                 receipt.update(status="pending", reason="missing-prerequisite")
                 print(missing, file=sys.stderr)
                 return 2, receipt_path
-            if argv == ["./start.sh"]:
+            if argv == planner.BROWSER_BOUNDARY:
+                try:
+                    locks.enter_context(browser_worktree_lease(root))
+                except BlockingIOError:
+                    entry["reason"] = "browser-worktree-leased"
+                    receipt.update(status="pending", reason=entry["reason"])
+                    print(
+                        "Browser acceptance pending: another local CI run owns this worktree's browser dependencies.",
+                        file=sys.stderr,
+                    )
+                    return 2, receipt_path
+            if canonical_start:
                 if not comparison_matches(
                     root, base, identity["commit"], selected["classification"]
                 ):
@@ -547,7 +587,7 @@ def run_selected(
                     return 1, receipt_path
                 admission_started = time.perf_counter()
                 try:
-                    lease = lease_context.enter_context(deployment_lease(root))
+                    lease = locks.enter_context(deployment_lease(root))
                 except BlockingIOError:
                     lease = None
                 # Keep orchestration timing separate from the schema-1 commands.
@@ -692,6 +732,18 @@ def run_selected(
                 entry["timing_evidence"] = str(telemetry.relative_to(run))
             write_json(receipt_path, receipt)
             print("+ " + shlex.join(command), flush=True)
+            # This is the last check before handing the locked deployment to a launcher.
+            if launcher_lease and (
+                drift := launch_drift(root, base, identity, selected["classification"])
+            ):
+                entry.pop("executed_command")
+                entry.update(status="pending", reason=f"{drift}-changed-before-launch")
+                receipt.update(status="source-changed", reason=entry["reason"])
+                print(
+                    f"Launcher refused: {drift} changed before execution.",
+                    file=sys.stderr,
+                )
+                return 1, receipt_path
             command_started = time.perf_counter()
             try:
                 code = invoke(root, command, child_env, launcher_lease)
@@ -708,12 +760,19 @@ def run_selected(
                 )
                 receipt.update(status=entry["status"], reason="command-failed")
                 return (128 - code if code < 0 else code), receipt_path
-            if argv == ["./start.sh"]:
-                receipt["deployment"] = {
-                    "source": identity,
-                    "endpoints": verify_deployment(),
-                }
-                write_json(run / "deployment.json", receipt["deployment"])
+            if canonical_start:
+                endpoints = verify_deployment()
+                drift = launch_drift(root, base, identity, selected["classification"])
+                if drift:
+                    entry.update(
+                        status="source-changed",
+                        reason=f"{drift}-changed-before-deployment-evidence",
+                    )
+                    receipt.update(status="source-changed", reason=entry["reason"])
+                    return 1, receipt_path
+                deployment = {"source": identity, "endpoints": endpoints}
+                write_json(run / "deployment.json", deployment)
+                receipt["deployment"] = deployment
             if telemetry:
                 try:
                     summary = evidence(
@@ -728,7 +787,7 @@ def run_selected(
                         status="incomplete", reason="invalid-or-missing-evidence"
                     )
                     return 1, receipt_path
-            if source_identity(root) != identity:
+            if not canonical_start and source_identity(root) != identity:
                 entry.update(status="source-changed")
                 receipt.update(
                     status="source-changed", reason="source-changed-during-command"
@@ -755,7 +814,7 @@ def run_selected(
         for signum in handlers:
             signal.signal(signum, signal.SIG_IGN)
         try:
-            lease_context.close()
+            locks.close()
             receipt["pending_commands"] = [
                 index
                 for index, entry in enumerate(entries)
