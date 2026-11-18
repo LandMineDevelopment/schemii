@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn, execFileSync } from 'node:child_process';
+import { once } from 'node:events';
 import net from 'node:net';
 import { readFile, writeFile, open, rm, access } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
@@ -8,6 +9,7 @@ import { root, runPath, readJSON, privateJSON, writeJSON, privateDir, credential
 import { deploymentLockPath } from './deployment.mjs';
 import { reserveAccounts, reserveAvailable, releaseAccounts, availableAccounts, withFileLock, withAvailableAccounts } from './leases.mjs';
 import { expandFixtureScenario } from './prerequisites.mjs';
+import { acquireBrowserDependencyLease, BROWSER_DEPENDENCY_LEASE_FD } from './browser-dependency-lease.mjs';
 const stateDir=resolve(process.env.SCHEMII_QA_STATE_DIRECTORY || join(root,'.schemii/testing'));
 const catalog=()=>readJSON(join(root,'testing/personas.json'));
 const runCommand=(file,args,options={})=>new Promise((res,rej)=>{const child=spawn(file,args,{cwd:root,stdio:'inherit',...options});child.once('error',rej);child.once('close',code=>code===0?res():rej(blocked(`${file} exited ${code}; inspect the exact diagnostic above.`)));});
@@ -246,12 +248,35 @@ async function rpc(config, request) {
     socket.on('end',()=>{ if(!data.includes('\n'))reject(new Error('Controller disconnected. Do not repeat writes without checking saved state.')); });
   });
 }
-async function startBroker(run, dir, resume=false) {
+async function withBrowserDependencies(task) {
+  let lease;
+  try {
+    lease = await acquireBrowserDependencyLease(root);
+  } catch (error) {
+    if (error.code === 'QA_BROWSER_DEPENDENCY_BUSY') throw blocked(error.message);
+    throw error;
+  }
+  try {
+    return await task(lease);
+  } finally {
+    // A detached broker has its own reference to the same locked description.
+    await lease.close();
+  }
+}
+async function startBroker(run, dir, dependencyLease, resume=false) {
   const lock = await deploymentLockPath(root);
   const log = await open(join(dir,'controller.log'),'a',0o600);
   const gate=join(dirname(lock),'qa-startup.lock');
-  const child = spawn('bash',['-c','exec 4> "$1"; flock --wait 180 4 || exit 4; exec 3> "$2"; if flock --nonblock 3; then export SCHEMII_QA_LEASE_MODE=exclusive; else flock --shared --nonblock 3 || exit 4; export SCHEMII_QA_LEASE_MODE=shared; fi; export SCHEMII_QA_LEASE_FD=3 SCHEMII_QA_GATE_FD=4; exec node "$3" "$4" "$5"','qa-controller',gate,lock,join(root,'testing/harness/daemon.mjs'),run.id,resume?'resume':'prepare'],{cwd:root,detached:true,stdio:['ignore',log.fd,log.fd]});
-  child.unref(); await log.close();
+  const stdio = ['ignore', log.fd, log.fd, 'ignore', 'ignore'];
+  stdio[BROWSER_DEPENDENCY_LEASE_FD] = dependencyLease.fd;
+  let child;
+  try {
+    child = spawn('bash',['-c','exec 4> "$1"; flock --wait 180 4 || exit 4; exec 3> "$2"; if flock --nonblock 3; then export SCHEMII_QA_LEASE_MODE=exclusive; else flock --shared --nonblock 3 || exit 4; export SCHEMII_QA_LEASE_MODE=shared; fi; export SCHEMII_QA_LEASE_FD=3 SCHEMII_QA_GATE_FD=4; exec node "$3" "$4" "$5"','qa-controller',gate,lock,join(root,'testing/harness/daemon.mjs'),run.id,resume?'resume':'prepare'],{cwd:root,detached:true,stdio});
+    await once(child, 'spawn');
+    child.unref();
+  } finally {
+    await log.close();
+  }
   await writeJSON(join(dir,'controller-owner.json'),{pid:child.pid,birthTick:await birthTick(child.pid)});
   for(let i=0;i<360;i++) {
     await new Promise(r=>setTimeout(r,1000));
@@ -381,44 +406,48 @@ async function execute(command,o) {
           catch { throw new Error(args[0]==='--version' ? 'Codex CLI is unavailable; install it before using --controller codex.' : 'Codex CLI login is unavailable; run codex login before preparing workers.'); }
         }
       }
-      const {chromium}=await import('@playwright/test');
-      await access(chromium.executablePath());
-      if(!config.headless&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY) throw new Error('No display available. Use explicit --headless for functional-only browser operation.');
     } catch(error) { throw blocked(`Prerequisite check failed: ${error instanceof SyntaxError ? 'Malformed private credential JSON.' : error.message}`); }
-    if(command==='doctor'){console.log(JSON.stringify({dependencies:'ready',browser:config.browser === 'native' ? 'thread-owned-native-after-claim' : 'isolated-processes',accounts:config.accounts,requestedParallel:config.parallel,controller:config.controller,agentModel:config.agentModel,agentReasoning:config.agentReasoning,agentTimeout:config.agentTimeout,agentCapacity:config.controller==='codex'?'Independent Codex CLI workers; capacity limited by --parallel (maximum 10).':'Coordinator must verify live runtime slots before claiming lanes.',browserPreflight:'pending prepare'},null,2));return;}
-    const id=`qa-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`,dir=runPath(id);
-    await privateDir(dir);
-    const runtime=join('/tmp',`schemii-qa-${process.getuid()}`,id);
-    await privateDir(runtime);
-    const control={socket:join(runtime,'controller.sock'),token:randomBytes(32).toString('hex')};
-    await writeJSON(join(dir,'control.json'),control);
-    await writeJSON(join(dir,'private.json'),{credentialPath});
-    let run={id,...config,status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
-    await writeJSON(join(dir,'manifest.json'),run);
-    await writeJSON(join(dir,'controller-owner.json'),{pid:process.pid,birthTick:await birthTick(process.pid)});
-    const result=await withFileLock(join(dir,'lifecycle.lock'),async()=>{
+    return withBrowserDependencies(async dependencyLease => {
       try {
-        if(config.persona) {
-          const selected=await reserveAvailable({runId:id,runDir:dir,candidates:config.poolCandidates,count:config.accounts.length});
-          config=await selection(o,selected);
-          run={...run,...config};await writeJSON(join(dir,'manifest.json'),run);
-        }else await reserveAccounts({runId:id,runDir:dir,accounts:run.accounts});
-        return await startBroker(run,dir);
-      }catch(e){
-        // Release only if startup never transferred ownership, or its recorded
-        // controller and browsers are confirmed stopped. Otherwise preserve leases.
-        const owner=await readJSON(join(dir,'controller-owner.json'));
-        let mayUpdate=owner.pid===process.pid;
-        if(!mayUpdate)try{await requireStoppedOwner(dir);mayUpdate=true;}catch{}
-        if(mayUpdate) {
-          await releaseAccounts({runId:id});
-          const latest=await readJSON(join(dir,'manifest.json'));
-          latest.status='blocked';latest.error=e.message;latest.updatedAt=stamp();await writeJSON(join(dir,'manifest.json'),latest);
+        const {chromium}=await import('@playwright/test');
+        await access(chromium.executablePath());
+        if(!config.headless&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY) throw new Error('No display available. Use explicit --headless for functional-only browser operation.');
+      } catch(error) { throw blocked(`Prerequisite check failed: ${error.message}`); }
+      if(command==='doctor'){console.log(JSON.stringify({dependencies:'ready',browser:config.browser === 'native' ? 'thread-owned-native-after-claim' : 'isolated-processes',accounts:config.accounts,requestedParallel:config.parallel,controller:config.controller,agentModel:config.agentModel,agentReasoning:config.agentReasoning,agentTimeout:config.agentTimeout,agentCapacity:config.controller==='codex'?'Independent Codex CLI workers; capacity limited by --parallel (maximum 10).':'Coordinator must verify live runtime slots before claiming lanes.',browserPreflight:'pending prepare'},null,2));return;}
+      const id=`qa-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`,dir=runPath(id);
+      await privateDir(dir);
+      const runtime=join('/tmp',`schemii-qa-${process.getuid()}`,id);
+      await privateDir(runtime);
+      const control={socket:join(runtime,'controller.sock'),token:randomBytes(32).toString('hex')};
+      await writeJSON(join(dir,'control.json'),control);
+      await writeJSON(join(dir,'private.json'),{credentialPath});
+      let run={id,...config,status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
+      await writeJSON(join(dir,'manifest.json'),run);
+      await writeJSON(join(dir,'controller-owner.json'),{pid:process.pid,birthTick:await birthTick(process.pid)});
+      const result=await withFileLock(join(dir,'lifecycle.lock'),async()=>{
+        try {
+          if(config.persona) {
+            const selected=await reserveAvailable({runId:id,runDir:dir,candidates:config.poolCandidates,count:config.accounts.length});
+            config=await selection(o,selected);
+            run={...run,...config};await writeJSON(join(dir,'manifest.json'),run);
+          }else await reserveAccounts({runId:id,runDir:dir,accounts:run.accounts});
+          return await startBroker(run,dir,dependencyLease);
+        }catch(e){
+          // Release only if startup never transferred ownership, or its recorded
+          // controller and browsers are confirmed stopped. Otherwise preserve leases.
+          const owner=await readJSON(join(dir,'controller-owner.json'));
+          let mayUpdate=owner.pid===process.pid;
+          if(!mayUpdate)try{await requireStoppedOwner(dir);mayUpdate=true;}catch{}
+          if(mayUpdate) {
+            await releaseAccounts({runId:id});
+            const latest=await readJSON(join(dir,'manifest.json'));
+            latest.status='blocked';latest.error=e.message;latest.updatedAt=stamp();await writeJSON(join(dir,'manifest.json'),latest);
+          }
+          throw e;
         }
-        throw e;
-      }
+      });
+      console.log(JSON.stringify(result,null,2));if(result.status==='blocked')process.exitCode=4;return;
     });
-    console.log(JSON.stringify(result,null,2));if(result.status==='blocked')process.exitCode=4;return;
   }
   if(['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','resource-receipt','begin','capture','inspect','inspect-download','review'].includes(command)) {
     if(!o['session-file'])throw invalid('--session-file is required.');
@@ -448,11 +477,13 @@ async function execute(command,o) {
     const control=await privateJSON(join(dir,'control.json'));
     try{await rpc(control,{command:'ping'});throw new Error('Controller is still live. Use recover for a paused lane or advance for the next wave.');}catch(e){if(!['ENOENT','ECONNREFUSED'].includes(e.code))throw e;}
     await requireStoppedOwner(dir);
-    await rm(control.socket,{force:true});
-    run.status='preparing';run.updatedAt=stamp();await writeJSON(join(dir,'manifest.json'),run);
-    await reserveAccounts({runId:run.id,runDir:dir,accounts:run.lanes.filter(l=>l.status!=='complete').map(l=>l.username)});
-    const resumed=await startBroker(run,dir,true);
-    console.log(JSON.stringify(resumed,null,2));if(resumed.status==='blocked')process.exitCode=4;return;
+    return withBrowserDependencies(async dependencyLease => {
+      await rm(control.socket,{force:true});
+      run.status='preparing';run.updatedAt=stamp();await writeJSON(join(dir,'manifest.json'),run);
+      await reserveAccounts({runId:run.id,runDir:dir,accounts:run.lanes.filter(l=>l.status!=='complete').map(l=>l.username)});
+      const resumed=await startBroker(run,dir,dependencyLease,true);
+      console.log(JSON.stringify(resumed,null,2));if(resumed.status==='blocked')process.exitCode=4;
+    });
   }
   if(!['run','claim','advance','recover','stop','cleanup','native-release'].includes(command))throw new Error(`Unknown command: ${command}`);
   const control=await privateJSON(join(dir,'control.json'));

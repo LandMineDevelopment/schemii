@@ -4,7 +4,7 @@ import { chmod, readFile, writeFile, rm, stat, realpath } from 'node:fs/promises
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { CodexWorkers } from './workers.mjs';
-import { BrowserFleet } from './browser.mjs';
+import { assertBrowserDependencyLease } from './browser-dependency-lease.mjs';
 import { assertScenarioPrerequisite, readinessChecks } from './prerequisites.mjs';
 import { assertLaneReadyToClaim, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
 import { startDeployment, sourceIdentity } from './deployment.mjs';
@@ -12,6 +12,8 @@ import { nativeMode, recoverNativeLane, nativeBrowserRoots, recordNativeResource
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
 
 process.umask(0o077);
+assertBrowserDependencyLease(root);
+const { BrowserFleet } = await import('./browser.mjs');
 const [id, mode] = process.argv.slice(2), dir = runPath(id);
 const run = await readJSON(join(dir,'manifest.json'));
 const control = await privateJSON(join(dir,'control.json'));
