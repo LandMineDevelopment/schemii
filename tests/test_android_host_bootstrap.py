@@ -5,6 +5,7 @@ HostService, StorageProfile, NativeOwner and JNI are compiled unchanged. No
 positive native admission, APK build, framework process or device is exercised.
 """
 
+import ctypes
 from pathlib import Path
 import shutil
 import stat
@@ -12,6 +13,7 @@ import hashlib
 import os
 import zipfile
 import subprocess
+import tempfile
 
 import pytest
 
@@ -93,14 +95,59 @@ public class Notification {
 package android.util;
 public class Log {
     public static final java.util.List<String> records = java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+    public static volatile long[] rawImage;
     public static int i(String tag, String record) {
         if (!tag.equals("SchemiiAcquire")) throw new AssertionError("fixed tag");
+        if ("stall".equals(System.getenv("SCHEMII_FIXTURE_MAPS")) && record.contains(" phase=2 ")) {
+            try {
+                java.lang.reflect.Method image = Class.forName("development.landmine.schemii.android.host.NativeOwner")
+                    .getDeclaredMethod("imageRefusal");
+                image.setAccessible(true);
+                rawImage = (long[])image.invoke(null);
+            } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        }
         records.add(record);
         return Boolean.getBoolean("fixture.logloss") ? 0 : record.length();
     }
 }
 """,
     "android/os/IBinder.java": "package android.os; public interface IBinder {}",
+    "android/os/ParcelFileDescriptor.java": """
+package android.os;
+import java.io.*;
+import java.lang.reflect.*;
+import java.util.concurrent.atomic.AtomicInteger;
+public final class ParcelFileDescriptor implements Closeable {
+    public static final int MODE_READ_ONLY = 0x10000000;
+    public static final AtomicInteger opens = new AtomicInteger(), closes = new AtomicInteger();
+    public static volatile FileDescriptor last;
+    private final FileInputStream stream;
+    private ParcelFileDescriptor(FileInputStream stream) { this.stream = stream; }
+    public static ParcelFileDescriptor open(File file, int mode) throws IOException {
+        if (mode != MODE_READ_ONLY || !file.getName().equals("libschemii_owner.so"))
+            throw new AssertionError("fixed read-only reference");
+        FileInputStream stream = new FileInputStream(file);
+        last = stream.getFD();
+        opens.incrementAndGet();
+        return new ParcelFileDescriptor(stream);
+    }
+    public int getFd() {
+        if (Boolean.getBoolean("fixture.borrowFailure")) throw new SecurityException("SECRET-borrow");
+        if (Boolean.getBoolean("fixture.badFd")) return Integer.MAX_VALUE;
+        try {
+            Field field = FileDescriptor.class.getDeclaredField("fd");
+            field.setAccessible(true);
+            return field.getInt(last);
+        } catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+    }
+    public void close() throws IOException {
+        closes.incrementAndGet();
+        if (!last.valid()) throw new AssertionError("JNI closed borrowed reference");
+        stream.close();
+        if (Boolean.getBoolean("fixture.referenceCloseFailure")) throw new IOException("SECRET-close");
+    }
+}
+""",
     "android/os/UserManager.java": """
 package android.os;
 public class UserManager { public boolean isUserUnlocked() { return true; } }
@@ -115,7 +162,11 @@ public class Os { public static void chmod(String path, int mode) { throw new As
 """,
     "android/content/pm/ApplicationInfo.java": """
 package android.content.pm;
-public class ApplicationInfo { public static final int FLAG_DEBUGGABLE = 2; public int flags, targetSdkVersion = 36; }
+public class ApplicationInfo {
+    public static final int FLAG_DEBUGGABLE = 2;
+    public int flags, targetSdkVersion = 36;
+    public String nativeLibraryDir;
+}
 """,
     "android/content/pm/PackageInfo.java": """
 package android.content.pm;
@@ -248,9 +299,112 @@ public class BootstrapControl {
         check(HostService.frameworkOwnerApplication() == null, "no application callback");
         check(HostService.frameworkSelectedStorage() == null, "no storage callback");
     }
+    static native boolean mapsBlocked();
+    static native void releaseMapsRead();
+    static native int ownerCloses();
+    static void await(java.util.function.BooleanSupplier condition, String failure) throws Exception {
+        long start = System.nanoTime();
+        while (!condition.getAsBoolean() && System.nanoTime()-start < TimeUnit.SECONDS.toNanos(5))
+            Thread.sleep(2);
+        check(condition.getAsBoolean(), failure);
+    }
+    static List<String> stage10(File data, int expectedCloses) throws Exception {
+        App app = new App(data,"CE");
+        HostService service = service(app,true);
+        android.util.Log.records.clear();
+        android.util.Log.rawImage=null;
+        action(service,"start");
+        check(app.entered.await(5,TimeUnit.SECONDS), "framework producer reached");
+        action(service,null);
+        check(HostService.status().contains("pending"), "host status responsive");
+        action(service,"stop");
+        check(HostService.status().contains("Stop observed"), "cancel responsive");
+        app.release.countDown();
+        settle(service);
+        check(HostService.status().contains("First error 13.")
+            && HostService.status().contains("Cancellation observed.")
+            && HostService.status().contains("Acquisition stage 10:1; last 10.")
+            && !HostService.status().contains("Cleanup error")
+            && !HostService.status().contains("unresolved"), "independent stage-10 first error and disposal");
+        check(ownerCloses()==expectedCloses,"one native close per acquisition");
+        Field outstanding=HostService.class.getDeclaredField("outstanding");
+        outstanding.setAccessible(true);
+        check(outstanding.get(null)==null,"reservation released");
+        long[] state=NativeOwner.status();
+        check(state.length==16 && state[0]==13 && state[2]==0 && state[4]==0 && state[5]==0,"raw16");
+        String record=android.util.Log.records.stream().filter(x -> x.contains("phase=3 ")).findFirst().get();
+        String[] pre=record.split(" pre=")[1].split(" post=")[0].split(",");
+        String[] post=record.split(" post=")[1].split(" image=")[0].split(",");
+        String image=record.split(" image=")[1];
+        long[] rawImage=android.util.Log.rawImage;
+        byte[] name="/SECRET-fixture/libfirst-refusal.so".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        check(rawImage!=null && rawImage.length==8+name.length && rawImage[0]==1
+            && rawImage[1]==rawImage.length && rawImage[2]==2 && rawImage[3]==7 && rawImage[4]==1
+            && rawImage[5]==Long.parseLong(pre[31]) && rawImage[6]==10 && rawImage[7]==name.length,
+            "original raw imageRefusal header and epoch");
+        for (int i=0;i<name.length;i++) check(rawImage[8+i]==name[i],"original raw imageRefusal byte");
+        check(pre.length==34 && post.length==34 && pre[2].equals("10") && pre[3].equals("1")
+            && pre[7].equals("3") && pre[14].equals("13") && post[4].equals("24")
+            && post[21].equals("4") && pre[31].equals(post[31]) && pre[33].equals("1") && post[33].equals("1"),
+            "raw34 and same-worker same-epoch disposal");
+        check(image.startsWith("v1,complete=1,") && image.endsWith(",provenance=unknown")
+            && image.length()<=256 && !record.contains("SECRET") && record.length()<=2048, "bounded imageRefusal");
+        absent();
+        service.onDestroy();
+        pre[31]=pre[32]=post[31]=post[32]="time";
+        return Arrays.asList(Arrays.toString(state), Arrays.toString(pre), Arrays.toString(post), image);
+    }
+    static void ownMapping(File directory) throws Exception {
+        String phase=System.getProperty("fixture.phase");
+        boolean stall="stall".equals(System.getenv("SCHEMII_FIXTURE_MAPS"));
+        check(NativeOwner.OwnMapping.status().equals("Own mapping not checked"),"explicit tap");
+        List<String> before=stall ? stage10(directory,1) : null;
+        NativeOwner.OwnMapping.start(directory.getAbsolutePath());
+        if (stall) {
+            try {
+                await(BootstrapControl::mapsBlocked,"maps read stalled");
+                NativeOwner.OwnMapping.start(directory.getAbsolutePath());
+                check(NativeOwner.OwnMapping.status().startsWith("Own mapping pending")
+                    && ParcelFileDescriptor.opens.get()==1 && ParcelFileDescriptor.closes.get()==0,
+                    "one pending slot and retained borrow");
+                check(stage10(directory,2).equals(before),"stage10 scalar fields unchanged while probe stalled");
+                check(NativeOwner.OwnMapping.status().startsWith("Own mapping pending"),
+                    "host disposal did not publish mapping result");
+            } finally { releaseMapsRead(); }
+        }
+        await(() -> NativeOwner.OwnMapping.status().contains("sample=1"),"finite terminal result");
+        String result=NativeOwner.OwnMapping.status();
+        NativeOwner.OwnMapping.start(directory.getAbsolutePath());
+        check(NativeOwner.OwnMapping.status().equals(result),"terminal one-shot never replaced");
+        String expected=System.getProperty("fixture.fields");
+        check(result.length()<400 && result.endsWith(expected)
+            && !result.contains("SECRET") && !result.contains(directory.getPath())
+            && !result.contains("libschemii_owner.so"), "bounded scalar mismatch: "+result);
+        String source=phase.equals("SOURCE") ? "unbound" : "ffffffffffffffffffffffffffffffffffffffff";
+        check(result.contains("v=1 profile=closed-connected-host-v1 source="+source+" sample=1"),"source bound independently");
+        long begin=Long.parseLong(result.split("beginNs=")[1].split(" ")[0]);
+        long end=Long.parseLong(result.split("endNs=")[1].split(" ")[0]);
+        check(begin>=0 && end>=begin,"same-clock bounds");
+        int borrowed=Integer.getInteger("fixture.borrowed",1);
+        check(ParcelFileDescriptor.opens.get()==borrowed && ParcelFileDescriptor.closes.get()==borrowed
+            && (borrowed==0 || !ParcelFileDescriptor.last.valid()), "Java reference closed once");
+        Method decode=NativeOwner.OwnMapping.class.getDeclaredMethod("valid",long[].class,long.class);
+        decode.setAccessible(true);
+        long[] raw={1,begin,0,0,1,0};
+        check((Boolean)decode.invoke(null,raw,begin)
+            && !(Boolean)decode.invoke(null,raw,begin+1)
+            && !(Boolean)decode.invoke(null,null,begin)
+            && !(Boolean)decode.invoke(null,new long[]{1,begin,0,0,0,0},begin),"stale, missing or malformed JNI record refused");
+        if (!stall) check(android.util.Log.records.isEmpty(),"no acquisition record crossover");
+    }
     public static void main(String[] args) throws Exception {
         String mode = args[0]; File data = new File(args[1]);
-        if (mode.startsWith("diagnostic-array:")) {
+        if (mode.equals("own-mapping")) {
+            ownMapping(data);
+            if (!System.getProperty("fixture.phase").equals("SOURCE"))
+                check(NativeOwner.request(1)!=0,"birth ingress refused");
+            return;
+        } else if (mode.startsWith("diagnostic-array:")) {
             String variant = mode.substring(17);
             long[] raw = new long[34]; raw[0]=1; raw[1]=34; raw[4]=24; raw[21]=4; raw[31]=1; raw[32]=2; raw[33]=1;
             if (variant.equals("version")) raw[0]=2;
@@ -429,16 +583,175 @@ def java_bootstrap(tmp_path_factory):
     # Explicit OS library-inventory edge double. Actual dladdr, current proc
     # mapping, held ELF, SHA, ZIP, authority lease and JNI remain production.
     inventory = work / "inventory.c"
-    inventory.write_text("""
+    inventory.write_text(r"""
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <link.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <jni.h>
+#include <pthread.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include "native_bootstrap.h"
 static int inventory_calls, armed, flock_calls;
+static int owner_closes;
+static _Thread_local int maps_fd=-1, maps_opens, maps_closes;
+static pthread_mutex_t latch=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t released=PTHREAD_COND_INITIALIZER;
+static int blocked, release;
+JNIEXPORT jboolean JNICALL Java_development_landmine_schemii_android_host_BootstrapControl_mapsBlocked(JNIEnv *e,jclass c) {
+    (void)e; (void)c;
+    pthread_mutex_lock(&latch);
+    int ready=blocked;
+    pthread_mutex_unlock(&latch);
+    return ready;
+}
+JNIEXPORT void JNICALL Java_development_landmine_schemii_android_host_BootstrapControl_releaseMapsRead(JNIEnv *e,jclass c) {
+    (void)e; (void)c;
+    pthread_mutex_lock(&latch);
+    release=1;
+    pthread_cond_signal(&released);
+    pthread_mutex_unlock(&latch);
+}
+JNIEXPORT jint JNICALL Java_development_landmine_schemii_android_host_BootstrapControl_ownerCloses(JNIEnv *e,jclass c) {
+    (void)e; (void)c;
+    return owner_closes;
+}
+int __real_native_bootstrap_close_observed(struct native_bootstrap **,struct native_bootstrap_status *,
+    struct acquisition_observation *);
+int __wrap_native_bootstrap_close_observed(struct native_bootstrap **o,struct native_bootstrap_status *s,
+    struct acquisition_observation *d) {
+    ++owner_closes;
+    return __real_native_bootstrap_close_observed(o,s,d);
+}
+static int variant(const char *name) {
+    const char *mode=getenv("SCHEMII_FIXTURE_MAPS");
+    return mode && !strcmp(mode,name);
+}
+int __real_open(const char *,int,...);
+extern void Java_development_landmine_schemii_android_host_NativeOwner_open(void);
+
+struct fixture_row {
+    uintptr_t lo, hi;
+    uint64_t offset, inode;
+    unsigned device_major, device_minor;
+    char permissions[5];
+};
+
+/* Get the executing ELF segment from real procfs and its file identity from
+ * the loader's own fixture path. Never use the display path from a maps row. */
+static struct fixture_row fixture_owner_row(int fd, struct stat *module) {
+    uintptr_t entry=(uintptr_t)&Java_development_landmine_schemii_android_host_NativeOwner_open;
+    Dl_info image;
+    if (!dladdr((void *)entry,&image)) abort();
+    int reference=__real_open(image.dli_fname,O_RDONLY|O_CLOEXEC);
+    if (reference<0 || fstat(reference,module) || close(reference)
+        || !S_ISREG(module->st_mode) || module->st_size<=0) abort();
+    FILE *in=fdopen(fd,"r");
+    if (!in) abort();
+    struct fixture_row owner={0};
+    char *line=NULL;
+    size_t capacity=0;
+    unsigned found=0;
+    while (getline(&line,&capacity,in)>=0) {
+        struct fixture_row row;
+        if (sscanf(line,"%" SCNxPTR "-%" SCNxPTR " %4s %" SCNx64 " %x:%x %" SCNu64,
+                   &row.lo,&row.hi,row.permissions,&row.offset,&row.device_major,&row.device_minor,&row.inode)!=7)
+            abort();
+        if (row.lo<=entry && entry<row.hi) { owner=row; ++found; }
+    }
+    free(line);
+    if (ferror(in) || fclose(in) || found!=1 || strcmp(owner.permissions,"r-xp")
+        || owner.offset>=(uint64_t)module->st_size || !owner.inode) abort();
+    return owner;
+}
+
+/* Independent raw precondition for unmodified real-procfs controls. Return
+ * only the identity category to the test runner. */
+int fixture_map_identity(void) {
+    struct stat module;
+    struct fixture_row row=fixture_owner_row(__real_open("/proc/self/maps",O_RDONLY|O_CLOEXEC),&module);
+    if (row.inode!=(uint64_t)module.st_ino) return 0;
+    return row.device_major==major(module.st_dev) && row.device_minor==minor(module.st_dev) ? 1 : 2;
+}
+
+static void substitute_maps(int fd) {
+    struct stat module;
+    struct fixture_row row=fixture_owner_row(dup(fd),&module);
+    FILE *out=tmpfile();
+    if (!out) abort();
+    /* Same valid executable range/offset, with the loaded module's held-file
+     * device and inode regardless of how this filesystem reports procfs IDs. */
+    const char *permissions=row.permissions, *path="/fixture/owner.so";
+    unsigned device_major=major(module.st_dev), device_minor=minor(module.st_dev);
+    uint64_t offset=row.offset, inode=(uint64_t)module.st_ino;
+    if (variant("opaque-path")) path="/SECRET-ignored-path";
+    if (variant("zero-inode")) inode=0;
+    if (variant("wrong-device")) device_minor^=1;
+    if (variant("writable")) permissions="rwxp";
+    if (variant("nonexec")) permissions="r--p";
+    if (variant("offset-overflow")) offset=UINT64_MAX;
+    char inode_field[32];
+    snprintf(inode_field,sizeof(inode_field),"%" PRIu64,inode);
+    if (variant("bad-inode")) strcpy(inode_field,"18446744073709551616");
+    fputs("1-2 r--p 0 00:00 0\n",out);
+    if (!variant("absent")) {
+        int copies=variant("duplicate") ? 2 : 1;
+        for (int i=0;i<copies;++i)
+            fprintf(out,"%" PRIxPTR "-%" PRIxPTR " %s %" PRIx64 " %x:%x %s %s\n",
+                    row.lo,row.hi,permissions,offset,device_major,device_minor,inode_field,path);
+    }
+    if (variant("malformed")) fputs("malformed after a match\n",out);
+    if (variant("truncated")) fputs("1-2 r--p 0 00:00 0",out);
+    if (variant("embedded-nul")) {
+        fputs("1-2 r--p 0 00:00 0 ",out);
+        fputc(0,out); fputc('\n',out);
+    }
+    if (variant("overlong")) {
+        fputs("1-2 r--p 0 00:00 0 ",out);
+        for (int i=0;i<8192;++i) fputc(' ',out);
+        fputc('\n',out);
+    }
+    if (variant("total-cap"))
+        for (int i=0;i<65536;++i) fputs("1-2 r--p 0 00:00 0\n",out);
+    if (fflush(out) || fseek(out,0,SEEK_SET) || dup2(fileno(out),fd)!=fd || fclose(out)) abort();
+}
+int __wrap_open(const char *path,int flags,...) {
+    if (strcmp(path,"/proc/self/maps")) {
+        if (!(flags&O_CREAT)) return __real_open(path,flags);
+        va_list args; va_start(args,flags);
+        int mode=va_arg(args,int); va_end(args);
+        return __real_open(path,flags,mode);
+    }
+    if (flags!=(O_RDONLY|O_CLOEXEC) || ++maps_opens!=1) abort();
+    if (variant("open-denied")) { errno=EACCES; return -1; }
+    maps_fd=__real_open(path,flags);
+    if (maps_fd>=0 && getenv("SCHEMII_FIXTURE_MAPS")
+        && !variant("real") && !variant("real-mismatch"))
+        substitute_maps(maps_fd);
+    return maps_fd;
+}
+ssize_t __real_read(int,void *,size_t);
+ssize_t __wrap_read(int fd,void *out,size_t size) {
+    if (fd==maps_fd) {
+        if (variant("read-denied") || variant("read-both-closes-fail")) { errno=EPERM; return -1; }
+        if (variant("stall")) {
+            pthread_mutex_lock(&latch);
+            blocked=1;
+            while (!release) pthread_cond_wait(&released,&latch);
+            pthread_mutex_unlock(&latch);
+        }
+    }
+    return __real_read(fd,out,size);
+}
 int __real_flock(int,int);
 int __wrap_flock(int fd,int op) {
     if (++flock_calls==2 && getenv("SCHEMII_J2_FIXTURE_CUSTODY")) { errno=EIO; return -1; }
@@ -447,61 +760,211 @@ int __wrap_flock(int fd,int op) {
 int __real_close(int);
 int __wrap_close(int fd) {
     int result=__real_close(fd);
+    if (fd>=0 && fd==maps_fd) {
+        if (++maps_closes!=1) abort();
+        if (variant("close-fail") || variant("read-both-closes-fail")) { errno=EIO; return -1; }
+    }
     if (armed) { armed=0; errno=EIO; return -1; }
     return result;
 }
-extern void Java_development_landmine_schemii_android_host_NativeOwner_open(void);
 int __wrap_dl_iterate_phdr(int (*callback)(struct dl_phdr_info *,size_t,void *), void *arg) {
     Dl_info image;
     if (!dladdr((void *)&Java_development_landmine_schemii_android_host_NativeOwner_open,&image)) return 1;
     struct dl_phdr_info info; memset(&info,0,sizeof(info));
     info.dlpi_name=image.dli_fname;
     int result=callback(&info,sizeof(info),arg);
+    if (!result && variant("stall")) {
+        info.dlpi_name="/SECRET-fixture/libfirst-refusal.so";
+        info.dlpi_phnum=7;
+        result=callback(&info,sizeof(info),arg);
+    }
     if (++inventory_calls==2 && getenv("SCHEMII_J2_FIXTURE_CLEANUP")) armed=1;
     return result;
 }
 """)
     library = work / "libschemii_owner.so"
+    command = [
+        "cc",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-shared",
+        "-fPIC",
+        "-pthread",
+        "-DSCHEMII_CLOSED_PINS",
+        "-I",
+        str(work),
+        "-I",
+        str(native),
+        "-I",
+        str(jdk / "include"),
+        "-I",
+        str(jdk / "include/linux"),
+        *[
+            str(native / (name + ".c"))
+            for name in (
+                "owner_jni",
+                "native_bootstrap",
+                "installed_provenance",
+                "boot_authority",
+                "boot_compare",
+                "boot_identity",
+            )
+        ],
+        str(inventory),
+        "-Wl,--wrap=dl_iterate_phdr",
+        "-Wl,--wrap=close",
+        "-Wl,--wrap=flock",
+        "-Wl,--wrap=open",
+        "-Wl,--wrap=read",
+        "-Wl,--wrap=native_bootstrap_close_observed",
+        "-ldl",
+        "-o",
+        str(library),
+    ]
+    run_java(command)
+    # The actual fallback compilation lacks closed pins and the dedicated JNI
+    # entry. Exercise its unbound source without modifying the production class.
+    unbound = work / "unbound"
+    unbound.mkdir()
     run_java(
-        [
-            "cc",
-            "-std=c11",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-shared",
-            "-fPIC",
-            "-pthread",
-            "-DSCHEMII_CLOSED_PINS",
-            "-I",
-            str(work),
-            "-I",
-            str(native),
-            "-I",
-            str(jdk / "include"),
-            "-I",
-            str(jdk / "include/linux"),
-            *[
-                str(native / (name + ".c"))
-                for name in (
-                    "owner_jni",
-                    "native_bootstrap",
-                    "installed_provenance",
-                    "boot_authority",
-                    "boot_compare",
-                    "boot_identity",
-                )
-            ],
-            str(inventory),
-            "-Wl,--wrap=dl_iterate_phdr",
-            "-Wl,--wrap=close",
-            "-Wl,--wrap=flock",
-            "-ldl",
-            "-o",
-            str(library),
-        ]
+        [arg for arg in command[:-1] if arg != "-DSCHEMII_CLOSED_PINS"]
+        + [str(unbound / library.name)]
     )
     return java, classes, library
+
+
+def mapping_identity(library: Path) -> int:
+    if os.statvfs(library).f_flag & os.ST_NOEXEC:
+        return 0
+    return ctypes.CDLL(str(library)).fixture_map_identity()
+
+
+@pytest.fixture
+def own_mapping_library(java_bootstrap, mode):
+    _, _, library = java_bootstrap
+    if mode == "real":
+        # Qualify the caller's root first. If procfs reports a different
+        # device identity there, try a separate executable filesystem.
+        if mapping_identity(library) == 1:
+            yield library
+            return
+        with tempfile.TemporaryDirectory(
+            prefix="schemii-own-mapping-", dir="/tmp"
+        ) as work:
+            candidate = Path(work) / library.name
+            shutil.copyfile(library, candidate)
+            if mapping_identity(candidate) != 1:
+                pytest.skip(
+                    "no executable fixture root with matching procfs and held-file identity"
+                )
+            yield candidate
+    elif mode == "real-mismatch":
+        # Keep the caller's actual backing filesystem and unmodified maps.
+        if mapping_identity(library) != 2:
+            pytest.skip("temporary root has no observed same-inode device mismatch")
+        yield library
+    elif mode == "unbound":
+        yield library.parent / "unbound" / library.name
+    else:
+        yield library
+
+
+@pytest.mark.parametrize(
+    ("mode", "phase", "errno", "maps", "maps_errno", "reference", "complete", "loss"),
+    [
+        ("real", "NONE", 0, 1, 0, 1, 1, 0),
+        ("real-mismatch", "MAPS_MATCH", 0, 1, 0, 1, 1, 0),
+        ("known-good", "NONE", 0, 1, 0, 1, 1, 0),
+        ("opaque-path", "NONE", 0, 1, 0, 1, 1, 0),
+        ("stall", "NONE", 0, 1, 0, 1, 1, 0),
+        ("open-denied", "MAPS_OPEN", 13, 0, 0, 1, 0, 0),
+        ("read-denied", "MAPS_READ", 1, 1, 0, 1, 0, 0),
+        ("close-fail", "NONE", 0, 2, 5, 1, 1, 0),
+        ("read-both-closes-fail", "MAPS_READ", 1, 2, 5, 2, 0, 0),
+        ("reference-close-fail", "NONE", 0, 1, 0, 2, 1, 0),
+        ("missing-reference", "REFERENCE_OPEN", 0, 0, 0, 0, 0, 0),
+        ("borrow-fail", "REFERENCE_BORROW", 0, 0, 0, 1, 0, 0),
+        ("bad-fd", "REFERENCE_STAT", 9, 0, 0, 1, 0, 0),
+        ("empty-reference", "REFERENCE_STAT", 0, 0, 0, 1, 0, 0),
+        ("unbound", "SOURCE", 0, 0, 0, 0, 0, 1),
+        *[
+            (mode, "MAPS_MATCH", 0, 1, 0, 1, 1, 0)
+            for mode in (
+                "wrong-reference",
+                "absent",
+                "duplicate",
+                "zero-inode",
+                "wrong-device",
+                "writable",
+                "nonexec",
+                "offset-overflow",
+            )
+        ],
+        *[
+            (mode, "MAPS_FORMAT", 0, 1, 0, 1, 0, 0)
+            for mode in ("malformed", "bad-inode", "truncated", "embedded-nul")
+        ],
+        ("overlong", "MAPS_LIMIT", 0, 1, 0, 1, 0, 0),
+        ("total-cap", "MAPS_LIMIT", 0, 1, 0, 1, 0, 0),
+    ],
+)
+def test_own_mapping_linked_fixture(
+    java_bootstrap,
+    own_mapping_library,
+    tmp_path,
+    mode,
+    phase,
+    errno,
+    maps,
+    maps_errno,
+    reference,
+    complete,
+    loss,
+):
+    java, classes, _ = java_bootstrap
+    library = own_mapping_library
+    reference_dir = library.parent
+    if mode in {"missing-reference", "wrong-reference", "empty-reference", "stall"}:
+        reference_dir = tmp_path
+        if mode == "stall":
+            os.link(library, tmp_path / library.name)
+        elif mode == "wrong-reference":
+            shutil.copyfile(library, tmp_path / library.name)
+        elif mode == "empty-reference":
+            (tmp_path / library.name).touch()
+    before = snapshot(tmp_path)
+    outcome = "match" if phase == "NONE" and maps == reference == 1 else "unknown"
+    fields = (
+        f"outcome={outcome} phase={phase} errno={errno} mapsClose={maps} "
+        f"mapsCloseErrno={maps_errno} referenceClose={reference} complete={complete} loss={loss}"
+    )
+    env = os.environ.copy()
+    env.pop("SCHEMII_FIXTURE_MAPS", None)
+    if mode == "open-denied" or maps:
+        env["SCHEMII_FIXTURE_MAPS"] = mode
+    run_java(
+        [
+            java,
+            "--add-opens=java.base/java.io=ALL-UNNAMED",
+            "-Djava.library.path=" + str(library.parent),
+            "-Dfixture.module=" + str(library),
+            "-Dfixture.phase=" + phase,
+            "-Dfixture.fields=" + fields,
+            "-Dfixture.borrowed=" + str(int(reference != 0)),
+            "-Dfixture.borrowFailure=" + str(mode == "borrow-fail").lower(),
+            "-Dfixture.badFd=" + str(mode == "bad-fd").lower(),
+            "-Dfixture.referenceCloseFailure=" + str(reference == 2).lower(),
+            "-cp",
+            str(classes),
+            f"{PACKAGE}.BootstrapControl",
+            "own-mapping",
+            str(reference_dir),
+        ],
+        env=env,
+    )
+    assert snapshot(tmp_path) == before
 
 
 def snapshot(root: Path) -> dict[str, tuple[int, bytes | None]]:

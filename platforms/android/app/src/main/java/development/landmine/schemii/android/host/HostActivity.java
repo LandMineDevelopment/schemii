@@ -12,9 +12,10 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
-/** Closed host entry: fixed actions only, no payloads, loaders or diagnostics. */
+/** Closed host entry with fixed actions and an independent own-mapping check. */
 public final class HostActivity extends Activity {
     private TextView status;
+    private TextView mappingStatus;
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
         // Own the title inside the inset-aware content. Framework decoration
@@ -38,10 +39,20 @@ public final class HostActivity extends Activity {
             button.setText(action.equals("start") ? "Check host prerequisites" : action.equals("stop") ? "Cancel check" : "Refresh status");
             button.setOnClickListener(view -> {
                 if (!action.equals("status")) startForegroundService(new Intent(this,HostService.class).setAction(action));
-                status.setText(HostService.status());
+                refreshStatus();
             });
             layout.addView(button);
         }
+        Button mapping = new Button(this);
+        mapping.setText("Check own mapping");
+        mapping.setOnClickListener(view -> {
+            NativeOwner.OwnMapping.start(getApplicationInfo().nativeLibraryDir);
+            mappingStatus.setText(NativeOwner.OwnMapping.status());
+        });
+        layout.addView(mapping);
+        mappingStatus = new TextView(this);
+        mappingStatus.setText(NativeOwner.OwnMapping.status());
+        layout.addView(mappingStatus);
         scroll.addView(layout, new ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         scroll.setOnApplyWindowInsetsListener((view, insets) -> {
@@ -60,5 +71,13 @@ public final class HostActivity extends Activity {
         setContentView(scroll);
         scroll.requestApplyInsets();
     }
-    @Override public void onResume() { super.onResume(); if (status != null) status.setText(HostService.status()); }
+    private void refreshStatus() {
+        status.setText(HostService.status());
+        mappingStatus.setText(NativeOwner.OwnMapping.status());
+    }
+
+    @Override public void onResume() {
+        super.onResume();
+        if (mappingStatus != null) refreshStatus();
+    }
 }

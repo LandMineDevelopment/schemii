@@ -10,6 +10,11 @@
 #include <time.h>
 #ifdef SCHEMII_CLOSED_PINS
 #include "closed_pins.h"
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <unistd.h>
 #else
 static const char closed_package[]="", closed_signer[]="";
 static const struct installed_pin closed_pins[]={{"", ""}};
@@ -316,3 +321,120 @@ JNIEXPORT jlongArray JNICALL Java_development_landmine_schemii_android_host_Nati
 JNIEXPORT jstring JNICALL Java_development_landmine_schemii_android_host_NativeOwner_observationSource(JNIEnv *e,jclass cls) {
   (void)cls; return (*e)->NewStringUTF(e,SCHEMII_OBSERVATION_SOURCE);
 }
+
+#ifdef SCHEMII_CLOSED_PINS
+/* Own-mapping ABI v1. No owner state, loader enumeration or pathname from maps. */
+enum own_map_phase {
+  OWN_MAP_OK, OWN_MAP_REFERENCE_STAT, OWN_MAP_OPEN, OWN_MAP_READ,
+  OWN_MAP_FORMAT, OWN_MAP_LIMIT, OWN_MAP_MATCH
+};
+enum own_map_close { OWN_MAP_NOT_OPENED, OWN_MAP_CLOSED, OWN_MAP_CLOSE_FAILED };
+
+static int own_map_number(const char **p, unsigned base, uint64_t *out) {
+  const char *start=*p;
+  uint64_t value=0;
+  for (;;) {
+    unsigned char c=(unsigned char)**p;
+    unsigned digit;
+    if (c>='0' && c<='9') digit=c-'0';
+    else if (c>='a' && c<='f') digit=c-'a'+10;
+    else if (c>='A' && c<='F') digit=c-'A'+10;
+    else break;
+    if (digit>=base) break;
+    if (value>(UINT64_MAX-digit)/base) return 0;
+    value=value*base+digit;
+    ++*p;
+  }
+  *out=value;
+  return *p!=start;
+}
+
+static int own_map_spaces(const char **p) {
+  if (**p!=' ') return 0;
+  do ++*p; while (**p==' ');
+  return 1;
+}
+
+enum own_map_row { ROW_INVALID, ROW_OTHER, ROW_MISMATCH, ROW_MATCH };
+
+/* Path text has no evidentiary role. */
+static enum own_map_row own_map_row(const char *p, uintptr_t address, const struct stat *reference) {
+  uint64_t lo, hi, offset, maj, min, inode;
+  if (!own_map_number(&p,16,&lo) || *p++!='-' || !own_map_number(&p,16,&hi)
+      || lo>=hi || hi>UINTPTR_MAX || !own_map_spaces(&p)) return ROW_INVALID;
+  const char *permissions=p;
+  if (strlen(p)<4 || (p[0]!='r' && p[0]!='-') || (p[1]!='w' && p[1]!='-')
+      || (p[2]!='x' && p[2]!='-') || (p[3]!='p' && p[3]!='s')) return ROW_INVALID;
+  p+=4;
+  if (!own_map_spaces(&p) || !own_map_number(&p,16,&offset) || !own_map_spaces(&p)
+      || !own_map_number(&p,16,&maj) || *p++!=':' || !own_map_number(&p,16,&min)
+      || maj>UINT_MAX || min>UINT_MAX || !own_map_spaces(&p)
+      || !own_map_number(&p,10,&inode) || (*p && *p!=' ')) return ROW_INVALID;
+  if (address<lo || address>=hi) return ROW_OTHER;
+  uint64_t delta=address-lo;
+  if (memcmp(permissions,"r-x",3) || !inode || inode!=(uint64_t)reference->st_ino
+      || maj!=major(reference->st_dev) || min!=minor(reference->st_dev)
+      || delta>UINT64_MAX-offset || offset+delta>=(uint64_t)reference->st_size) return ROW_MISMATCH;
+  return ROW_MATCH;
+}
+
+/* The address is inside this executing, non-interposable function. Validate
+ * through EOF, including all rows after the first covering row. */
+static __attribute__((noinline)) enum own_map_phase scan_own_mapping(
+    int maps, const struct stat *reference, int *error) {
+  enum { TOTAL_CAP=1024*1024, ROW_CAP=8192 };
+  uintptr_t address=(uintptr_t)&scan_own_mapping;
+  char chunk[4096], row[ROW_CAP];
+  size_t used=0, total=0;
+  enum own_map_row covering=ROW_OTHER;
+  while (total<TOTAL_CAP) {
+    size_t remaining=TOTAL_CAP-total;
+    ssize_t size=read(maps,chunk,remaining<sizeof(chunk) ? remaining : sizeof(chunk));
+    if (size<0) { *error=errno; return OWN_MAP_READ; }
+    if (!size) {
+      if (used) return OWN_MAP_FORMAT;
+      return covering==ROW_MATCH ? OWN_MAP_OK : OWN_MAP_MATCH;
+    }
+    total+=(size_t)size;
+    for (ssize_t i=0; i<size; ++i) {
+      char c=chunk[i];
+      if (!c) return OWN_MAP_FORMAT;
+      if (c=='\n') {
+        row[used]='\0';
+        enum own_map_row result=own_map_row(row,address,reference);
+        if (result==ROW_INVALID) return OWN_MAP_FORMAT;
+        if (result!=ROW_OTHER) covering=covering==ROW_OTHER ? result : ROW_MISMATCH;
+        used=0;
+      } else {
+        if (used==sizeof(row)-1) return OWN_MAP_LIMIT;
+        row[used++]=c;
+      }
+    }
+  }
+  // At the cap an EOF read would exceed the permitted observation window.
+  return OWN_MAP_LIMIT;
+}
+
+JNIEXPORT jlongArray JNICALL Java_development_landmine_schemii_android_host_NativeOwner_checkOwnMapping(
+    JNIEnv *e, jclass cls, jint referenceFd, jlong begin) {
+  (void)cls;
+  struct stat reference;
+  int error=0, close_error=0;
+  enum own_map_phase phase=OWN_MAP_REFERENCE_STAT;
+  enum own_map_close disposition=OWN_MAP_NOT_OPENED;
+  if (fstat(referenceFd,&reference)<0) error=errno;
+  else if (S_ISREG(reference.st_mode) && reference.st_size>0) {
+    int maps=open("/proc/self/maps",O_RDONLY|O_CLOEXEC);
+    if (maps<0) { phase=OWN_MAP_OPEN; error=errno; }
+    else {
+      phase=scan_own_mapping(maps,&reference,&error);
+      disposition=OWN_MAP_CLOSED;
+      if (close(maps)<0) { close_error=errno; disposition=OWN_MAP_CLOSE_FAILED; }
+    }
+  }
+  jlong values[]={1,begin,phase,error,disposition,close_error};
+  jlongArray out=(*e)->NewLongArray(e,6);
+  if (out) (*e)->SetLongArrayRegion(e,out,0,6,values);
+  return out;
+}
+#endif
