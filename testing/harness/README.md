@@ -187,7 +187,8 @@ remote route. The default desktop and CI preview gates still apply to their
 own workflows.
 
 Start only through `./start.sh`. Install the guest launcher’s public localhost
-certificate as a trust anchor in the guest’s own Chromium trust store. For the
+certificate as a trusted TLS peer in the guest’s Chromium NSS store
+(`certutil -A -t "P,,"` against the applicable NSS database). For the
 Playwright API client, set `NODE_EXTRA_CA_CERTS` to the same certificate before
 starting the controller. Use separate guest-owned browser profiles and leave TLS
 verification enabled. The harness checks the declared certificate against the
