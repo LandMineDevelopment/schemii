@@ -1,6 +1,6 @@
 import { createHash, X509Certificate } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { lstatSync, readFileSync, readlinkSync, statSync, closeSync, constants } from 'node:fs';
 import https from 'node:https';
 import { isIP } from 'node:net';
@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { writeJSON } from './store.mjs';
 import { processIdentity, cgroupIdentity } from '../load/runtime.mjs';
+import { buildInputBinding, stageOfflineBuild, verifyOfflineBuildConfig } from './build-inputs.mjs';
 
 export const LOCAL_ORIGIN = 'https://localhost:8001';
 export const DESKTOP_PREVIEW = 'https://omarchy.taile4f57f.ts.net';
@@ -92,9 +93,54 @@ function normalizeTargetHost(value) {
   return isIP(host) === 6 ? new URL(`http://[${host}]`).hostname.slice(1,-1) : host.replace(/\.+$/, '').toLowerCase();
 }
 
+export async function stageBoundOfflineBuild(root, file, stage) {
+  if (await realpath(file) !== file) throw new Error('Offline build binding must be a canonical private file.');
+  const approved = disposableGuestBinding(await readPrivateDeploymentJSON(file, 4096));
+  const identity = sourceIdentity(root);
+  const boot = (await readFile('/proc/sys/kernel/random/boot_id','utf8')).trim();
+  execFileSync('systemd-detect-virt', ['--vm','--quiet'], {timeout:3000, stdio:'ignore'});
+  assertDisposableSource(approved, identity, boot, true);
+  assertDeploymentLease(root);
+  const hosts = approved.fixture?.hosts.join(',') ?? '';
+  if (!approved.offlineBuild || process.env.SCHEMII_QA_LEASE_MODE !== 'exclusive' ||
+      (process.env.SCHEMII_QA_GUEST_TARGET_HOSTS ?? '') !== hosts ||
+      (process.env.SCHEMII_ALLOWED_TARGET_HOSTS ?? '') !== hosts ||
+      process.env.SCHEMII_TARGET_EGRESS_MODE !== approved.fixture?.mode ||
+      process.env.SCHEMII_QA_FIXTURE_CA_BINDING !== (approved.fixture?.ca ? file : undefined)) {
+    throw new Error('Offline build launcher inputs differ from the approved guest binding.');
+  }
+  const incoming = {...process.env};
+  for (const name of ['DOCKER_HOST', 'DOCKER_CONFIG', 'SCHEMII_RUNTIME_RECEIPT',
+    'SCHEMII_QA_GUEST_TARGET_HOSTS', 'SCHEMII_QA_OFFLINE_BUILD_BINDING', 'SCHEMII_QA_FIXTURE_CA_BINDING']) {
+    delete incoming[name];
+  }
+  checkDisposableConfiguration(root, incoming, approved);
+  await assertOfflineEngine();
+  await stageOfflineBuild(root, approved.commit, approved.offlineBuild, stage, readPrivateDeploymentFile);
+  const after = sourceIdentity(root);
+  if (after.fingerprint !== identity.fingerprint || after.commit !== identity.commit) {
+    throw new Error('Guest checkout changed during offline build staging.');
+  }
+}
+
+async function assertOfflineEngine() {
+  const config = process.env.DOCKER_CONFIG;
+  if (process.env.DOCKER_HOST !== 'unix:///var/run/docker.sock' || !config || !path.isAbsolute(config)) {
+    throw new Error('Offline build requires the bound guest engine configuration.');
+  }
+  const configInfo = lstatSync(config);
+  if (!configInfo.isDirectory() || configInfo.uid !== process.getuid() || (configInfo.mode & 0o077) ||
+      await realpath(config) !== config || (await readdir(config)).length) {
+    throw new Error('Offline build requires a fresh private engine client configuration.');
+  }
+}
+
 export function assertNoAmbientFixtureCA(env = process.env) {
   if (Object.keys(env).some(key => key.startsWith('SCHEMII_QA_FIXTURE_CA_'))) {
     throw new Error('Fixture CA activation requires the private disposable guest binding, not ambient launcher settings.');
+  }
+  if (Object.keys(env).some(key => key.startsWith('SCHEMII_QA_OFFLINE_BUILD_'))) {
+    throw new Error('Offline build activation requires the private disposable guest binding, not ambient launcher settings.');
   }
 }
 
@@ -112,8 +158,8 @@ export async function stageBoundFixtureCA(root, file, env = process.env) {
 }
 
 export function disposableGuestBinding(value) {
-  const { bootId, commit, certificateSha256, fixture } = value ?? {};
-  if (Object.keys(value ?? {}).length !== (fixture === undefined ? 3 : 4) ||
+  const { bootId, commit, certificateSha256, fixture, offlineBuild } = value ?? {};
+  if (Object.keys(value ?? {}).length !== 3 + Number(fixture !== undefined) + Number(offlineBuild !== undefined) ||
       typeof bootId !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(bootId) ||
       typeof commit !== 'string' || !/^[a-f0-9]{40}$/.test(commit) ||
       typeof certificateSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(certificateSha256)) {
@@ -137,6 +183,7 @@ export function disposableGuestBinding(value) {
     throw new Error('Fixture CA binding requires one explicit external fixture host and a private CA path and digest.');
   }
   return { bootId, commit, certificateSha256,
+    ...(offlineBuild === undefined ? {} : {offlineBuild:buildInputBinding(offlineBuild)}),
     ...(fixture === undefined ? {} : {fixture:{mode:fixture.mode, hosts:[...fixture.hosts],
       ...(ca ? {ca:{path:ca.path,sha256:ca.sha256}} : {})}}) };
 }
@@ -177,6 +224,9 @@ function checkDisposableConfiguration(root, env, binding) {
   }
   // Match the stock launcher's regular-file test for the default QA overlay.
   const registry = statSync(path.join(root, '.schemii/testing/registry.json'), { throwIfNoEntry: false });
+  if (binding.offlineBuild && registry?.isFile()) {
+    throw new Error('Offline build requires the stock disposable guest configuration.');
+  }
   if (registry?.isFile() && !binding.fixture?.hosts.includes('qa-postgres')) {
     throw new Error('Disposable QA with the registered testing database requires exact approval of qa-postgres in fixture.hosts.');
   }
@@ -410,6 +460,7 @@ export async function startDeployment({
     const reused = process.env.SCHEMII_QA_LEASE_MODE === 'shared';
     if (reused) {
       if (binding?.fixture?.ca) throw new Error('Fixture CA requires an exclusive guest deployment; shared reuse is unsupported.');
+      if (binding?.offlineBuild) throw new Error('Offline build requires an exclusive guest deployment; shared reuse is unsupported.');
       let prior;
       try { prior = await readPrivateDeploymentJSON(ledgerPath); }
       catch { throw new Error('The active deployment has no readable QA identity; stop its owner and prepare again.'); }
@@ -424,7 +475,8 @@ export async function startDeployment({
       const launchDir = binding ? await mkdtemp(path.join(runDir, 'launcher-')) : runDir;
       const runtimePath = path.join(launchDir, 'runtime.json');
       const caBinding = binding?.fixture?.ca ? path.join(launchDir, 'fixture-ca-binding.json') : undefined;
-      if (caBinding) await writeFile(caBinding, JSON.stringify(binding), {flag:'wx',mode:0o600});
+      const offlineBinding = binding?.offlineBuild ? caBinding ?? path.join(launchDir, 'offline-build-binding.json') : undefined;
+      if (caBinding || offlineBinding) await writeFile(caBinding ?? offlineBinding, JSON.stringify(binding), {flag:'wx',mode:0o600});
       logPath = path.join(launchDir, 'start.log');
       const log = await open(logPath, 'w', 0o600);
       let result;
@@ -434,7 +486,8 @@ export async function startDeployment({
             cwd: root,
             env: { ...env, SCHEMII_QA_LEASE_FD: '3', SCHEMII_QA_GATE_FD: '4',
               ...(binding ? { SCHEMII_RUNTIME_RECEIPT: runtimePath } : {}),
-              ...(caBinding ? { SCHEMII_QA_FIXTURE_CA_BINDING: caBinding } : {}) },
+              ...(caBinding ? { SCHEMII_QA_FIXTURE_CA_BINDING: caBinding } : {}),
+              ...(offlineBinding ? { SCHEMII_QA_OFFLINE_BUILD_BINDING: offlineBinding } : {}) },
             stdio: ['ignore', log.fd, log.fd, 3, 4],
           });
           child.once('error', reject);
@@ -472,12 +525,20 @@ export async function startDeployment({
 
 // Called only by the canonical launcher, after validating its inherited lease.
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [command, root] = process.argv.slice(2);
-  if (command !== 'stage-fixture-ca' || !root) process.exitCode = 2;
-  else try {
-    console.log(await stageBoundFixtureCA(root, process.env.SCHEMII_QA_FIXTURE_CA_BINDING));
+  const [command, root, stage] = process.argv.slice(2);
+  try {
+    if (command === 'stage-fixture-ca' && root) {
+      console.log(await stageBoundFixtureCA(root, process.env.SCHEMII_QA_FIXTURE_CA_BINDING));
+    } else if (command === 'stage-offline-build' && root && stage) {
+      await stageBoundOfflineBuild(root, process.env.SCHEMII_QA_OFFLINE_BUILD_BINDING, stage);
+    } else if (command === 'verify-offline-engine') {
+      await assertOfflineEngine();
+    } else if (command === 'verify-offline-build' && root && stage) {
+      verifyOfflineBuildConfig(JSON.parse(readFileSync(0, 'utf8')), stage, readFileSync(path.join(stage,'revision'),'utf8').trim());
+    } else process.exitCode = 2;
   } catch {
-    process.stderr.write('Disposable fixture CA validation or staging failed.\n');
+    process.stderr.write(command === 'stage-fixture-ca' ? 'Disposable fixture CA validation or staging failed.\n' :
+      'Disposable offline build validation or staging failed.\n');
     process.exitCode = 1;
   }
 }

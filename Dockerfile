@@ -14,7 +14,18 @@ COPY dev/postgres/*.sh dev/postgres/*.sql ./dev/postgres/
 COPY ai/prototype/*.js ai/prototype/package.json ai/prototype/package-lock.json ai/prototype/Dockerfile ./ai/prototype/
 ARG SCHEMII_SOURCE_COMMIT=unknown
 RUN python dev/runtime_manifest.py --source-commit "$SCHEMII_SOURCE_COMMIT" > /runtime-build.json
-RUN python -m pip wheel --constraint constraints.docker.txt --wheel-dir /wheels .
+
+ARG SCHEMII_BUILD_MODE=standard
+RUN --mount=type=bind,target=/qa-context \
+    case "$SCHEMII_BUILD_MODE" in \
+      standard) python -m pip wheel --constraint constraints.docker.txt --wheel-dir /wheels . ;; \
+      offline) wheelhouse=/qa-context/qa-build-inputs/wheelhouse \
+        && test -d "$wheelhouse" \
+        && PIP_CONFIG_FILE=/dev/null PIP_NO_INDEX=1 PIP_FIND_LINKS="$wheelhouse" \
+           python -m pip wheel --no-index --find-links="$wheelhouse" \
+             --constraint constraints.docker.txt --wheel-dir /wheels . ;; \
+      *) exit 1 ;; \
+    esac
 
 FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS runtime
 
@@ -27,9 +38,9 @@ ENV PATH="/opt/venv/bin:$PATH" \
 
 RUN python -m venv /opt/venv \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin schemii
-COPY --from=builder /wheels /wheels
-RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels schemii \
-    && rm -rf /wheels
+
+RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
+    PIP_CONFIG_FILE=/dev/null python -m pip install --no-cache-dir --no-index --find-links=/wheels schemii
 
 ARG SCHEMII_SOURCE_COMMIT=unknown
 LABEL org.opencontainers.image.revision=$SCHEMII_SOURCE_COMMIT

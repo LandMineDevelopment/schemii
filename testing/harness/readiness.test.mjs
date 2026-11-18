@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { checkHTTPS, DESKTOP_PREVIEW, disposableGuestBinding, readPrivateDeploymentJSON, startDeployment, withDisposableLauncher, stageFixtureCA, stageBoundFixtureCA, assertNoAmbientFixtureCA } from './deployment.mjs';
+import { verifyOfflineBuildConfig } from './build-inputs.mjs';
 
 
 test('a wave starts product streams only after every session passes logout isolation', async () => {
@@ -399,4 +400,116 @@ test('launcher rejects fixture CA from default, shared and incomplete guest laun
   assert.equal(raw.status,1);
   assert.match(raw.stderr,/requires a private disposable guest binding/);
 
+});
+
+test('offline build stages only the approved package bytes under the exact guest launch locks', async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'qa-offline-inputs-'));
+  t.after(() => rm(scratch, {recursive:true,force:true}));
+  const root = join(scratch,'checkout'), bundle = join(scratch,'bundle');
+  const config = join(scratch,'docker'), bin = join(scratch,'bin');
+  for (const dir of [root,bundle,config,bin]) await mkdir(dir,{mode:0o700});
+  await writeFile(join(bin,'systemd-detect-virt'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+  const sampleNpm = Buffer.from('synthetic package bytes');
+  const npmDigest = createHash('sha512').update(sampleNpm).digest();
+  const hex = npmDigest.toString('hex');
+  const npmPath = `npm-cache/_cacache/content-v2/sha512/${hex.slice(0,2)}/${hex.slice(2,4)}/${hex.slice(4)}`;
+  const lock = JSON.stringify({lockfileVersion:3,packages:{'':{},'node_modules/synthetic':{
+    resolved:'https://registry.npmjs.org/synthetic/-/synthetic-1.0.0.tgz',integrity:'sha512-'+npmDigest.toString('base64'),
+  }}});
+  const constraints = 'synthetic==1.0\n';
+  const pyproject = '[build-system]\nrequires = ["setuptools>=80,<85"]\n';
+  const images = Object.fromEntries(['node','python','postgres','ingress'].map(name=>[name,name+':1@sha256:'+'a'.repeat(64)]));
+  const inputFiles = {
+    'ai/prototype/package-lock.json':lock, 'constraints.docker.txt':constraints, 'pyproject.toml':pyproject,
+  };
+  for (const [file, bytes] of Object.entries({
+    ...inputFiles, 'dev/runtime-contract.json':JSON.stringify({images}),
+    'Dockerfile':`FROM ${images.python}\nFROM ${images.python}\n`,
+    'ai/prototype/Dockerfile':`FROM ${images.node}\n`,
+    'compose.test.yaml':`    image: ${images.postgres}\n    image: ${images.ingress}\n`,
+    '.gitignore':'.schemii/\n',
+  })) {
+    const filePath = join(root,file);
+    await mkdir(join(filePath,'..'),{recursive:true});
+    await writeFile(filePath,bytes);
+  }
+  execFileSync('git',['init','-q',root]);
+  execFileSync('git',['-C',root,'add','.']);
+  execFileSync('git',['-C',root,'-c','user.name=QA','-c','user.email=qa@example.invalid','commit','-qm','fixture']);
+  await mkdir(join(root,'.schemii'));
+  await writeFile(join(root,'.schemii','secret'),'not part of the build context');
+  const commit = execFileSync('git',['-C',root,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
+  const boots = (await readFile('/proc/sys/kernel/random/boot_id','utf8')).trim();
+  // These four-byte markers test staging and custody only. No package install is attempted.
+  const zip = Buffer.from([0x50,0x4b,0x03,0x04]);
+  const wheel = 'wheelhouse/synthetic-1.0-py3-none-any.whl';
+  const files = {[npmPath]:sampleNpm,[wheel]:zip,'wheelhouse/setuptools-84.2.1-py3-none-any.whl':zip};
+  for (const [name, bytes] of Object.entries(files)) {
+    await mkdir(join(bundle,name,'..'),{recursive:true,mode:0o700});
+    await writeFile(join(bundle,name),bytes,{mode:0o600});
+  }
+  const manifest = {
+    version:1, images, locks:Object.fromEntries(Object.entries(inputFiles).map(([name,bytes])=>[name,sha(bytes)])),
+    members:Object.entries(files).map(([path,bytes])=>({path,bytes:bytes.length,sha256:sha(bytes)})),
+  };
+  const run = async ({document=manifest, changes={}, held=true, mode='exclusive', wrongDigest=false, env={}}={}) => {
+    const manifestPath = join(bundle,'manifest.json'), bound = join(scratch,'binding.json');
+    const data = JSON.stringify(document);
+    await writeFile(manifestPath,data,{mode:0o600});
+    const offlineBuild = {manifest:manifestPath,sha256:wrongDigest ? '0'.repeat(64) : sha(data)};
+    const binding = {bootId:boots,commit,certificateSha256:'a'.repeat(64),offlineBuild,...changes};
+    await writeFile(bound,JSON.stringify(binding),{mode:0o600});
+    const stage = await mkdtemp(join(scratch,'stage-'));
+    const result = spawnSync('bash',['-ec',
+      'umask 077; exec 3>.git/qa-deployment.lock; exec 4>.git/qa-startup.lock; ' +
+      (held ? 'flock -x 3; flock -x 4; ' : '') + 'exec "$@"',
+      'test',process.execPath,new URL('./deployment.mjs',import.meta.url).pathname,'stage-offline-build',root,stage],{
+      cwd:root, env:{PATH:bin+':'+process.env.PATH,DOCKER_CONFIG:config,DOCKER_HOST:'unix:///var/run/docker.sock',
+        SCHEMII_QA_LEASE_MODE:mode, SCHEMII_QA_LEASE_FD:'3',SCHEMII_QA_GATE_FD:'4',
+        SCHEMII_QA_OFFLINE_BUILD_BINDING:bound,...env}, encoding:'utf8',timeout:7000,
+    });
+    return {stage,result};
+  };
+  const passed = await run();
+  assert.equal(passed.result.status,0,passed.result.stderr);
+  const context = join(passed.stage,'context');
+  assert.deepEqual((await readdir(context)).sort(),['.gitignore','Dockerfile','ai','compose.test.yaml','constraints.docker.txt','dev','pyproject.toml','qa-build-inputs']);
+  assert.equal((await stat(join(context,'Dockerfile'))).mode & 0o777,0o644);
+  assert.deepEqual(await readFile(join(context,'qa-build-inputs',npmPath)),sampleNpm);
+  assert.equal((await stat(join(context,'qa-build-inputs',wheel))).mode & 0o777,0o444);
+  const overlay=JSON.parse(await readFile(join(passed.stage,'compose.json'),'utf8'));
+  const services=overlay.services;
+  assert.deepEqual(Object.keys(services),['schemii','ai-prototype-runtime']);
+  for (const [name, dockerfile] of [['schemii','Dockerfile'],['ai-prototype-runtime','ai/prototype/Dockerfile']]) {
+    services[name].build.dockerfile = dockerfile;
+    services[name].build.args.SCHEMII_SOURCE_COMMIT = commit;
+  }
+  verifyOfflineBuildConfig(overlay,passed.stage,commit);
+  services.schemii.build.network='default';
+  assert.throws(()=>verifyOfflineBuildConfig(overlay,passed.stage,commit),/approved offline configuration/);
+  services.schemii.build.network='none';
+  delete services.schemii.build.args.SCHEMII_BUILD_MODE;
+  assert.throws(()=>verifyOfflineBuildConfig(overlay,passed.stage,commit),/approved offline configuration/);
+  const missing = {...manifest,members:manifest.members.slice(1)};
+  const foreign = structuredClone(manifest);
+  foreign.members[1].path='wheelhouse/../private.pem';
+  for (const options of [
+    {held:false}, {mode:'shared'}, {changes:{bootId:'a'.repeat(8)+'-0000-0000-0000-000000000000'}},
+    {changes:{commit:'b'.repeat(40)}}, {wrongDigest:true}, {document:missing}, {document:foreign},
+    {env:{SCHEMII_SECRET_DIRECTORY:'/private/foreign-secrets'}},
+    {document:{...manifest,locks:{...manifest.locks,'constraints.docker.txt':'0'.repeat(64)}}},
+    {document:{...manifest,images:{...manifest.images,node:images.python}}},
+  ]) {
+    const {stage,result}=await run(options);
+    assert.equal(result.status,1,result.stderr);
+    await assert.rejects(readFile(join(stage,'compose.json')),{code:'ENOENT'});
+  }
+  await rm(join(bundle,wheel));
+  await symlink(join(bundle,npmPath),join(bundle,wheel));
+  assert.equal((await run()).result.status,1);
+  await rm(join(bundle,wheel));
+  await writeFile(join(bundle,wheel),Buffer.from('wrong package bytes'),{mode:0o600});
+  assert.equal((await run()).result.status,1);
+  assert.throws(()=>assertNoAmbientFixtureCA({SCHEMII_QA_OFFLINE_BUILD_BINDING:'/private/offline.json'}),/not ambient/);
 });

@@ -244,6 +244,59 @@ shared deployment reuse. Continue to use a managed profile with
 The guest's system and browser trust are unchanged. Keep the staged CA
 snapshot with the disposable guest disk until the application is torn down.
 
+### Offline build inputs for a disposable guest
+
+This optional input is for the owned Linux amd64 guest with host-enforced
+offline networking, a clean checkout, and a fresh exclusive startup and
+deployment lease. Keep the pinned Python, Node, PostgreSQL and ingress images
+available by digest in its local system engine. The launcher checks the four
+images first and refuses missing or incompatible images. The supported
+Compose path uses local contexts and the bundled BuildKit Dockerfile frontend
+with read-only RUN bind mounts. A separate Buildx installation or remote
+Dockerfile frontend is unnecessary. If the guest cannot resolve the approved
+Compose build or use the built-in mount syntax, stop with its private launch
+log. Keep the guest offline throughout image resolution and startup.
+
+Add `"offlineBuild": {"manifest": "/absolute/private/bundle/manifest.json",
+"sha256": "<manifest SHA-256>"}` to the fresh guest binding. Stage the bundle
+outside the checkout in owner-only directories and give every input file
+mode 0600 or 0400. Copy only the verified package members, without npm
+indexes, config, logs, credentials, or extra files. The version 1 manifest
+contains exactly these fields.
+
+| Field | Value |
+| --- | --- |
+| `version` | `1` |
+| `locks` | SHA-256 lookup keyed by `ai/prototype/package-lock.json`, `constraints.docker.txt` and `pyproject.toml` |
+| `images` | The `node`, `python`, `postgres` and `ingress` references from the exact checkout's `dev/runtime-contract.json` |
+| `members` | Objects with `path` relative to the bundle, integer `bytes` and lowercase `sha256` |
+
+Use exactly the lockfile's npm SHA-512 content objects at
+`npm-cache/_cacache/content-v2/sha512/XX/YY/REMAINDER` with lowercase hex
+segments. Provide one compatible CPython 3.12 Linux amd64 or pure Python
+wheel per tracked runtime constraint, plus an approved setuptools wheel
+within the tracked build-backend range, under `wheelhouse/`. Verify wheel
+origin and digest when preparing the manifest. The manifest binds the
+reviewed artifacts and the launcher independently checks each member
+before building.
+
+The launcher archives the exact commit into a private temporary context,
+copies only verified read-only artifacts into it, and applies a build-only
+Compose input to the Schemii and AI runtime build targets. The effective
+build must select network `none`, offline npm and pip, and no base-image pull
+request. Bind mounts keep the input package files outside the final images.
+Before application replacement the launcher removes the temporary build
+context and uses the ordinary runtime configuration with image pulls and
+implicit builds disabled. A failed build also removes the staging and leaves
+the running deployment unchanged. After a forced termination, reconcile
+private `/tmp/schemii-qa-build.*` ownership with the guest lease holder before
+removing any residue. Preserve the original bundle and private launch log.
+
+Offline build can be combined with the fixture CA binding. Both options
+require exclusive startup and refuse the registered QA overlay and
+machine-local Compose files. Keep fixture trust and the later HTTPS and
+managed Verify Full checks under their existing gates.
+
 For independent review in the guest, pass `--reviewer-account ACCOUNT` and
 `--runtime-slots N` along with the binding and both accounts. The account must
 be separately selected and claimable. Reviewed guest runs require one tester

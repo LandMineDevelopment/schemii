@@ -622,3 +622,94 @@ def test_stock_launcher_retains_compose_configuration_without_fixture_ca():
         assert result.returncode == 0, result.stderr
         assert "--file " + str(root / "compose.test.yaml") in proof.read_text()
         assert "PRIVATE_COMPOSE_SENTINEL" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("failure", ["", "staging", "image", "configuration", "build"])
+def test_offline_guest_never_falls_back_and_cleans_before_replacement(failure):
+    with launcher_fixture() as (root, environment, commands, _):
+        mock_bin = Path(environment["PATH"].split(":")[0])
+        vm = mock_bin / "systemd-detect-virt"
+        vm.write_text("#!/bin/sh\nexit 0\n")
+        vm.chmod(0o755)
+        staging = root.parent / "staging-path"
+        node = mock_bin / "node"
+        node.write_text(
+            "#!/bin/sh\n"
+            'case "$2" in\n'
+            '  verify-offline-engine) exit 0 ;;\n'
+            '  stage-offline-build)\n'
+            '    printf "%s\n" "$4" > "$FAKE_STAGE_PATH"\n'
+            '    if [ "$FAKE_OFFLINE_FAILURE" = staging ]; then exit 1; fi\n'
+            '    printf "node@sha256:%s\n" "fake-pin" > "$4/images"\n'
+            '    printf "unknown\n" > "$4/revision"\n'
+            '    printf "{}\n" > "$4/compose.json" ;;\n'
+            '  verify-offline-build)\n'
+            '    [ "$FAKE_OFFLINE_FAILURE" != configuration ] && [ "$(cat)" = "{}" ] ;;\n'
+            '  *) exit 72 ;;\n'
+            "esac\n"
+        )
+        node.chmod(0o755)
+        docker = mock_bin / "docker"
+        docker.write_text(docker.read_text().replace(
+            'case "$*" in',
+            'case "$*" in\n'
+            '  "image inspect "*)\n'
+            '    printf "inspect\n" >> "$COMMAND_LOG"\n'
+            '    if [ "$FAKE_OFFLINE_FAILURE" = image ]; then exit 1; fi\n'
+            '    printf "linux/amd64\n"; exit 0 ;;\n'
+            '  *" config --format json")\n'
+            '    case "$*" in *"--env-file /dev/null"*"--file $(cat "$FAKE_STAGE_PATH")/compose.json"*) ;; *) exit 71 ;; esac\n'
+            '    printf "{}\n"; exit 0 ;;\n'
+            '  *" build schemii ai-prototype-runtime")\n'
+            '    case "$*" in *"--file $(cat "$FAKE_STAGE_PATH")/compose.json"*) ;; *) exit 71 ;; esac\n'
+            '    if [ "$FAKE_OFFLINE_FAILURE" = build ]; then\n'
+            '      printf "build:failed\n" >> "$COMMAND_LOG"; exit 1\n'
+            '    fi ;;\n'
+            '  *" rm --stop --force"*) [ ! -e "$(cat "$FAKE_STAGE_PATH")" ] || exit 71 ;;\n'
+            '  *" up --detach "*)\n'
+            '    case "$*" in *"--no-build --pull never") ;; *) exit 71 ;; esac\n'
+            '    case "$*" in *"$(cat "$FAKE_STAGE_PATH")"*) exit 71 ;; esac ;;\n'
+            'esac\n'
+            'case "$*" in',
+            1,
+        ))
+        binding = root.parent / "binding.json"
+        binding.write_text("{}\n")
+        config = root.parent / "client-config"
+        config.mkdir(mode=0o700)
+        env = {
+            **environment,
+            "DOCKER_HOST": "unix:///var/run/docker.sock",
+            "DOCKER_CONFIG": str(config),
+            "SCHEMII_TEST_APP_PORT": "8001",
+            "SCHEMII_QA_OFFLINE_BUILD_BINDING": str(binding),
+            "SCHEMII_QA_LEASE_FD": "3",
+            "SCHEMII_QA_GATE_FD": "4",
+            "SCHEMII_QA_LEASE_MODE": "exclusive",
+            "FAKE_STAGE_PATH": str(staging),
+            "FAKE_OFFLINE_FAILURE": failure,
+        }
+        result = subprocess.run(
+            ["bash", "-ec",
+             'exec 3>"$FAKE_GIT_COMMON_DIRECTORY/qa-deployment.lock"; '
+             'exec 4>"$FAKE_GIT_COMMON_DIRECTORY/qa-startup.lock"; '
+             'flock -x 3; flock -x 4; exec ./start.sh'],
+            cwd=root, env=env, capture_output=True, text=True, timeout=10,
+        )
+        assert staging.is_file(), result.stderr
+        assert not Path(staging.read_text().strip()).exists()
+        observed = commands.read_text()
+        assert observed.count("inspect") == (failure != "staging")
+        if failure:
+            assert result.returncode == 1, result.stderr
+            assert "replacement" not in observed
+            assert "readiness" not in observed
+            assert "build:disabled" not in observed
+            assert observed.count("build:failed") == (failure == "build")
+            if failure in {"staging", "image"}:
+                assert not Path(environment["SCHEMII_SECRET_DIRECTORY"]).exists()
+        else:
+            assert result.returncode == 0, result.stderr
+            assert observed.count("build:disabled") == 1
+            assert "replacement" in observed
+            assert "readiness" in observed
