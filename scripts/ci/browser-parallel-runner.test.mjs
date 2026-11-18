@@ -245,7 +245,7 @@ test('a failed serial prerequisite retains failure and leaves both overlap child
     assert.equal(result.status,1,result.stderr);
     const events=readFileSync(join(directory,'events.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
     assert.ok(events.every(event=>event.phase==='serial'));
-    const selected=balanceParallelFiles(files,'desktop-chromium').shards[0].files;
+    const selected=balanceParallelFiles(files,'desktop-chromium',undefined,6,directory).shards[0].files;
     const records=readFileSync(output,'utf8').trim().split('\n').map(JSON.parse);
     assert.deepEqual(records.filter(record=>record.kind==='plan').map(record=>record.test_id).sort(),selected.map(hash).sort());
     assert.ok(records.some(record=>record.outcome==='failed'));
@@ -277,7 +277,7 @@ test('actual parent SIGTERM cancels its two children and publishes the original 
     const result=await finished;clearTimeout(timer);
     assert.deepEqual(result,{status:143,signal:null});
     const records=readFileSync(output,'utf8').trim().split('\n').map(JSON.parse);
-    const selected=balanceParallelFiles(files,'desktop-chromium').shards[0].files;
+    const selected=balanceParallelFiles(files,'desktop-chromium',undefined,6,directory).shards[0].files;
     assert.deepEqual(records.filter(record=>record.kind==='plan').map(record=>record.test_id).sort(),selected.map(hash).sort());
     assert.ok(records.some(record=>record.outcome==='cancelled'));
     assert.equal(records.at(-1).outcome,'cancelled');
