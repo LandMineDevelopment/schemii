@@ -443,3 +443,93 @@ def test_only_clean_matching_hosted_source_can_claim_immutable_identity(clean):
         assert value["source_sha"] == ("a" * 40 if clean else None)
         assert value["run_id"] == (123 if clean else 0)
         assert value["project"] == "desktop-chromium" and value["shard"] == 2
+
+
+def prepare_qa_overlay_fixture(root, environment):
+    (root / "testing").mkdir()
+    for name in ("launcher.sh", "compose.yaml", "egress.yaml"):
+        shutil.copy2(ROOT / "testing" / name, root / "testing" / name)
+    qa = Path(environment["SCHEMII_QA_STATE_DIRECTORY"])
+    qa.mkdir(mode=0o700)
+    registry = qa / "registry.json"
+    mock_bin = Path(environment["PATH"].split(":")[0])
+    docker = mock_bin / "docker"
+    docker.write_text(docker.read_text().replace(
+        'case "$*" in',
+        'case "$*" in\n'
+        '  info) if [ "$FAKE_PUBLISH_QA" = info ]; then '
+        'printf "{}\\n" > "$SCHEMII_QA_STATE_DIRECTORY/registry.json"; fi ;;\n'
+        "esac\n"
+        'case "$*" in\n'
+        "  *' config --format json') printf '%s\\n' "
+        "'{\"services\":{\"schemii\":{\"environment\":"
+        "{\"SCHEMII_ALLOWED_TARGET_HOSTS\":\"desktop.internal\"}}}}'; exit 0 ;;\n"
+        "  *' build schemii ai-prototype-runtime') "
+        'printf "%s|%s\\n" "$*" "${SCHEMII_QA_EFFECTIVE_ALLOWED_TARGET_HOSTS-}" '
+        '>> "$FAKE_QA_BUILD_PROOF" ;;\n'
+        "esac\n"
+        'case "$*" in',
+        1,
+    ))
+    openssl = shutil.which("openssl")
+    assert openssl is not None
+    shim = mock_bin / "openssl"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = req ] && [ "$FAKE_PUBLISH_QA" = openssl ]; then\n'
+        '  printf "{}\\n" > "$SCHEMII_QA_STATE_DIRECTORY/registry.json"\n'
+        "fi\n"
+        f'exec "{openssl}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    proof = qa.parent / "qa-build-proof"
+    return registry, proof
+
+
+def test_guest_registry_publication_refuses_unapproved_overlay_or_keeps_safe_selection():
+    for publication in ("info", "openssl"):
+        with launcher_fixture() as (root, environment, commands, _):
+            registry, proof = prepare_qa_overlay_fixture(root, environment)
+            assert not registry.exists()
+            result = run_launcher(
+                root,
+                environment,
+                SCHEMII_QA_GUEST_TARGET_HOSTS="fixture.internal",
+                SCHEMII_ALLOWED_TARGET_HOSTS="fixture.internal",
+                FAKE_PUBLISH_QA=publication,
+                FAKE_QA_BUILD_PROOF=str(proof),
+            )
+            assert registry.is_file()
+            if publication == "info":
+                assert result.returncode == 1
+                assert "requires exact approval of qa-postgres" in result.stderr
+                assert commands.read_text().splitlines() == ["version:disabled", "info:disabled"]
+                assert not Path(environment["SCHEMII_SECRET_DIRECTORY"]).exists()
+                assert not (registry.parent / "writable-credentials.tsv").exists()
+                assert not proof.exists()
+            else:
+                assert result.returncode == 0, result.stderr
+                args, hosts = proof.read_text().strip().split("|")
+                assert "testing/compose.yaml" not in args
+                assert "testing/egress.yaml" not in args
+                assert hosts == ""
+
+
+def test_registered_overlay_uses_approved_guest_hosts_and_preserves_desktop_union():
+    for guest in (True, False):
+        with launcher_fixture() as (root, environment, _, _):
+            registry, proof = prepare_qa_overlay_fixture(root, environment)
+            registry.write_text("{}\n")
+            bound = "fixture.internal,qa-postgres"
+            guest_options = {
+                "SCHEMII_QA_GUEST_TARGET_HOSTS": bound,
+                "SCHEMII_ALLOWED_TARGET_HOSTS": bound,
+            } if guest else {}
+            result = run_launcher(
+                root, environment, FAKE_QA_BUILD_PROOF=str(proof), **guest_options
+            )
+            assert result.returncode == 0, result.stderr
+            args, hosts = proof.read_text().strip().split("|")
+            assert "testing/compose.yaml" in args
+            assert "testing/egress.yaml" in args
+            assert hosts == (bound if guest else "desktop.internal,qa-postgres")

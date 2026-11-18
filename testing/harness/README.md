@@ -225,7 +225,9 @@ addresses). The launcher receives those values as `SCHEMII_TARGET_EGRESS_MODE`
 and `SCHEMII_ALLOWED_TARGET_HOSTS`. Inherited versions of those settings must
 match the binding exactly. If the standard QA database registry exists at
 `.schemii/testing/registry.json`, explicitly include `qa-postgres` in
-`fixture.hosts` because the launcher adds that host when the overlay is active.
+`fixture.hosts` because the overlay uses that host. The launcher selects the overlay under its
+lock, checks the binding before mutation, and uses that same decision and the
+approved host list throughout startup.
 
 For independent review in the guest, pass `--reviewer-account ACCOUNT` and
 `--runtime-slots N` along with the binding and both accounts. The account must

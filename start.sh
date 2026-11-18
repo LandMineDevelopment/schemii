@@ -359,9 +359,21 @@ compose_args=(
   --project-directory "$ROOT_DIR"
   --file "$COMPOSE_FILE"
 )
-# Include the QA service on every launch once initialized; normal --remove-orphans
-# must not remove a portable testing database between runs.
+# Select the QA overlay once under the launcher lock. Registry publication
+# can occur independently, so use this decision for both Compose overlays.
+qa_database_overlay=0
 if [[ -f "${SCHEMII_QA_STATE_DIRECTORY}/registry.json" ]]; then
+  qa_database_overlay=1
+fi
+if [[ -v SCHEMII_QA_GUEST_TARGET_HOSTS ]]; then
+  [[ "$SCHEMII_QA_GUEST_TARGET_HOSTS" == "${SCHEMII_ALLOWED_TARGET_HOSTS-}" ]] \
+    || fail "disposable QA target hosts differ from the approved binding"
+  if (( qa_database_overlay )) && [[ ",$SCHEMII_QA_GUEST_TARGET_HOSTS," != *,qa-postgres,* ]]; then
+    fail "disposable QA database overlay requires exact approval of qa-postgres"
+  fi
+fi
+# Normal --remove-orphans must preserve an initialized testing database.
+if (( qa_database_overlay )); then
   source "$ROOT_DIR/testing/launcher.sh"
   testing_database_init_writable_registry
   compose_args+=(--file "${ROOT_DIR}/testing/compose.yaml")
@@ -548,10 +560,13 @@ fi
 export SCHEMII_DEMO_SCENARIO
 export SCHEMII_DEMO_SOURCE_REVISION
 
-if [[ -f "${SCHEMII_QA_STATE_DIRECTORY}/registry.json" ]]; then
-  # Resolve overlays first so adding the QA target never drops a machine's
-  # existing allowed targets (for example organization-postgres).
-  SCHEMII_QA_EFFECTIVE_ALLOWED_TARGET_HOSTS="$(docker "${compose_args[@]}" config --format json | python -c 'import json,sys; raw=json.load(sys.stdin)["services"]["schemii"]["environment"].get("SCHEMII_ALLOWED_TARGET_HOSTS", ""); hosts=[h.strip() for h in str(raw).split(",") if h.strip()]; print(",".join(dict.fromkeys([*hosts,"qa-postgres"])))')" || fail "could not resolve the testing target allowlist"
+if (( qa_database_overlay )); then
+  if [[ -v SCHEMII_QA_GUEST_TARGET_HOSTS ]]; then
+    SCHEMII_QA_EFFECTIVE_ALLOWED_TARGET_HOSTS="$SCHEMII_QA_GUEST_TARGET_HOSTS"
+  else
+    # Preserve the machine's resolved desktop allowlist before adding the QA host.
+    SCHEMII_QA_EFFECTIVE_ALLOWED_TARGET_HOSTS="$(docker "${compose_args[@]}" config --format json | python -c 'import json,sys; raw=json.load(sys.stdin)["services"]["schemii"]["environment"].get("SCHEMII_ALLOWED_TARGET_HOSTS", ""); hosts=[h.strip() for h in str(raw).split(",") if h.strip()]; print(",".join(dict.fromkeys([*hosts,"qa-postgres"])))')" || fail "could not resolve the testing target allowlist"
+  fi
   export SCHEMII_QA_EFFECTIVE_ALLOWED_TARGET_HOSTS
   compose_args+=(--file "$ROOT_DIR/testing/egress.yaml")
 fi

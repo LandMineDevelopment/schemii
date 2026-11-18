@@ -305,6 +305,8 @@ test('registered QA overlay may only append a host already approved in the guest
   for (const binding of [disposableGuestBinding(base),missing]) {
     await assert.rejects(withDisposableLauncher(root,binding,neverLaunch,{}),/exact approval of qa-postgres/);
   }
-  const supplied=await withDisposableLauncher(root,accepted,env=>env.SCHEMII_ALLOWED_TARGET_HOSTS,{});
-  assert.deepEqual([...new Set([...supplied.split(','),'qa-postgres'])],accepted.fixture.hosts);
+  await withDisposableLauncher(root,accepted,env=>{
+    assert.equal(env.SCHEMII_QA_GUEST_TARGET_HOSTS,accepted.fixture.hosts.join(','));
+    assert.equal(env.SCHEMII_ALLOWED_TARGET_HOSTS,env.SCHEMII_QA_GUEST_TARGET_HOSTS);
+  },{});
 });

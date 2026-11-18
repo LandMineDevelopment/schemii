@@ -107,7 +107,8 @@ export async function withDisposableLauncher(root, binding, action, ambient = pr
     // The launcher uses the guest system engine. Ignore persistent client
     // contexts and settings without running a Docker discovery command.
     Object.assign(env, { DOCKER_CONFIG: config, DOCKER_HOST: 'unix:///var/run/docker.sock',
-      SCHEMII_TEST_APP_PORT: '8001', SCHEMII_RESET_MIGRATION_DEMO: '0' });
+      SCHEMII_TEST_APP_PORT: '8001', SCHEMII_RESET_MIGRATION_DEMO: '0',
+      SCHEMII_QA_GUEST_TARGET_HOSTS: binding.fixture?.hosts.join(',') ?? '' });
     if (binding.fixture) {
       env.SCHEMII_TARGET_EGRESS_MODE = binding.fixture.mode;
       env.SCHEMII_ALLOWED_TARGET_HOSTS = binding.fixture.hosts.join(',');
