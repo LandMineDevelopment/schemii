@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -121,6 +121,24 @@ def selected_plan(root: Path, base: str, full: bool = False) -> dict:
             "acceptance": False,
         }
     return selected
+
+
+def comparison_matches(root: Path, base: str, head: str, classification: dict) -> bool:
+    """Recheck the resolved base ref and unique merge base selected by the planner."""
+    try:
+        base_commit = (
+            git(root, "rev-parse", "--verify", "--end-of-options", base + "^{commit}")
+            .decode()
+            .strip()
+        )
+        if base_commit != classification["base"]:
+            return False
+        merge_bases = (
+            git(root, "merge-base", "--all", base_commit, head).decode().splitlines()
+        )
+    except subprocess.CalledProcessError:
+        return False
+    return merge_bases == [classification["comparison_base"]]
 
 
 def private_directory(path: Path) -> None:
@@ -445,7 +463,7 @@ def run_selected(
     write_json(receipt_path, receipt)
     print(f"Local CI receipt: {receipt_path}", flush=True)
     started = time.perf_counter()
-    lease_context = None
+    lease_context = ExitStack()
     lease = None
     code = 2
 
@@ -520,11 +538,29 @@ def run_selected(
                 receipt.update(status="pending", reason="missing-prerequisite")
                 print(missing, file=sys.stderr)
                 return 2, receipt_path
-            if argv == planner.BROWSER_BOUNDARY:
+            if argv == ["./start.sh"]:
+                if not comparison_matches(
+                    root, base, identity["commit"], selected["classification"]
+                ):
+                    entry["reason"] = "comparison-changed-before-startup"
+                    receipt.update(status="source-changed", reason=entry["reason"])
+                    return 1, receipt_path
+                admission_started = time.perf_counter()
                 try:
-                    lease_context = deployment_lease(root)
-                    lease = lease_context.__enter__()
+                    lease = lease_context.enter_context(deployment_lease(root))
                 except BlockingIOError:
+                    lease = None
+                # Keep orchestration timing separate from the schema-1 commands.
+                write_json(
+                    run / "lease-admission.json",
+                    {
+                        "status": "acquired" if lease else "contended",
+                        "duration_ms": round(
+                            (time.perf_counter() - admission_started) * 1000, 3
+                        ),
+                    },
+                )
+                if lease is None:
                     entry.update(status="pending", reason="deployment-leased")
                     receipt.update(status="pending", reason="deployment-leased")
                     print(
@@ -643,6 +679,10 @@ def run_selected(
                 child_env.update(
                     SCHEMII_E2E_BASE_URL=LOCAL_URL,
                     SCHEMII_TEST_APP_PORT="8001",
+                )
+            launcher_lease = lease if argv[0] == "./start.sh" else None
+            if launcher_lease:
+                child_env.update(
                     SCHEMII_QA_LEASE_FD="3",
                     SCHEMII_QA_GATE_FD="4",
                     SCHEMII_QA_LEASE_MODE="exclusive",
@@ -654,22 +694,18 @@ def run_selected(
             print("+ " + shlex.join(command), flush=True)
             command_started = time.perf_counter()
             try:
-                code = invoke(root, command, child_env, lease)
+                code = invoke(root, command, child_env, launcher_lease)
             finally:
                 entry["duration_ms"] = round(
                     (time.perf_counter() - command_started) * 1000, 3
                 )
-            entry.update(
-                exit_code=code,
-                status="passed"
-                if code == 0
-                else "cancelled"
-                if code < 0 or code in {130, 143}
-                else "failed",
-            )
+            entry["exit_code"] = code
             # Keep failed original reporter files; only success is eligible for
             # validated acceptance summaries.
             if code:
+                entry["status"] = (
+                    "cancelled" if code < 0 or code in {130, 143} else "failed"
+                )
                 receipt.update(status=entry["status"], reason="command-failed")
                 return (128 - code if code < 0 else code), receipt_path
             if argv == ["./start.sh"]:
@@ -698,6 +734,7 @@ def run_selected(
                     status="source-changed", reason="source-changed-during-command"
                 )
                 return 1, receipt_path
+            entry["status"] = "passed"
             write_json(receipt_path, receipt)
         receipt.update(
             status="feedback-passed" if feedback else "passed", acceptance=not feedback
@@ -718,8 +755,7 @@ def run_selected(
         for signum in handlers:
             signal.signal(signum, signal.SIG_IGN)
         try:
-            if lease_context:
-                lease_context.__exit__(None, None, None)
+            lease_context.close()
             receipt["pending_commands"] = [
                 index
                 for index, entry in enumerate(entries)

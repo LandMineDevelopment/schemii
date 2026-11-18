@@ -1,5 +1,7 @@
 """Local CI acceptance controls, using disposable Git source and child processes."""
 
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
 import os
@@ -61,11 +63,13 @@ def repository(tmp_path, monkeypatch, ambient_secret_directory):
 
 
 def selected(root, profile="frontend-tests", commands=None):
+    head = git(root, "rev-parse", "HEAD")
     return {
         "classification": {
             "valid": True,
             "profile": profile,
-            "base": git(root, "rev-parse", "HEAD"),
+            "base": head,
+            "comparison_base": head,
         },
         "source": runner.source_identity(root),
         "layers": sorted(runner.layers(profile)),
@@ -338,22 +342,122 @@ def test_browser_prerequisites_block_before_install_or_launcher(
     assert seen == [["npm", "test"]]
 
 
-def test_occupied_deployment_lease_blocks_browser_before_startup(
-    repository, monkeypatch
+@contextmanager
+def flock(root, name):
+    with (root / ".git" / name).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+@pytest.mark.parametrize("occupied", ["qa-startup.lock", "qa-deployment.lock"])
+def test_occupied_lease_leaves_startup_and_mounted_inventory_pending(
+    repository, monkeypatch, occupied
 ):
     monkeypatch.setenv("SCHEMII_E2E_BOOTSTRAP", "1")
+    monkeypatch.setenv("SCHEMII_TEST_METADATA_DSN", "synthetic-dsn")
+    monkeypatch.setenv("SCHEMII_TEST_METADATA_PASSWORD", "synthetic-password")
     seen = controlled(monkeypatch)
+    plan = runner.selected_plan(repository, "HEAD", full=True)
+    startup = plan["commands"].index(["./start.sh"])
+    names = ["qa-startup.lock", "qa-deployment.lock"]
+    attempted = []
+    original_flock = fcntl.flock
+
+    def observe(fd, operation):
+        assert len(seen) == startup
+        assert operation == fcntl.LOCK_EX | fcntl.LOCK_NB
+        attempted.append(Path(os.readlink(f"/proc/self/fd/{fd}")).name)
+        return original_flock(fd, operation)
+
+    with flock(repository, occupied):
+        with monkeypatch.context() as patch:
+            patch.setattr(fcntl, "flock", observe)
+            code, path, receipt = execute(repository, plan)
+        assert attempted == names[: names.index(occupied) + 1]
+        with pytest.raises(BlockingIOError), flock(repository, occupied):
+            pass
+        with flock(repository, next(name for name in names if name != occupied)):
+            pass
     with runner.deployment_lease(repository):
-        code, _, receipt = execute(
-            repository,
-            selected(
-                repository,
-                "e2e-tests",
-                [runner.planner.BROWSER_BOUNDARY, ["./start.sh"]],
-            ),
-        )
+        pass
     assert code == 2 and receipt["reason"] == "deployment-leased"
-    assert receipt["acceptance"] is False and seen == []
+    assert receipt["status"] == "pending" and receipt["acceptance"] is False
+    assert len(seen) == startup
+    assert seen[-2] == runner.planner.BROWSER_BOUNDARY
+    assert seen[-1][:2] == ["node", "--test"]
+    rows = receipt["commands"]
+    assert [row["command"] for row in rows] == plan["commands"]
+    assert [row["status"] for row in rows] == ["passed"] * startup + ["pending"] * 15
+    admission = json.loads((path.parent / "lease-admission.json").read_text())
+    assert admission["status"] == "contended" and admission["duration_ms"] >= 0
+    assert rows[startup]["reason"] == "deployment-leased"
+    assert "executed_command" not in rows[startup]
+    assert rows[startup]["duration_ms"] is None
+    assert receipt["pending_commands"] == list(range(startup, len(rows)))
+    assert receipt["pending_layers"] == ["browser"]
+    assert "deployment" not in receipt and "browser_credentials" not in receipt
+    assert not (path.parent / "browser-credentials.json").exists()
+    discovery = path.parent / rows[startup - 1]["timing_evidence"]
+    assert json.loads(discovery.with_suffix(".summary.json").read_text())["complete"]
+
+
+@pytest.mark.parametrize("drift", ["source", "base-moved", "base-deleted"])
+def test_startup_admission_refuses_drift_after_passing_offline_prep(
+    repository, monkeypatch, drift
+):
+    monkeypatch.setenv("SCHEMII_E2E_BOOTSTRAP", "1")
+    git(repository, "branch", "planned-base")
+    plan = selected(
+        repository, "e2e-tests", runner.commands("e2e-tests", "planned-base")
+    )
+    controlled(monkeypatch)
+    startup = plan["commands"].index(["./start.sh"])
+    original_write = runner.write_json
+
+    def write(path, value):
+        original_write(path, value)
+        if (
+            path.name == "receipt.json"
+            and value["commands"][startup - 1]["status"] == "passed"
+        ):
+            # Apply drift once, after discovery has been recorded as passed.
+            monkeypatch.setattr(runner, "write_json", original_write)
+            if drift == "source":
+                (repository / "source.txt").write_text("changed before startup")
+            elif drift == "base-moved":
+                commit = git(
+                    repository,
+                    "commit-tree",
+                    "HEAD^{tree}",
+                    "-p",
+                    "HEAD",
+                    "-m",
+                    "advance base",
+                )
+                git(repository, "update-ref", "refs/heads/planned-base", commit)
+            else:
+                git(repository, "update-ref", "-d", "refs/heads/planned-base")
+
+    def no_lease(root):
+        pytest.fail("source and comparison must be checked before taking either lock")
+
+    monkeypatch.setattr(runner, "write_json", write)
+    monkeypatch.setattr(runner, "deployment_lease", no_lease)
+    code, path = runner.run_selected(
+        repository, plan, feedback=False, base="planned-base"
+    )
+    receipt = json.loads(path.read_text())
+    assert code == 1 and receipt["acceptance"] is False
+    assert receipt["status"] == "source-changed"
+    assert receipt["pending_commands"] == list(range(startup, len(plan["commands"])))
+    assert receipt["pending_layers"] == ["browser"]
+    assert receipt["reason"] == (
+        "source-changed-before-command"
+        if drift == "source"
+        else "comparison-changed-before-startup"
+    )
+    assert (runner.source_identity(repository) == plan["source"]) == (drift != "source")
+    assert not (path.parent / "lease-admission.json").exists()
 
 
 def test_launcher_receives_actual_owned_lease_descriptors(repository):
@@ -384,21 +488,57 @@ def test_backups_use_new_run_directory_and_hold_lease(repository, monkeypatch):
     seen = []
 
     def invoke(root, command, environment, lease):
-        assert lease is not None
-        with pytest.raises(BlockingIOError), runner.deployment_lease(root):
-            pass
+        launcher = command[0] == "./start.sh"
+        mounted = launcher or command[1] == "scripts/ci/run-browser-shard.mjs"
+        assert (lease is not None) == launcher
+        metadata = {
+            key: environment[key]
+            for key in runner.SCOPE_ENV
+            if key.startswith("SCHEMII_QA_") and key in environment
+        }
+        assert metadata == (
+            {
+                "SCHEMII_QA_LEASE_FD": "3",
+                "SCHEMII_QA_GATE_FD": "4",
+                "SCHEMII_QA_LEASE_MODE": "exclusive",
+            }
+            if launcher
+            else {}
+        )
+        if mounted:
+            assert environment["SCHEMII_E2E_BASE_URL"] == runner.LOCAL_URL
+            assert environment["SCHEMII_TEST_APP_PORT"] == "8001"
+            assert_held()
+        else:
+            with runner.deployment_lease(root):
+                pass
+            assert "SCHEMII_E2E_CREDENTIALS_FILE" not in environment
+            assert "SCHEMII_SECRET_DIRECTORY" not in environment
+        if "CI_TELEMETRY_FILE" in environment:
+            Path(environment["CI_TELEMETRY_FILE"]).write_text(
+                "\n".join(json.dumps(record) for record in records(environment)) + "\n"
+            )
         seen.append(command)
         return 0
 
+    def assert_held():
+        for name in ("qa-startup.lock", "qa-deployment.lock"):
+            with pytest.raises(BlockingIOError), flock(repository, name):
+                pass
+
+    def verify():
+        assert_held()
+        assert seen[-1] == ["./start.sh"]
+        return [
+            {"url": url, "status": 200}
+            for url in (runner.LOCAL_URL, runner.PREVIEW_URL)
+        ]
+
     monkeypatch.setattr(runner, "invoke", invoke)
-    monkeypatch.setattr(
-        runner, "verify_deployment", lambda: [{"url": runner.LOCAL_URL, "status": 200}]
-    )
-    plan_commands = [
-        runner.planner.BROWSER_BOUNDARY,
-        ["./start.sh"],
-        ["./start.sh", "--backup", ".schemii/test-selection/recovery"],
-        ["./start.sh", "--verify-backup", ".schemii/test-selection/recovery"],
+    monkeypatch.setattr(runner, "verify_deployment", verify)
+    full_commands = runner.commands("full", "HEAD")
+    plan_commands = full_commands[
+        full_commands.index(runner.planner.BROWSER_BOUNDARY) :
     ]
     paths = []
     for _ in range(2):
@@ -406,10 +546,58 @@ def test_backups_use_new_run_directory_and_hold_lease(repository, monkeypatch):
             repository, selected(repository, "full", plan_commands)
         )
         assert code == 0 and receipt["acceptance"] is True
+        assert [row["command"] for row in receipt["commands"]] == plan_commands
+        admission = json.loads((path.parent / "lease-admission.json").read_text())
+        assert admission["status"] == "acquired" and admission["duration_ms"] >= 0
+        assert receipt["pending_commands"] == receipt["pending_layers"] == []
+        deployment = json.loads((path.parent / "deployment.json").read_text())
+        assert deployment == receipt["deployment"]
+        assert deployment["source"] == receipt["source"]
+        with runner.deployment_lease(repository):
+            pass
         paths.append(path)
         assert seen[-2][2] == seen[-1][2] == str(path.parent / "recovery")
     assert paths[0] != paths[1]
     assert (repository / "source.txt").read_text() == "original source\n"
+
+
+@pytest.mark.parametrize("launcher_code", [0, 7])
+def test_failed_start_or_route_verification_releases_lease_and_blocks_mounted_rows(
+    repository, monkeypatch, launcher_code
+):
+    monkeypatch.setenv("SCHEMII_E2E_BOOTSTRAP", "1")
+    calls = []
+    offline = controlled(monkeypatch)
+    offline_invoke = runner.invoke
+
+    def invoke(root, command, environment, lease):
+        if command == ["./start.sh"]:
+            calls.append("start")
+            return launcher_code
+        assert not calls
+        return offline_invoke(root, command, environment, lease)
+
+    def verify():
+        calls.append("verify")
+        raise ValueError("controlled canonical route verification failure")
+
+    monkeypatch.setattr(runner, "invoke", invoke)
+    monkeypatch.setattr(runner, "verify_deployment", verify)
+    plan = selected(repository, "e2e-tests", runner.commands("e2e-tests", "HEAD")[1:])
+    code, _, receipt = execute(repository, plan)
+    assert len(offline) == 2
+    assert calls == (["start"] if launcher_code else ["start", "verify"])
+    assert code == (launcher_code or 2) and receipt["acceptance"] is False
+    assert receipt["status"] == ("failed" if launcher_code else "incomplete")
+    startup = receipt["commands"][2]
+    assert (
+        startup["status"] == receipt["status"] and startup["exit_code"] == launcher_code
+    )
+    assert receipt["pending_commands"] == list(range(2, len(plan["commands"])))
+    assert receipt["pending_layers"] == ["browser"]
+    assert "deployment" not in receipt
+    with runner.deployment_lease(repository):
+        pass
 
 
 def wait_for(path):
