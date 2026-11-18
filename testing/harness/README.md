@@ -223,12 +223,15 @@ fixture egress, add a private `fixture` object containing `mode` (`internal-only
 or `external`) and `hosts` (a bounded array of exact approved hostnames or IP
 addresses). The launcher receives those values as `SCHEMII_TARGET_EGRESS_MODE`
 and `SCHEMII_ALLOWED_TARGET_HOSTS`. Inherited versions of those settings must
-match the binding exactly.
+match the binding exactly. If the standard QA database registry exists at
+`.schemii/testing/registry.json`, explicitly include `qa-postgres` in
+`fixture.hosts` because the launcher adds that host when the overlay is active.
 
 For independent review in the guest, pass `--reviewer-account ACCOUNT` and
 `--runtime-slots N` along with the binding and both accounts. The account must
-be separately selected and claimable. `--parallel` counts testers. Reserve one
-observed slot each for the coordinator and reviewer. Both lanes run their
+be separately selected and claimable. Reviewed guest runs require one tester
+wave. Set `--parallel` to the number of selected testers. Reserve one observed
+slot each for the coordinator and reviewer. Both lanes run their
 configured cases with isolated browser processes. The reviewer uses their own
 claimed session to inspect the tester’s evidence and submit an adjudication.
 The controller rechecks each cited target image’s hash at review time and

@@ -278,4 +278,33 @@ test('guest CLI reserves a separate isolated reviewer without dropping any lane 
   assert.match(plan().stderr,/explicit disposable guest binding/);
   assert.match(plan('--disposable-guest-binding',file,'--parallel','2').stderr,/observed --runtime-slots|counts testers/);
   assert.match(plan('--disposable-guest-binding',file,'--browser','native').stderr,/guest-local isolated/);
+  const wavePlan=(parallel,slots)=>spawnSync(process.execPath,[cli,'plan','--disposable-guest-binding',file,
+    '--accounts','tester-one,tester-two,verifier','--reviewer-account','verifier',
+    '--parallel',parallel,'--runtime-slots',slots],{encoding:'utf8'});
+  const multiwave=wavePlan('1','3');
+  assert.equal(multiwave.status,2);
+  assert.match(multiwave.stderr,/requires one tester wave/);
+  const oneWave=wavePlan('2','4');
+  assert.equal(oneWave.status,0,oneWave.stderr);
+  assert.deepEqual(JSON.parse(oneWave.stdout).lanes.map(l=>l.role),['tester','tester','reviewer']);
+});
+
+test('registered QA overlay may only append a host already approved in the guest binding', async t => {
+  const root=await mkdtemp(join(tmpdir(),'qa-guest-overlay-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const registry=join(root,'.schemii','testing','registry.json');
+  await mkdir(join(root,'.schemii','testing'),{recursive:true});
+  const base={
+    bootId:'12345678-1234-1234-1234-123456789012',commit:'a'.repeat(40),certificateSha256:'b'.repeat(64),
+  };
+  const missing=disposableGuestBinding({...base,fixture:{mode:'external',hosts:['fixture.internal']}});
+  const accepted=disposableGuestBinding({...base,fixture:{mode:'external',hosts:['fixture.internal','qa-postgres']}});
+  assert.equal(await withDisposableLauncher(root,missing,env=>env.SCHEMII_ALLOWED_TARGET_HOSTS,{}),'fixture.internal');
+  await writeFile(registry,'{}',{mode:0o600});
+  const neverLaunch=()=>assert.fail('unapproved overlay reached the launcher');
+  for (const binding of [disposableGuestBinding(base),missing]) {
+    await assert.rejects(withDisposableLauncher(root,binding,neverLaunch,{}),/exact approval of qa-postgres/);
+  }
+  const supplied=await withDisposableLauncher(root,accepted,env=>env.SCHEMII_ALLOWED_TARGET_HOSTS,{});
+  assert.deepEqual([...new Set([...supplied.split(','),'qa-postgres'])],accepted.fixture.hosts);
 });

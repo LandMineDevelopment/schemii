@@ -185,6 +185,9 @@ async function selection(o, reservedAccounts, guestBinding) {
     if (!reviewerAccount || !accounts.includes(reviewerAccount) || accounts.length < 2) throw new Error('Independent QA review requires --reviewer-account naming a separately selected account.');
     if (!/^[0-9]+$/.test(o['runtime-slots'] || '') || !Number.isSafeInteger(runtimeSlots) || runtimeSlots < parallel + 2) throw new Error('Independent QA review requires observed --runtime-slots for active testers plus coordinator and reviewer.');
     if (parallel > accounts.length - 1) throw new Error('--parallel counts testers; reserve one selected reviewer account separately.');
+    if (guestBinding && parallel < accounts.length - 1) {
+      throw new Error('Guest QA with an independent reviewer requires one tester wave. Set --parallel to the number of selected tester accounts.');
+    }
   } else if (reviewerAccount || runtimeSlots !== null) throw new Error('--reviewer-account and --runtime-slots require native QA or an explicit disposable guest binding.');
   const products = list(o.products, 'schemoo');
   if (products.some(x => !['schemii','schemoo','schemer'].includes(x))) throw new Error('Unknown product.');

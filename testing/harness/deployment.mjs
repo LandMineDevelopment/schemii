@@ -1,7 +1,7 @@
 import { createHash, X509Certificate } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
-import { lstatSync, readFileSync, readlinkSync, closeSync, constants } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync, statSync, closeSync, constants } from 'node:fs';
 import https from 'node:https';
 import { isIP } from 'node:net';
 import path from 'node:path';
@@ -88,6 +88,11 @@ function checkDisposableConfiguration(root, env, binding) {
     try { lstatSync(path.join(root, file)); }
     catch (error) { if (error.code === 'ENOENT') continue; throw error; }
     throw new Error('Disposable QA refuses an unverified machine-local Compose override.');
+  }
+  // Match the stock launcher's regular-file test for the default QA overlay.
+  const registry = statSync(path.join(root, '.schemii/testing/registry.json'), { throwIfNoEntry: false });
+  if (registry?.isFile() && !binding.fixture?.hosts.includes('qa-postgres')) {
+    throw new Error('Disposable QA with the registered testing database requires exact approval of qa-postgres in fixture.hosts.');
   }
 }
 
