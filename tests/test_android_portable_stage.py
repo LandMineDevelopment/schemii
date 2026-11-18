@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import stat
 import subprocess
 
@@ -231,7 +232,8 @@ main stage-portable "$HOME/bundle"
     assert result.returncode == 0, result.stderr
 
 
-def test_payload_changed_between_verification_and_copy(tmp_path):
+@pytest.fixture
+def synthetic_bundle(tmp_path):
     transfer = tmp_path / "transfer"
     transfer.mkdir(mode=0o700)
     identities = {}
@@ -250,10 +252,151 @@ def test_payload_changed_between_verification_and_copy(tmp_path):
         value = b"A" * 43 + b"=" if secret == "metadata_encryption_key" else b"fixture"
         write_private(transfer / "secrets" / secret, value)
     recovery.seal_portable(transfer, identities)
+    return transfer
+
+
+def test_payload_changed_between_verification_and_copy(tmp_path, synthetic_bundle):
+    transfer = synthetic_bundle
     verified = recovery.verify_portable(transfer)
     write_private(transfer / "target/fixture.dump", b"PGDMPchanged")
     with pytest.raises(recovery.RecoveryError, match="checksum"):
         stage._copy_bundle(transfer, tmp_path / "copy", verified)
+
+
+@pytest.mark.parametrize(
+    ("birth_identity", "timed_out"),
+    [
+        ("unavailable", True),
+        ("mismatched", True),
+        ("verified", True),
+        ("unavailable", False),
+    ],
+)
+def test_staged_postgres_custody_until_reaped(
+    destination, synthetic_bundle, monkeypatch, birth_identity, timed_out
+):
+    active, control = destination
+    active.state.mkdir(parents=True)
+    sentinel = active.state / "config.json"
+    write_private(sentinel, b"retained")
+    signals = []
+    observed_identity = {
+        "pid": 424242,
+        "pgid": 424242 if birth_identity == "verified" else 424243,
+        "start_ticks": 500,
+        "boot_id": "fixture",
+    }
+    identity = None if birth_identity == "unavailable" else observed_identity
+
+    class UnreapedChild:
+        pid = observed_identity["pid"]
+
+        def poll(self):
+            return None
+
+        def send_signal(self, signum):
+            signals.append(signum)
+
+        def wait(self, timeout):
+            if timed_out:
+                raise subprocess.TimeoutExpired("fixture-child", timeout)
+            return 0
+
+    def restore_plane(self, plane, _identity, port):
+        if plane == "metadata":
+            return "111"
+        self.phase = "target-startup"
+        with self._postgres(plane, self.root / "target-pgdata", self.root / "t", port):
+            assert birth_identity == "verified", "Restore started with unknown custody"
+            self.phase = "target-archives"
+            raise stage.StageError("injected late archive failure")
+
+    monkeypatch.setattr(stage.Stage, "require_tools", lambda _: {})
+    monkeypatch.setattr(stage.Stage, "restore_plane", restore_plane)
+
+    def read_identity(pid):
+        assert pid == observed_identity["pid"]
+        [owned] = stage_path(active)
+        claim = json.loads((owned / "attempt.json").read_text())["processes"]["target"]
+        assert claim["observed_pid"] == pid
+        assert claim["birth_identity_status"] == "pending"
+        return identity
+
+    monkeypatch.setattr(runtime, "process_identity", read_identity)
+    monkeypatch.setattr(stage.subprocess, "Popen", lambda *a, **kw: UnreapedChild())
+    expected_error = (
+        "shutdown is unresolved" if timed_out else "Cannot establish staged PostgreSQL"
+    )
+    with pytest.raises(stage.StageError, match=expected_error):
+        stage._stage(active, synthetic_bundle, control, runtime.PG_BIN)
+
+    [owned] = stage_path(active)
+    attempt = json.loads((owned / "attempt.json").read_text())
+    assert attempt["status"] == "quarantined"
+    assert attempt["phase"] == (
+        "target-archives" if birth_identity == "verified" else "target-startup"
+    )
+    assert signals == [signal.SIGINT]
+    assert sentinel.read_bytes() == b"retained"
+    assert list(active.state.iterdir()) == [sentinel]
+    assert not (owned / stage.RECEIPT).exists()
+    if not timed_out:
+        assert attempt["processes"] == {}
+        stage._assert_prior_stages_resolved(active.state.parent)
+        return
+
+    assert attempt["processes"] == {
+        "target": {
+            "observed_pid": observed_identity["pid"],
+            "spawn_phase": "target-startup",
+            "birth_identity_status": birth_identity,
+            "birth_identity": identity,
+            "shutdown_status": "timed-out",
+            "shutdown_timeout_seconds": 30,
+            "signal_authority": "none",
+        }
+    }
+
+    def reject_pid_use(*_args, **_kwargs):
+        pytest.fail("Retained stage diagnostics must not authorize process access")
+
+    monkeypatch.setattr(runtime, "process_identity", reject_pid_use)
+    monkeypatch.setattr(os, "kill", reject_pid_use)
+    monkeypatch.setattr(os, "killpg", reject_pid_use)
+    monkeypatch.setattr(stage.subprocess, "Popen", reject_pid_use)
+    # The old stage's bundle is never reused, and a fresh stage also waits
+    # for ownership reconciliation. No signal authority comes from disk.
+    for bundle in (owned / "bundle", synthetic_bundle):
+        with pytest.raises(stage.StageError, match="prior portable stage"):
+            stage._stage(active, bundle, control, runtime.PG_BIN)
+    assert stage_path(active) == [owned]
+    assert sentinel.read_bytes() == b"retained"
+    assert json.loads((owned / "attempt.json").read_text()) == attempt
+
+
+@pytest.mark.parametrize("incomplete", ["missing", "in-progress", "legacy-timeout"])
+def test_prior_stage_with_incomplete_custody_blocks_before_transfer(
+    destination, tmp_path, incomplete
+):
+    active, control = destination
+    prior = active.state.parent / ".schemii-portable-retained"
+    prior.mkdir(parents=True, mode=0o700)
+    if incomplete != "missing":
+        record = {
+            "format": stage.ATTEMPT_FORMAT,
+            "status": "quarantined"
+            if incomplete == "legacy-timeout"
+            else "in-progress",
+            "processes": {},
+            "reason": stage.UNRESOLVED_SHUTDOWN
+            if incomplete == "legacy-timeout"
+            else None,
+        }
+        write_private(prior / "attempt.json", json.dumps(record).encode())
+    with pytest.raises(stage.StageError, match="prior portable stage"):
+        stage._stage(active, tmp_path / "missing-bundle", control, runtime.PG_BIN)
+    assert stage_path(active) == [prior]
+    assert not active.state.exists()
 
 
 @pytest.fixture(scope="module")

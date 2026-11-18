@@ -25,6 +25,9 @@ else:
 BUNDLE_BIND = Path("/mnt/schemii-portable-bundle")
 CONTROL_BIND = Path("/mnt/schemii-control")
 RECEIPT = "inspection.json"
+ATTEMPT_FORMAT = "schemii-termux-portable-attempt-v1"
+UNRESOLVED_SHUTDOWN = "Staged PostgreSQL shutdown is unresolved"
+SHUTDOWN_TIMEOUT_SECONDS = 30
 PORTABLE_TOOLS = ("initdb", "postgres", "psql", "pg_restore", "pg_controldata")
 PASSWORD_FILE = {"metadata": "metadata_app_password", "target": "target_password"}
 
@@ -119,6 +122,30 @@ def _owner_record(path: Path) -> dict | None:
     if not isinstance(result, dict) or not result:
         raise StageError("Destination ownership record is unverifiable")
     return result
+
+
+def _assert_prior_stages_resolved(parent: Path) -> None:
+    """Block on retained uncertainty without consulting or signaling a recorded PID."""
+    for root in parent.glob(".schemii-portable-*"):
+        if root.is_symlink() or not root.is_dir():
+            continue
+        try:
+            attempt = _owner_record(root / "attempt.json")
+        except StageError:
+            attempt = None
+        postmasters = (
+            root / f"{plane}-pgdata" / "postmaster.pid"
+            for plane in recovery.PORTABLE_CLUSTERS
+        )
+        if (
+            attempt is None
+            or attempt.get("format") != ATTEMPT_FORMAT
+            or attempt.get("status") not in ("quarantined", "verified")
+            or attempt.get("processes") != {}
+            or attempt.get("reason") == UNRESOLVED_SHUTDOWN
+            or any(path.exists() or path.is_symlink() for path in postmasters)
+        ):
+            raise StageError(f"Unresolved custody in prior portable stage: {root}")
 
 
 def _assert_destination_stopped(runtime: guest.Runtime, control: Path) -> None:
@@ -292,29 +319,46 @@ class Stage:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        identity = guest.process_identity(process.pid)
+        custody = {
+            "observed_pid": process.pid,
+            "spawn_phase": self.phase,
+            "birth_identity_status": "pending",
+            "birth_identity": None,
+            "shutdown_status": "pending",
+            "shutdown_timeout_seconds": SHUTDOWN_TIMEOUT_SECONDS,
+            "signal_authority": "none",
+        }
+        self.processes[plane] = custody
         try:
-            if identity is None or identity["pgid"] != process.pid:
-                raise StageError("Cannot establish staged PostgreSQL process ownership")
-            self.processes[plane] = identity
+            # Record the direct child before asking /proc to identify it.
             self.record_attempt("in-progress")
+            identity = guest.process_identity(process.pid)
+            custody["birth_identity"] = identity
+            if identity is None:
+                custody["birth_identity_status"] = "unavailable"
+            elif identity.get("pid") == identity.get("pgid") == process.pid:
+                custody["birth_identity_status"] = "verified"
+            else:
+                custody["birth_identity_status"] = "mismatched"
+            self.record_attempt("in-progress")
+            if custody["birth_identity_status"] != "verified":
+                raise StageError("Cannot establish staged PostgreSQL process ownership")
             yield process
         finally:
             # This Popen owns the original unreaped direct child. Do not use
             # pg_ctl or signal a PID obtained from a data directory.
-            if process.poll() is None:
+            exit_code = process.poll()
+            if exit_code is None:
+                custody["shutdown_status"] = "requested"
                 process.send_signal(signal.SIGINT)
                 try:
-                    process.wait(timeout=30)
+                    exit_code = process.wait(timeout=SHUTDOWN_TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
-                    raise StageError(
-                        "Staged PostgreSQL shutdown is unresolved"
-                    ) from None
-            if process.returncode != 0:
-                raise StageError(
-                    f"Staged PostgreSQL exited with status {process.returncode}"
-                )
+                    custody["shutdown_status"] = "timed-out"
+                    raise StageError(UNRESOLVED_SHUTDOWN) from None
             self.processes.pop(plane, None)
+            if exit_code != 0:
+                raise StageError(f"Staged PostgreSQL exited with status {exit_code}")
 
     def _psql(self, env: dict, *args, **options):
         return self._tool(
@@ -472,7 +516,7 @@ class Stage:
         self.write_receipt(
             "attempt.json",
             {
-                "format": "schemii-termux-portable-attempt-v1",
+                "format": ATTEMPT_FORMAT,
                 "status": status,
                 "phase": self.phase,
                 "processes": self.processes,
@@ -501,6 +545,7 @@ def _stage(runtime: guest.Runtime, bundle: Path, control: Path, pg_bin: Path) ->
         _interrupts(runtime),
     ):
         _assert_destination_stopped(runtime, control)
+        _assert_prior_stages_resolved(state.parent)
         fingerprint = recovery._runtime_fingerprint()
         _private_directory(bundle)
         manifest = recovery.verify_portable(bundle)
