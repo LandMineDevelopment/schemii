@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 from pathlib import Path
 import socket
@@ -44,9 +45,11 @@ def native(tmp_path):
 #include <string.h>
 #include <unistd.h>
 #include <stdatomic.h>
-static atomic_int delay;
+static atomic_int delay, entered;
 void delay_read(int value) { atomic_store(&delay,value); }
+int reader_entered(void) { return atomic_load(&entered); }
 struct boot_identity_result boot_identity_read(void) {
+ atomic_store(&entered,1);
  while (atomic_load(&delay)) usleep(1000);
  struct boot_identity_result r; memset(&r,0,sizeof(r));
  r.status=BOOT_ID_ORIGIN_UNKNOWN; return r;
@@ -78,6 +81,10 @@ struct boot_identity_result boot_identity_read(void) {
         check=True,
     )
     lib = ctypes.CDLL(str(library))
+    lib.delay_read.argtypes = [ctypes.c_int]
+    lib.delay_read.restype = None
+    lib.reader_entered.argtypes = []
+    lib.reader_entered.restype = ctypes.c_int
     lib.apk_owner_open.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
     lib.apk_owner_status.argtypes = [ctypes.c_void_p]
     lib.apk_owner_status.restype = Status
@@ -129,16 +136,30 @@ def test_real_owner_retains_lease_and_never_promotes_observation(native, tmp_pat
 def test_pending_observer_keeps_status_and_stop_responsive(native, tmp_path):
     lib, _ = native
     owner = opened(lib, tmp_path / "control")
-    lib.delay_read(1)
-    assert lib.apk_owner_request(owner, 1) == 0
-    before = time.monotonic()
-    assert lib.apk_owner_status(owner).phase == 1
-    assert lib.apk_owner_request(owner, 2) != 0  # cancellation latched, no replacement
-    assert lib.apk_owner_close(ctypes.byref(owner)) != 0
-    assert time.monotonic() - before < 0.5
-    lib.delay_read(0)
-    assert settled(lib, owner).births == 0
-    assert lib.apk_owner_close(ctypes.byref(owner)) == 0
+    try:
+        lib.delay_read(1)
+        assert lib.apk_owner_request(owner, 1) == 0
+        # PENDING can mean Start is queued. Wait for the fake reader itself
+        # before Stop can latch cancellation.
+        deadline = time.monotonic() + 3
+        while not lib.reader_entered():
+            if time.monotonic() >= deadline:
+                pytest.fail("Fake boot reader did not enter")
+            time.sleep(0.001)
+        before = time.monotonic()
+        assert lib.apk_owner_status(owner).phase == 1
+        assert lib.apk_owner_request(owner, 2) == errno.EBUSY  # cancellation latched
+        assert lib.apk_owner_close(ctypes.byref(owner)) == errno.EBUSY
+        assert owner.value
+        assert time.monotonic() - before < 0.5
+    finally:
+        lib.delay_read(0)
+        if owner.value:
+            try:
+                state = settled(lib, owner)
+            finally:
+                assert lib.apk_owner_close(ctypes.byref(owner)) == 0 and not owner.value
+    assert state.births == 0
 
 
 def test_directory_refusals(native, tmp_path):
