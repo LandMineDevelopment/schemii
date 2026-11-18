@@ -248,14 +248,21 @@ snapshot with the disposable guest disk until the application is torn down.
 
 This optional input is for the owned Linux amd64 guest with host-enforced
 offline networking, a clean checkout, and a fresh exclusive startup and
-deployment lease. Keep the pinned Python, Node, PostgreSQL and ingress images
-available by digest in its local system engine. The launcher checks the four
-images first and refuses missing or incompatible images. The supported
-Compose path uses local contexts and the bundled BuildKit Dockerfile frontend
-with read-only RUN bind mounts. A separate Buildx installation or remote
-Dockerfile frontend is unnecessary. If the guest cannot resolve the approved
-Compose build or use the built-in mount syntax, stop with its private launch
-log. Keep the guest offline throughout image resolution and startup.
+deployment lease. **Offline launches currently stop before engine access.**
+The recorded guest Compose setup reported missing Buildx, and the intake has
+no verified builder-local base-image source. Engine image inventory,
+`pull: false` and build-step network isolation do not enforce local-only image
+resolution.
+
+To enable the path, first qualify an exact Compose, Buildx and BuildKit
+combination that consumes verified digest-pinned Linux amd64 Python and Node
+content as explicit local inputs. One candidate is local OCI layout named
+contexts, with the pinned index or manifest, platform manifest, config and
+every layer verified before use. Demonstrate local refusal for missing or
+damaged content, including through the selected Dockerfile frontend. Verify
+the pinned PostgreSQL and ingress runtime images separately in the guest
+engine for startup with pulls disabled. Keep the guest offline during
+qualification and startup.
 
 Add `"offlineBuild": {"manifest": "/absolute/private/bundle/manifest.json",
 "sha256": "<manifest SHA-256>"}` to the fresh guest binding. Stage the bundle
@@ -281,16 +288,20 @@ reviewed artifacts and the launcher independently checks each member
 before building.
 
 The launcher archives the exact commit into a private temporary context,
-copies only verified read-only artifacts into it, and applies a build-only
-Compose input to the Schemii and AI runtime build targets. The effective
-build must select network `none`, offline npm and pip, and no base-image pull
-request. Bind mounts keep the input package files outside the final images.
-Before application replacement the launcher removes the temporary build
-context and uses the ordinary runtime configuration with image pulls and
-implicit builds disabled. A failed build also removes the staging and leaves
-the running deployment unchanged. After a forced termination, reconcile
-private `/tmp/schemii-qa-build.*` ownership with the guest lease holder before
-removing any residue. Preserve the original bundle and private launch log.
+copies only verified read-only artifacts into it, and snapshots the committed
+`compose.test.yaml`. It refuses working Compose drift even when Git status is
+clean. Inspection and build use the snapshot plus the verified generated
+build overlay. Replacement and startup use the same snapshot with pulls and
+implicit builds disabled. All phases keep the checkout as the Compose project
+directory so relative runtime mounts still resolve there. The launcher checks
+the Compose inputs again before replacement.
+
+The build overlay selects network `none` and offline npm and pip. Read-only
+bind mounts keep input packages outside the final images. The launcher removes
+the temporary build context before replacement and removes the remaining
+private staging on exit. After a forced termination, reconcile private
+`/tmp/schemii-qa-build.*` ownership with the guest lease holder before removing
+any residue. Preserve the original bundle and private launch log.
 
 Offline build can be combined with the fixture CA binding. Both options
 require exclusive startup and refuse the registered QA overlay and

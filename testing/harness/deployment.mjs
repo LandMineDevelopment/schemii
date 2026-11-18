@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { writeJSON } from './store.mjs';
 import { processIdentity, cgroupIdentity } from '../load/runtime.mjs';
-import { buildInputBinding, stageOfflineBuild, verifyOfflineBuildConfig } from './build-inputs.mjs';
+import { buildInputBinding, stageOfflineBuild, verifyOfflineBuildConfig, verifyOfflineCompose } from './build-inputs.mjs';
 
 export const LOCAL_ORIGIN = 'https://localhost:8001';
 export const DESKTOP_PREVIEW = 'https://omarchy.taile4f57f.ts.net';
@@ -62,6 +62,14 @@ async function fixtureCertificate(file, digest) {
   return bytes;
 }
 
+function fixtureCAOverlay(certificate) {
+  const target = '/run/schemii-qa/fixture-ca.pem';
+  return Buffer.from(JSON.stringify({services:{schemii:{
+    environment:{PGSSLROOTCERT:target},
+    volumes:[{type:'bind',source:certificate.replaceAll('$', () => '$$'),target,read_only:true,bind:{create_host_path:false}}],
+  }}}));
+}
+
 export async function stageFixtureCA(root, file, digest) {
   const bytes = await fixtureCertificate(file, digest);
   const privateState = path.join(root, '.schemii');
@@ -76,11 +84,7 @@ export async function stageFixtureCA(root, file, digest) {
     await writeFile(certificate, bytes, {flag:'wx', mode:0o400});
     await chmod(certificate, 0o444);
     const overlay = path.join(dir, 'compose.json');
-    const target = '/run/schemii-qa/fixture-ca.pem';
-    await writeFile(overlay, JSON.stringify({services:{schemii:{
-      environment:{PGSSLROOTCERT:target},
-      volumes:[{type:'bind',source:certificate.replaceAll('$', () => '$$'),target,read_only:true,bind:{create_host_path:false}}],
-    }}}), {flag:'wx', mode:0o600});
+    await writeFile(overlay, fixtureCAOverlay(certificate), {flag:'wx', mode:0o400});
     return overlay;
   } catch (error) {
     await rm(dir, {recursive:true,force:true});
@@ -525,16 +529,26 @@ export async function startDeployment({
 
 // Called only by the canonical launcher, after validating its inherited lease.
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [command, root, stage] = process.argv.slice(2);
+  const [command, root, stage, phase, caOverlay] = process.argv.slice(2);
   try {
     if (command === 'stage-fixture-ca' && root) {
       console.log(await stageBoundFixtureCA(root, process.env.SCHEMII_QA_FIXTURE_CA_BINDING));
     } else if (command === 'stage-offline-build' && root && stage) {
       await stageBoundOfflineBuild(root, process.env.SCHEMII_QA_OFFLINE_BUILD_BINDING, stage);
-    } else if (command === 'verify-offline-engine') {
-      await assertOfflineEngine();
+    } else if (command === 'require-offline-local-bases') {
+      // Engine image inventory and build-step network isolation do not restrict
+      // the builder's registry resolver. Require a supported local content source
+      // before enabling this launch path.
+      process.stderr.write('Offline build requires a verified local-only builder source for the pinned base images.\n');
+      process.exitCode = 1;
+    } else if (command === 'verify-offline-compose' && root && stage && ['build','runtime'].includes(phase)) {
+      await verifyOfflineCompose(root, stage, process.env.SCHEMII_SOURCE_COMMIT, readPrivateDeploymentFile, phase);
+      if (caOverlay && !fixtureCAOverlay(path.join(path.dirname(caOverlay), 'ca.pem'))
+        .equals(await readPrivateDeploymentFile(caOverlay, 4096))) {
+        throw new Error('Fixture CA Compose overlay changed during the offline launch.');
+      }
     } else if (command === 'verify-offline-build' && root && stage) {
-      verifyOfflineBuildConfig(JSON.parse(readFileSync(0, 'utf8')), stage, readFileSync(path.join(stage,'revision'),'utf8').trim());
+      verifyOfflineBuildConfig(JSON.parse(readFileSync(0, 'utf8')), stage, process.env.SCHEMII_SOURCE_COMMIT);
     } else process.exitCode = 2;
   } catch {
     process.stderr.write(command === 'stage-fixture-ca' ? 'Disposable fixture CA validation or staging failed.\n' :

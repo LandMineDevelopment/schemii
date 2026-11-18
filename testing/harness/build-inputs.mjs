@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { chmod, lstat, mkdir, open, readdir, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -8,6 +9,46 @@ const digest = /^[0-9a-f]{64}$/;
 const MB = 1024 * 1024;
 const npmDir = 'npm-cache/_cacache/content-v2/sha512';
 const lockFiles = ['ai/prototype/package-lock.json', 'constraints.docker.txt', 'pyproject.toml'];
+const composeFile = 'compose.test.yaml';
+const composeLimit = 128 * 1024;
+
+function committedFile(root, commit, file, maxBuffer = MB) {
+  if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error('Invalid offline build revision.');
+  return execFileSync('git', ['--no-replace-objects', '-C', root, 'cat-file', 'blob', `${commit}:${file}`],
+    {maxBuffer, stdio:['ignore','pipe','ignore']});
+}
+
+async function committedCompose(root, commit) {
+  const bytes = committedFile(root, commit, composeFile, composeLimit);
+  const working = await open(path.join(root, composeFile), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await working.stat();
+    const buffer = Buffer.alloc(bytes.length + 1);
+    if (!info.isFile() || info.size !== bytes.length ||
+        (await working.read(buffer, 0, buffer.length, 0)).bytesRead !== bytes.length ||
+        !bytes.equals(buffer.subarray(0, bytes.length))) {
+      throw new Error('Working Compose definition differs from the bound commit.');
+    }
+    return bytes;
+  } finally { await working.close(); }
+}
+
+function buildOverlay(stage) {
+  const context = path.join(stage, 'context').replaceAll('$', () => '$$');
+  const build = {context, network:'none', pull:false, args:{SCHEMII_BUILD_MODE:'offline'}};
+  return Buffer.from(JSON.stringify({services:{schemii:{build},'ai-prototype-runtime':{build}}}));
+}
+
+export async function verifyOfflineCompose(root, stage, commit, readPrivateFile, phase) {
+  await privateDirectory(stage);
+  const revision = (await readPrivateFile(path.join(stage, 'revision'), 41)).toString().trim();
+  const head = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding:'utf8'}).trim();
+  if (head !== commit || revision !== commit ||
+      !(await committedCompose(root, commit)).equals(await readPrivateFile(path.join(stage, composeFile), composeLimit)) ||
+      (phase === 'build' && !buildOverlay(stage).equals(await readPrivateFile(path.join(stage, 'compose.json'), 4096)))) {
+    throw new Error('Staged Compose inputs differ from the bound guest build.');
+  }
+}
 
 function sameKeys(record, keys) {
   return record && typeof record === 'object' && !Array.isArray(record) &&
@@ -91,22 +132,21 @@ export async function stageOfflineBuild(root, commit, binding, stage, readPrivat
       !manifest.members.length || manifest.members.length > 127) {
     throw new Error('Unsupported offline build manifest.');
   }
-  const lockBytes = await Promise.all(lockFiles.map(file => readFile(path.join(root, file))));
+  const compose = await committedCompose(root, commit);
+  const lockBytes = lockFiles.map(file => committedFile(root, commit, file));
   if (!lockFiles.every((file, index) => manifest.locks[file] === sha256(lockBytes[index]))) {
     throw new Error('Offline build manifest does not match the tracked dependency locks.');
   }
-  const contract = JSON.parse(await readFile(path.join(root, 'dev/runtime-contract.json')));
+  const contract = JSON.parse(committedFile(root, commit, 'dev/runtime-contract.json'));
   const imageKeys = ['node', 'python', 'postgres', 'ingress'];
   if (!sameKeys(manifest.images, imageKeys) || !imageKeys.every(key =>
     /^[a-z0-9.]+:[a-z0-9.-]+@sha256:[0-9a-f]{64}$/.test(contract.images[key]) &&
     manifest.images[key] === contract.images[key])) {
     throw new Error('Offline build image inventory does not match the tracked image pins.');
   }
-  const compose = await readFile(path.join(root, 'compose.test.yaml'), 'utf8');
-  const dockerfiles = await Promise.all(['Dockerfile', 'ai/prototype/Dockerfile'].map(file =>
-    readFile(path.join(root, file), 'utf8')));
+  const dockerfiles = ['Dockerfile', 'ai/prototype/Dockerfile'].map(file => committedFile(root, commit, file).toString());
   const sources = dockerfiles.map(text => [...text.matchAll(/^FROM\s+(\S+)/gm)].map(match => match[1]));
-  const serviceImages = [...compose.matchAll(/^\s+image:\s+(\S+)/gm)].map(match => match[1]);
+  const serviceImages = [...compose.toString().matchAll(/^\s+image:\s+(\S+)/gm)].map(match => match[1]);
   const localImages = ['schemii-test-application', 'schemii-test-ai-prototype'];
   if (sources[0].length !== 2 || sources[0].some(ref => ref !== manifest.images.python) ||
       sources[1].length !== 1 || sources[1][0] !== manifest.images.node ||
@@ -150,7 +190,7 @@ export async function stageOfflineBuild(root, commit, binding, stage, readPrivat
   const input = path.join(context, 'qa-build-inputs');
   await mkdir(context, {mode:0o700});
   // Archive only Git content, excluding the guest's local secrets and runtime state.
-  const archive = execFileSync('git', ['-C', root, '-c', 'tar.umask=0022', 'archive', '--format=tar', commit],
+  const archive = execFileSync('git', ['--no-replace-objects', '-C', root, '-c', 'tar.umask=0022', 'archive', '--format=tar', commit],
     {maxBuffer:64 * MB, stdio:['ignore','pipe','ignore']});
   execFileSync('tar', ['--no-same-owner','--same-permissions','-xf','-','-C',context],
     {input:archive, stdio:['pipe','ignore','ignore']});
@@ -170,15 +210,9 @@ export async function stageOfflineBuild(root, commit, binding, stage, readPrivat
     await writeFile(file, bytes, {flag:'wx', mode:0o444});
     await chmod(file, 0o444);
   }
-  const build = {context: context.replaceAll('$', () => '$$'), network:'none', pull:false,
-    args:{SCHEMII_BUILD_MODE:'offline'}};
-  await writeFile(path.join(stage, 'compose.json'), JSON.stringify({services:{
-    schemii:{build},
-    'ai-prototype-runtime':{build},
-  }}), {flag:'wx', mode:0o600});
-  await writeFile(path.join(stage, 'images'), imageKeys.map(key => manifest.images[key]).join('\n') + '\n',
-    {flag:'wx', mode:0o600});
-  await writeFile(path.join(stage, 'revision'), commit + '\n', {flag:'wx', mode:0o600});
+  await writeFile(path.join(stage, composeFile), compose, {flag:'wx', mode:0o400});
+  await writeFile(path.join(stage, 'compose.json'), buildOverlay(stage), {flag:'wx', mode:0o400});
+  await writeFile(path.join(stage, 'revision'), commit + '\n', {flag:'wx', mode:0o400});
 }
 
 export function verifyOfflineBuildConfig(config, stage, commit) {

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { assertLaneReadyToClaim, assertProductNavigationAllowed, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile, symlink } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile, symlink } from 'node:fs/promises';
 import https from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -473,6 +473,40 @@ test('offline build stages only the approved package bytes under the exact guest
   };
   const passed = await run();
   assert.equal(passed.result.status,0,passed.result.stderr);
+  const deployment = new URL('./deployment.mjs',import.meta.url).pathname;
+  const compose = join(root,'compose.test.yaml');
+  const committed = await readFile(compose);
+  const snapshot = join(passed.stage,'compose.test.yaml');
+  assert.deepEqual(await readFile(snapshot),committed);
+  assert.equal((await stat(snapshot)).mode & 0o777,0o400);
+  const verify = (phase, ...inputs) => spawnSync(process.execPath,[
+    deployment,'verify-offline-compose',root,passed.stage,phase,...inputs,
+  ],{env:{...process.env, SCHEMII_SOURCE_COMMIT:commit},encoding:'utf8',timeout:7000});
+  assert.equal(verify('build').status,0);
+  assert.equal(verify('runtime').status,0);
+  const ca = join(scratch,'fixture.pem');
+  execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes',
+    '-keyout',join(scratch,'fixture.key'),'-out',ca,'-days','1','-subj','/CN=Offline QA CA',
+    '-addext','basicConstraints=critical,CA:TRUE'],{stdio:'ignore'});
+  await chmod(ca,0o600);
+  const caOverlay = await stageFixtureCA(root,ca,sha(await readFile(ca)));
+  assert.equal(verify('build',caOverlay).status,0);
+  assert.equal(verify('runtime',caOverlay).status,0);
+  await chmod(caOverlay,0o600);
+  await writeFile(caOverlay,'{}');
+  assert.equal(verify('runtime',caOverlay).status,1);
+  execFileSync('git',['-C',root,'update-index','--assume-unchanged','compose.test.yaml']);
+  await writeFile(compose,Buffer.concat([committed,Buffer.from('# hidden drift\n')]));
+  assert.equal(execFileSync('git',['-C',root,'status','--porcelain'],{encoding:'utf8'}),'');
+  const drifted = await run();
+  assert.equal(drifted.result.status,1,drifted.result.stderr);
+  await assert.rejects(readFile(join(drifted.stage,'compose.test.yaml')),{code:'ENOENT'});
+  assert.equal(verify('runtime').status,1);
+  await writeFile(compose,committed);
+  const localBases = spawnSync(process.execPath,[deployment,'require-offline-local-bases',root,passed.stage],
+    {encoding:'utf8',timeout:7000});
+  assert.equal(localBases.status,1);
+  assert.match(localBases.stderr,/requires a verified local-only builder source/);
   const context = join(passed.stage,'context');
   assert.deepEqual((await readdir(context)).sort(),['.gitignore','Dockerfile','ai','compose.test.yaml','constraints.docker.txt','dev','pyproject.toml','qa-build-inputs']);
   assert.equal((await stat(join(context,'Dockerfile'))).mode & 0o777,0o644);
@@ -491,6 +525,14 @@ test('offline build stages only the approved package bytes under the exact guest
   services.schemii.build.network='none';
   delete services.schemii.build.args.SCHEMII_BUILD_MODE;
   assert.throws(()=>verifyOfflineBuildConfig(overlay,passed.stage,commit),/approved offline configuration/);
+  await chmod(join(passed.stage,'compose.json'),0o600);
+  await writeFile(join(passed.stage,'compose.json'),'{}');
+  assert.equal(verify('build').status,1);
+  await rm(join(passed.stage,'compose.json'));
+  assert.equal(verify('runtime').status,0);
+  await chmod(snapshot,0o600);
+  await writeFile(snapshot,Buffer.concat([committed,Buffer.from('# staged drift\n')]));
+  assert.equal(verify('runtime').status,1);
   const missing = {...manifest,members:manifest.members.slice(1)};
   const foreign = structuredClone(manifest);
   foreign.members[1].path='wheelhouse/../private.pem';

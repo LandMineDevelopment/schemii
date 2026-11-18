@@ -624,7 +624,9 @@ def test_stock_launcher_retains_compose_configuration_without_fixture_ca():
         assert "PRIVATE_COMPOSE_SENTINEL" not in result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("failure", ["", "staging", "image", "configuration", "build"])
+@pytest.mark.parametrize(
+    "failure", ["", "staging", "local-bases", "configuration", "build", "compose-drift"]
+)
 def test_offline_guest_never_falls_back_and_cleans_before_replacement(failure):
     with launcher_fixture() as (root, environment, commands, _):
         mock_bin = Path(environment["PATH"].split(":")[0])
@@ -636,43 +638,51 @@ def test_offline_guest_never_falls_back_and_cleans_before_replacement(failure):
         node.write_text(
             "#!/bin/sh\n"
             'case "$2" in\n'
-            '  verify-offline-engine) exit 0 ;;\n'
-            '  stage-offline-build)\n'
+            "  stage-offline-build)\n"
             '    printf "%s\n" "$4" > "$FAKE_STAGE_PATH"\n'
             '    if [ "$FAKE_OFFLINE_FAILURE" = staging ]; then exit 1; fi\n'
-            '    printf "node@sha256:%s\n" "fake-pin" > "$4/images"\n'
-            '    printf "unknown\n" > "$4/revision"\n'
+            '    mkdir "$4/context"\n'
+            '    cp "$3/compose.test.yaml" "$4/compose.test.yaml"\n'
             '    printf "{}\n" > "$4/compose.json" ;;\n'
-            '  verify-offline-build)\n'
+            '  require-offline-local-bases) [ "$FAKE_OFFLINE_FAILURE" != local-bases ] ;;\n'
+            '  verify-offline-compose) cmp -s "$3/compose.test.yaml" "$4/compose.test.yaml" ;;\n'
+            "  verify-offline-build)\n"
             '    [ "$FAKE_OFFLINE_FAILURE" != configuration ] && [ "$(cat)" = "{}" ] ;;\n'
-            '  *) exit 72 ;;\n'
+            "  *) exit 72 ;;\n"
             "esac\n"
         )
         node.chmod(0o755)
         docker = mock_bin / "docker"
-        docker.write_text(docker.read_text().replace(
-            'case "$*" in',
-            'case "$*" in\n'
-            '  "image inspect "*)\n'
-            '    printf "inspect\n" >> "$COMMAND_LOG"\n'
-            '    if [ "$FAKE_OFFLINE_FAILURE" = image ]; then exit 1; fi\n'
-            '    printf "linux/amd64\n"; exit 0 ;;\n'
-            '  *" config --format json")\n'
-            '    case "$*" in *"--env-file /dev/null"*"--file $(cat "$FAKE_STAGE_PATH")/compose.json"*) ;; *) exit 71 ;; esac\n'
-            '    printf "{}\n"; exit 0 ;;\n'
-            '  *" build schemii ai-prototype-runtime")\n'
-            '    case "$*" in *"--file $(cat "$FAKE_STAGE_PATH")/compose.json"*) ;; *) exit 71 ;; esac\n'
-            '    if [ "$FAKE_OFFLINE_FAILURE" = build ]; then\n'
-            '      printf "build:failed\n" >> "$COMMAND_LOG"; exit 1\n'
-            '    fi ;;\n'
-            '  *" rm --stop --force"*) [ ! -e "$(cat "$FAKE_STAGE_PATH")" ] || exit 71 ;;\n'
-            '  *" up --detach "*)\n'
-            '    case "$*" in *"--no-build --pull never") ;; *) exit 71 ;; esac\n'
-            '    case "$*" in *"$(cat "$FAKE_STAGE_PATH")"*) exit 71 ;; esac ;;\n'
-            'esac\n'
-            'case "$*" in',
-            1,
-        ))
+        docker.write_text(
+            docker.read_text()
+            .replace(
+                'case "$*" in',
+                'stage=$(cat "$FAKE_STAGE_PATH")\n'
+                'case "$*" in\n'
+                '  *" config --format json"|*" build schemii ai-prototype-runtime"|*" rm --stop --force"*|*" up --detach "*)\n'
+                '    case "$*" in *"--project-directory $PWD --file $stage/compose.test.yaml --env-file /dev/null"*) ;; *) exit 71 ;; esac ;;&\n'
+                '  *" config --format json")\n'
+                '    case "$*" in *"--file $stage/compose.json"*) ;; *) exit 71 ;; esac\n'
+                '    printf "{}\n"; exit 0 ;;\n'
+                '  *" build schemii ai-prototype-runtime")\n'
+                '    case "$*" in *"--file $stage/compose.json"*) ;; *) exit 71 ;; esac\n'
+                '    if [ "$FAKE_OFFLINE_FAILURE" = build ]; then\n'
+                '      printf "build:failed\n" >> "$COMMAND_LOG"; exit 1\n'
+                "    fi\n"
+                '    if [ "$FAKE_OFFLINE_FAILURE" = compose-drift ]; then\n'
+                '      printf "# late drift\n" >> "$PWD/compose.test.yaml"\n'
+                "    fi ;;\n"
+                '  *" rm --stop --force"*)\n'
+                '    [ ! -e "$stage/context" ] && [ ! -e "$stage/compose.json" ] || exit 71 ;;\n'
+                '  *" up --detach "*)\n'
+                '    case "$*" in *"--no-build --pull never") ;; *) exit 71 ;; esac\n'
+                '    case "$*" in *"--file $stage/compose.json"*) exit 71 ;; esac ;;\n'
+                "esac\n"
+                'case "$*" in',
+                1,
+            )
+            .replace("#!/bin/sh", "#!/bin/bash", 1)
+        )
         binding = root.parent / "binding.json"
         binding.write_text("{}\n")
         config = root.parent / "client-config"
@@ -690,24 +700,35 @@ def test_offline_guest_never_falls_back_and_cleans_before_replacement(failure):
             "FAKE_OFFLINE_FAILURE": failure,
         }
         result = subprocess.run(
-            ["bash", "-ec",
-             'exec 3>"$FAKE_GIT_COMMON_DIRECTORY/qa-deployment.lock"; '
-             'exec 4>"$FAKE_GIT_COMMON_DIRECTORY/qa-startup.lock"; '
-             'flock -x 3; flock -x 4; exec ./start.sh'],
-            cwd=root, env=env, capture_output=True, text=True, timeout=10,
+            [
+                "bash",
+                "-ec",
+                'exec 3>"$FAKE_GIT_COMMON_DIRECTORY/qa-deployment.lock"; '
+                'exec 4>"$FAKE_GIT_COMMON_DIRECTORY/qa-startup.lock"; '
+                "flock -x 3; flock -x 4; exec ./start.sh",
+            ],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert staging.is_file(), result.stderr
         assert not Path(staging.read_text().strip()).exists()
-        observed = commands.read_text()
-        assert observed.count("inspect") == (failure != "staging")
+        observed = commands.read_text() if commands.exists() else ""
         if failure:
             assert result.returncode == 1, result.stderr
             assert "replacement" not in observed
             assert "readiness" not in observed
-            assert "build:disabled" not in observed
+            assert ("build:disabled" in observed) == (failure == "compose-drift")
             assert observed.count("build:failed") == (failure == "build")
-            if failure in {"staging", "image"}:
+            if failure in {"staging", "local-bases"}:
+                assert observed == ""
                 assert not Path(environment["SCHEMII_SECRET_DIRECTORY"]).exists()
+            if failure == "local-bases":
+                assert "no verified local-only builder source" in result.stderr
+            if failure == "compose-drift":
+                assert "Compose inputs changed before runtime" in result.stderr
         else:
             assert result.returncode == 0, result.stderr
             assert observed.count("build:disabled") == 1

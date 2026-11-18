@@ -147,6 +147,7 @@ fail() {
 # writer, never command arguments, errors, service output or secret values.
 SCHEMII_START_TIMING_ACTIVE=0
 qa_offline_stage=
+qa_fixture_ca_overlay=
 cleanup_offline_build() {
   if [[ -n "$qa_offline_stage" ]]; then
     rm -rf -- "$qa_offline_stage" || return 1
@@ -312,8 +313,19 @@ fi
 [[ -f "${ROOT_DIR}/dev/postgres/demo-scenarios/${SCHEMII_DEMO_SCENARIO}/manifest.json" ]] || fail "unknown demo scenario: ${SCHEMII_DEMO_SCENARIO}"
 [[ -f "$COMPOSE_FILE" ]] || fail "Compose definition is missing at ${COMPOSE_FILE}"
 if [[ -v SCHEMII_QA_OFFLINE_BUILD_BINDING ]]; then
-  node "$ROOT_DIR/testing/harness/deployment.mjs" verify-offline-engine \
-    || fail "could not verify the bound disposable guest engine"
+  [[ ! -f "${SCHEMII_QA_STATE_DIRECTORY}/registry.json" && ! -e "$ROOT_DIR/.env" && ! -L "$ROOT_DIR/.env" \
+     && ! -e "$ROOT_DIR/.schemii/compose.local.yaml" && ! -L "$ROOT_DIR/.schemii/compose.local.yaml" ]] \
+    || fail "offline build requires the stock disposable guest configuration"
+  trap startup_timing_exit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  qa_offline_stage="$(mktemp -d /tmp/schemii-qa-build.XXXXXXXX)" || fail "could not allocate private offline build staging"
+  node "$ROOT_DIR/testing/harness/deployment.mjs" stage-offline-build "$ROOT_DIR" "$qa_offline_stage" \
+    || fail "could not stage the approved disposable offline build"
+  node "$ROOT_DIR/testing/harness/deployment.mjs" require-offline-local-bases "$ROOT_DIR" "$qa_offline_stage" \
+    || fail "no verified local-only builder source for the pinned offline base images"
+  COMPOSE_FILE="$qa_offline_stage/compose.test.yaml"
+  printf 'Staged verified disposable offline build inputs.\n'
 fi
 command -v docker >/dev/null 2>&1 || fail "Docker is not installed or is not on PATH"
 docker compose version >/dev/null 2>&1 || fail "the Docker Compose plugin is unavailable"
@@ -434,17 +446,6 @@ if [[ -v SCHEMII_QA_OFFLINE_BUILD_BINDING ]]; then
   [[ "$qa_database_overlay" == 0 && ! -e "$ROOT_DIR/.env" && ! -L "$ROOT_DIR/.env" \
      && ! -e "$ROOT_DIR/.schemii/compose.local.yaml" && ! -L "$ROOT_DIR/.schemii/compose.local.yaml" ]] \
     || fail "offline build requires the stock disposable guest configuration"
-  qa_offline_stage="$(mktemp -d /tmp/schemii-qa-build.XXXXXXXX)" || fail "could not allocate private offline build staging"
-  trap startup_timing_exit EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  node "$ROOT_DIR/testing/harness/deployment.mjs" stage-offline-build "$ROOT_DIR" "$qa_offline_stage" \
-    || fail "could not stage the approved disposable offline build"
-  while IFS= read -r pinned_image; do
-    [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$pinned_image" 2>/dev/null)" == linux/amd64 ]] \
-      || fail "a required pinned linux/amd64 image is unavailable in the disposable guest engine"
-  done < "$qa_offline_stage/images"
-  printf 'Staged verified disposable offline build inputs.\n'
   if [[ ! -v SCHEMII_QA_FIXTURE_CA_BINDING ]]; then
     compose_args+=(--env-file /dev/null)
   fi
@@ -711,19 +712,25 @@ if command -v git >/dev/null 2>&1 \
   fi
 fi
 export SCHEMII_SOURCE_COMMIT
+verify_offline_compose() {
+  [[ -z "$qa_offline_stage" ]] || node "$ROOT_DIR/testing/harness/deployment.mjs" verify-offline-compose \
+    "$ROOT_DIR" "$qa_offline_stage" "$1" "$qa_fixture_ca_overlay" \
+    || fail "the disposable guest Compose inputs changed before $1"
+}
 up_args=()
 printf 'Building the current Schemii application image...\n'
 if [[ -n "$qa_offline_stage" ]]; then
   build_args=("${compose_args[@]}" --file "$qa_offline_stage/compose.json")
-  [[ "$SCHEMII_SOURCE_COMMIT" == "$(cat "$qa_offline_stage/revision")" ]] \
-    || fail "guest source changed before the offline build"
+  verify_offline_compose build
   docker "${build_args[@]}" config --format json 2>/dev/null \
     | node "$ROOT_DIR/testing/harness/deployment.mjs" verify-offline-build "$ROOT_DIR" "$qa_offline_stage" \
     || fail "the guest Compose plugin did not resolve the approved offline build"
   startup_timing_next build passed
+  verify_offline_compose build
   docker "${build_args[@]}" build schemii ai-prototype-runtime \
     || fail "the approved offline build failed; the running deployment was left unchanged"
-  cleanup_offline_build || fail "could not remove disposable offline build inputs"
+  rm -rf -- "$qa_offline_stage/context" "$qa_offline_stage/compose.json" \
+    || fail "could not remove disposable offline build inputs"
   up_args+=(--no-build --pull never)
 else
   startup_timing_next build passed
@@ -736,6 +743,7 @@ else
 fi
 
 startup_timing_next replacement passed
+verify_offline_compose runtime
 # The launcher is also the restart boundary. Build first so a compilation
 # failure does not interrupt the last known-good HTTP processes.
 docker "${compose_args[@]}" rm --stop --force \
@@ -766,6 +774,7 @@ fi
 
 printf 'Building and starting the Schemii HTTPS deployment on 127.0.0.1:%s...\n' "$SCHEMII_TEST_APP_PORT"
 startup_timing_next readiness passed
+verify_offline_compose runtime
 if ! docker "${compose_args[@]}" up --detach --remove-orphans --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT" "${up_args[@]}"; then
   startup_timing_next post-start failed
   printf 'Schemii did not become healthy. Current service state:\n' >&2
