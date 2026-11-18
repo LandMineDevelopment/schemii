@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, access } from 'node:fs/promises';
+import fs, { mkdtemp, rm, writeFile, access } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import os from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -37,20 +39,143 @@ test('managed cancellation is installed before recording the launched generator'
     onGenerator: async value => { if (value.pid) { owner = value; aborter.abort(); } } }), /k6_generator_failed/);
   assert.notEqual(await birthTick(owner.pid), owner.birthTick);
 });
+function procFixture(t, members, { scan, read, signal } = {}) {
+  const signals = [];
+  let scans = 0, now = 0;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.method(fs, 'readdir', async path => {
+    assert.equal(path, '/proc');
+    now = scan?.(++scans) ?? now;
+    return [...members.keys()].map(String);
+  });
+  t.mock.method(fs, 'readFile', async path => {
+    const pid = Number(/^\/proc\/(\d+)\/stat$/.exec(path)?.[1]);
+    assert.ok(Number.isSafeInteger(pid), path);
+    read?.(pid);
+    const member = members.get(pid);
+    if (!member) throw Object.assign(new Error('fixture process gone'), { code: 'ENOENT' });
+    const fields = Array(20).fill('0');
+    fields[0] = 'S';
+    fields[2] = member.group;
+    fields[3] = member.group;
+    fields[19] = member.birth;
+    return `${pid} (fixture) ${fields.join(' ')}`;
+  });
+  t.mock.method(process, 'kill', (pid, name) => {
+    signals.push([pid, members.get(pid)?.birth, name, now]);
+    signal?.(pid, name);
+    return true;
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  return signals;
+}
+
+test('owned stop escalates a late member and skips a stale identity and a live peer', async t => {
+  const leader = { group: 101, birth: '10' };
+  const stale = { group: 101, birth: '20' };
+  const late = { group: 101, birth: '30' };
+  const peer = { group: 201, birth: '40' };
+  const members = new Map([[101, leader], [102, stale], [201, peer]]);
+  let staleReads = 0;
+  const signals = procFixture(t, members, {
+    scan: number => {
+      if (number === 2) members.set(102, { group: 201, birth: '21' });
+      return [50, 75, 100, 2051][number - 1];
+    },
+    read: pid => {
+      if (pid === 102 && ++staleReads === 2) members.set(102, { ...stale, birth: '21' });
+    },
+    signal: (pid, name) => {
+      if (name !== 'SIGKILL') return;
+      if (pid === 101) {
+        members.set(103, late);
+        members.delete(pid);
+      } else if (pid === 103 && members.get(pid) === late) {
+        members.set(pid, { ...late, birth: '31' });
+      } else if (pid === 103) {
+        members.delete(pid);
+      }
+    },
+  });
+  const outcome = { code: null, signal: 'SIGKILL' };
+  assert.equal(await stopChild({ pid: 101 }, Promise.resolve(outcome), { graceMs: 50 }), outcome);
+  assert.deepEqual(signals, [
+    [101, '10', 'SIGKILL', 50], [103, '30', 'SIGKILL', 75], [103, '31', 'SIGKILL', 100],
+  ]);
+  assert.deepEqual(members.get(102), { group: 201, birth: '21' });
+  assert.equal(members.get(201), peer);
+});
+
+test('owned stop refuses a replaced session leader without sending a signal', async t => {
+  const members = new Map([[101, { group: 101, birth: '10' }]]);
+  const signals = procFixture(t, members, {
+    scan: () => { members.set(101, { group: 101, birth: '11' }); },
+  });
+  await assert.rejects(stopChild({ pid: 101 }, Promise.resolve(), { graceMs: 50 }), /child_identity_changed/);
+  assert.deepEqual(signals, []);
+});
+
+test('owned stop reports a live member at the existing deadline', async t => {
+  const members = new Map([[101, { group: 101, birth: '10' }]]);
+  const signals = procFixture(t, members, {
+    scan: number => {
+      if (number === 4) members.set(103, { group: 101, birth: '30' });
+      return [0, 50, 75, 2051][number - 1];
+    },
+  });
+  await assert.rejects(stopChild({ pid: 101 }, Promise.resolve(), { graceMs: 50 }), /owned_child_not_reaped/);
+  assert.deepEqual(signals, [[101, '10', 'SIGTERM', 0], [101, '10', 'SIGKILL', 50]]);
+  assert.deepEqual([...members.keys()], [101, 103]);
+});
+
 test('stopping an owned controller-style process group joins descendants and preserves a live peer', async t => {
+  const ipc = ['ignore', 'ignore', 'ignore', 'ipc'];
   const child = spawn(process.execPath, ['-e', `
-    const {spawn}=require('node:child_process');
-    spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
-    setInterval(()=>{},1000);
-  `], { detached: true, stdio: 'ignore' });
+    const { spawn } = require('node:child_process');
+    const descendant = spawn(process.execPath, ['-e', \`
+      const expiry = setTimeout(() => process.exit(1), 5000);
+      process.on('message', () => { clearTimeout(expiry); process.exit(0); });
+      process.send(process.pid);
+    \`], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+    descendant.once('message', pid => { if (process.connected) process.send(pid); });
+    descendant.once('exit', code => process.exit(code ?? 0));
+    // Stay around to reap the direct child when the cleanup helper signals both.
+    process.on('SIGTERM', () => {});
+    process.on('disconnect', () => { if (descendant.connected) descendant.send('stop', () => {}); });
+  `], { detached: true, stdio: ipc });
   const completion = observeChild(child);
-  const peer = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' });
-  const peerCompletion = observeChild(peer);
-  t.after(async () => { await stopChild(child, completion); await stopChild(peer, peerCompletion); });
-  await new Promise(resolve => setTimeout(resolve, 80));
+  const peer = spawn(process.execPath, ['-e', `
+    setTimeout(() => process.exit(0), 5000);
+    process.on('disconnect', () => process.exit(0));
+    process.send(process.pid);
+  `], { detached: true, stdio: ipc });
+  const fixtures = [child, peer];
+  const fixtureExits = Promise.allSettled(fixtures.map(fixture => once(fixture, 'exit')));
+  let descendantPid;
+  t.after(async () => {
+    // Both fixtures get an independent shutdown request before either join.
+    for (const fixture of fixtures) {
+      if (fixture.connected) fixture.disconnect();
+    }
+    await fixtureExits;
+    assert.equal(await birthTick(child.pid), null);
+    assert.equal(await birthTick(peer.pid), null);
+    if (descendantPid) assert.equal(await birthTick(descendantPid), null);
+  });
+  const options = { signal: AbortSignal.timeout(2000) };
+  const [[pid]] = await Promise.all([once(child, 'message', options), once(peer, 'message', options)]);
+  descendantPid = pid;
+  assert.ok(await birthTick(descendantPid));
   const peerBirth = await birthTick(peer.pid);
-  await stopChild(child, completion, { graceMs: 50 });
+  assert.ok(peerBirth);
+  const stopped = await stopChild(child, completion, { graceMs: 50 });
+  assert.ok(stopped.code === 0 || stopped.signal === 'SIGKILL', JSON.stringify(stopped));
   assert.equal(await birthTick(child.pid), null);
+  assert.equal(await birthTick(descendantPid), null);
   assert.equal(await birthTick(peer.pid), peerBirth);
 });
 test('runtime disposal requires the exact created directory and preserves peers and unknown contents', async t => {
