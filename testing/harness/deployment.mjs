@@ -1,9 +1,11 @@
 import { createHash, X509Certificate } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, open, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { lstatSync, readFileSync, readlinkSync, closeSync, constants } from 'node:fs';
 import https from 'node:https';
+import { isIP } from 'node:net';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { writeJSON } from './store.mjs';
 import { processIdentity, cgroupIdentity } from '../load/runtime.mjs';
 
@@ -34,14 +36,23 @@ export async function readPrivateDeploymentJSON(file, maximum = 1024 * 1024) {
 }
 
 export function disposableGuestBinding(value) {
-  const { bootId, commit, certificateSha256 } = value ?? {};
-  if (Object.keys(value ?? {}).length !== 3 ||
+  const { bootId, commit, certificateSha256, fixture } = value ?? {};
+  if (Object.keys(value ?? {}).length !== (fixture === undefined ? 3 : 4) ||
       typeof bootId !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(bootId) ||
       typeof commit !== 'string' || !/^[a-f0-9]{40}$/.test(commit) ||
       typeof certificateSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(certificateSha256)) {
     throw new Error('Disposable guest binding requires a VM boot ID, clean commit and exact certificate SHA-256.');
   }
-  return { bootId, commit, certificateSha256 };
+  if (fixture !== undefined && (!fixture || Object.keys(fixture).length !== 2 ||
+      !['internal-only', 'external'].includes(fixture.mode) ||
+      !Array.isArray(fixture.hosts) || !fixture.hosts.length ||
+      !fixture.hosts.every(host => typeof host === 'string' && host.length <= 253 &&
+        (isIP(host) || /^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(host))) ||
+      fixture.hosts.join(',').length > 2048)) {
+    throw new Error('Disposable QA fixture binding requires a mode and a bounded list of exact target hosts.');
+  }
+  return { bootId, commit, certificateSha256,
+    ...(fixture === undefined ? {} : {fixture:{mode:fixture.mode, hosts:[...fixture.hosts]}}) };
 }
 
 export function assertDisposableSource(binding, identity, bootId, virtualMachine) {
@@ -50,16 +61,54 @@ export function assertDisposableSource(binding, identity, bootId, virtualMachine
   }
 }
 
-function checkDisposableConfiguration(root) {
-  if (['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'COMPOSE_ENV_FILES', 'SCHEMII_TLS_DIRECTORY']
-      .some(key => process.env[key]) || ![undefined, '8001'].includes(process.env.SCHEMII_TEST_APP_PORT)) {
-    throw new Error('Disposable QA requires the guest engine and canonical ingress configuration.');
+const guestInputs = new Set([
+  'SCHEMII_TEST_POSTGRES_DB', 'SCHEMII_TEST_POSTGRES_USER', 'SCHEMII_TEST_POSTGRES_PASSWORD',
+  'SCHEMII_METADATA_APP_USER', 'SCHEMII_ALLOWED_TARGET_HOSTS', 'SCHEMII_TARGET_EGRESS_MODE',
+  'SCHEMII_STARTUP_TIMEOUT', 'SCHEMII_TEST_APP_PORT', 'SCHEMII_RESET_MIGRATION_DEMO',
+  'SCHEMII_QA_LEASE_FD', 'SCHEMII_QA_GATE_FD', 'SCHEMII_QA_LEASE_MODE',
+]);
+
+function checkDisposableConfiguration(root, env, binding) {
+  for (const key of Object.keys(env)) {
+    if (/^(?:DOCKER_|COMPOSE_|BUILDKIT_|BUILDX_)/.test(key) || ['BASH_ENV', 'ENV'].includes(key) || (key.startsWith('SCHEMII_') && !guestInputs.has(key))) {
+      throw new Error(`Disposable QA refuses inherited launcher setting ${key}.`);
+    }
+  }
+  if (![undefined, '8001'].includes(env.SCHEMII_TEST_APP_PORT) ||
+      ![undefined, '0'].includes(env.SCHEMII_RESET_MIGRATION_DEMO)) {
+    throw new Error('Disposable QA requires canonical ingress and refuses demo reset.');
+  }
+  const mode = binding.fixture?.mode;
+  const hosts = binding.fixture?.hosts.join(',');
+  if ((env.SCHEMII_TARGET_EGRESS_MODE !== undefined && env.SCHEMII_TARGET_EGRESS_MODE !== mode) ||
+      (env.SCHEMII_ALLOWED_TARGET_HOSTS !== undefined && env.SCHEMII_ALLOWED_TARGET_HOSTS !== hosts)) {
+    throw new Error('Disposable QA refuses inherited fixture egress outside the approved binding.');
   }
   for (const file of ['.env', '.schemii/compose.local.yaml']) {
     try { lstatSync(path.join(root, file)); }
     catch (error) { if (error.code === 'ENOENT') continue; throw error; }
     throw new Error('Disposable QA refuses an unverified machine-local Compose override.');
   }
+}
+
+export async function withDisposableLauncher(root, binding, action, ambient = process.env) {
+  checkDisposableConfiguration(root, ambient, binding);
+  const config = await mkdtemp(path.join(tmpdir(), 'schemii-qa-docker-'));
+  try {
+    const env = {};
+    for (const key of ['PATH', 'HOME', 'LANG', 'LC_ALL', ...guestInputs]) {
+      if (ambient[key] !== undefined) env[key] = ambient[key];
+    }
+    // The launcher uses the guest system engine. Ignore persistent client
+    // contexts and settings without running a Docker discovery command.
+    Object.assign(env, { DOCKER_CONFIG: config, DOCKER_HOST: 'unix:///var/run/docker.sock',
+      SCHEMII_TEST_APP_PORT: '8001', SCHEMII_RESET_MIGRATION_DEMO: '0' });
+    if (binding.fixture) {
+      env.SCHEMII_TARGET_EGRESS_MODE = binding.fixture.mode;
+      env.SCHEMII_ALLOWED_TARGET_HOSTS = binding.fixture.hosts.join(',');
+    }
+    return await action(env);
+  } finally { await rm(config, { recursive:true, force:true }); }
 }
 
 async function verifyGuestSource(root, binding, identity) {
@@ -69,7 +118,7 @@ async function verifyGuestSource(root, binding, identity) {
   }).trim()); } catch {}
   const bootId = (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
   assertDisposableSource(binding, identity, bootId, virtualMachine);
-  checkDisposableConfiguration(root);
+  checkDisposableConfiguration(root, process.env, binding);
 }
 
 async function verifyRuntime(runtime, binding) {
@@ -189,9 +238,9 @@ async function launcherFailure(logPath, code, signal) {
   return new Error(exact || `./start.sh failed (${signal ? `signal ${signal}` : `exit ${code}`}); see ${logPath}`);
 }
 
-function readIngressEvents(root) {
+function readIngressEvents(root, env) {
   const output = execFileSync('./start.sh', ['--logs','ingress'], {
-    cwd:root, timeout:10000, maxBuffer:1024*1024, encoding:'utf8', stdio:['ignore','pipe','ignore'],
+    cwd:root, env, timeout:10000, maxBuffer:1024*1024, encoding:'utf8', stdio:['ignore','pipe','ignore'],
   });
   return output.split('\n').flatMap(line => {
     const start = line.indexOf('{');
@@ -218,21 +267,21 @@ export function correlateGuestRequests(endpoints, before, after) {
   });
 }
 
-async function probeDisposableGuest(root, binding, runtime) {
+async function probeDisposableGuest(root, binding, runtime, env) {
   await verifyRuntime(runtime, binding);
   const ca = await readFile(path.join(root, '.schemii/tls/localhost.crt'));
   if (new X509Certificate(ca).fingerprint256.replaceAll(':','').toLowerCase() !== binding.certificateSha256) {
     throw new Error('Launcher certificate does not match the approved guest pin.');
   }
-  const before = readIngressEvents(root);
+  const before = readIngressEvents(root, env);
   const local = {ca, requestIdentity:true};
   const endpoints = await Promise.all([
     checkHTTPS(LOCAL_ORIGIN, local),
     checkHTTPS(`${LOCAL_ORIGIN}/api-map`, {...local,allowAuthChallenge:true}),
   ]);
-  const requests = correlateGuestRequests(endpoints, before, readIngressEvents(root));
+  const requests = correlateGuestRequests(endpoints, before, readIngressEvents(root, env));
   await verifyRuntime(runtime, binding);
-  checkDisposableConfiguration(root);
+  checkDisposableConfiguration(root, process.env, binding);
   return { endpoints, requests, verifiedAt:new Date().toISOString() };
 }
 
@@ -245,7 +294,7 @@ export async function revalidateDisposableGuest(root, deployment) {
   if (identity.fingerprint !== deployment.identity?.fingerprint) {
     throw new Error('Disposable guest source has changed since preparation.');
   }
-  return probeDisposableGuest(root, binding, deployment.runtime);
+  return withDisposableLauncher(root, binding, env => probeDisposableGuest(root, binding, deployment.runtime, env));
 }
 
 export async function startDeployment({
@@ -282,22 +331,23 @@ export async function startDeployment({
       const log = await open(logPath, 'w', 0o600);
       let result;
       try {
-        result = await new Promise((resolve, reject) => {
+        const launch = env => new Promise((resolve, reject) => {
           const child = spawn('./start.sh', [], {
             cwd: root,
-            env: { ...process.env, SCHEMII_QA_LEASE_FD: '3', SCHEMII_QA_GATE_FD: '4',
-              ...(binding ? { SCHEMII_RUNTIME_RECEIPT: runtimePath, SCHEMII_TEST_APP_PORT: '8001' } : {}) },
+            env: { ...env, SCHEMII_QA_LEASE_FD: '3', SCHEMII_QA_GATE_FD: '4',
+              ...(binding ? { SCHEMII_RUNTIME_RECEIPT: runtimePath } : {}) },
             stdio: ['ignore', log.fd, log.fd, 3, 4],
           });
           child.once('error', reject);
           child.once('close', (code, signal) => resolve({ code, signal }));
         });
+        result = binding ? await withDisposableLauncher(root, binding, launch) : await launch(process.env);
       } finally { await log.close(); }
       if (result.code !== 0) throw await launcherFailure(logPath, result.code, result.signal);
       if (binding) runtime = await readPrivateDeploymentJSON(runtimePath);
     }
 
-    const localVerification = binding && await probeDisposableGuest(root, binding, runtime);
+    const localVerification = binding && await withDisposableLauncher(root, binding, env => probeDisposableGuest(root, binding, runtime, env));
     const endpoints = localVerification?.endpoints ?? await Promise.all([
       checkHTTPS(localURL, {allowSelfSigned:true}),
       checkHTTPS(`${localURL}/api-map`, {allowSelfSigned:true,allowAuthChallenge:true}),

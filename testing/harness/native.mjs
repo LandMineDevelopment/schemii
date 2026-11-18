@@ -322,18 +322,49 @@ export async function inspectDownload(capture, directory, input) {
 export function pendingScenarios(lane) {
   return lane.scenarios.filter(scenario => scenario.functional === 'not-run' || scenario.visual === 'not-run');
 }
-export function recordReview(run, reviewer, target, scenarioId, input) {
-  if (reviewer.role !== 'reviewer' || reviewer === target || reviewer.agent === target.agent || reviewer.username.toLowerCase() === target.username.toLowerCase()) throw new Error('Independent review requires the assigned distinct reviewer lane, agent and account.');
-  if (nativeMode(run) && (!reviewer.native || reviewer.native.sessionId === target.native?.sessionId)) throw new Error('Independent review requires a separately bound native connection.');
+export function assertReviewerLane(run, reviewer, target) {
+  if (reviewer.role !== 'reviewer' || target.role === 'reviewer' || reviewer === target ||
+      !reviewer.agent || !target.agent || reviewer.agent === target.agent ||
+      reviewer.username.toLowerCase() === target.username.toLowerCase()) {
+    throw new Error('Independent review requires the assigned distinct reviewer lane, agent and account.');
+  }
+  if (nativeMode(run) && (!reviewer.native || reviewer.native.sessionId === target.native?.sessionId)) {
+    throw new Error('Independent review requires a separately bound native connection.');
+  }
+  if (run.guestBinding && (!run.lanes.includes(reviewer) || !run.lanes.includes(target) || reviewer.username !== run.reviewerAccount ||
+      !reviewer.browser?.pid || !target.browser?.pid || reviewer.browser.pid === target.browser.pid ||
+      !reviewer.browser.launchId || !target.browser.launchId || reviewer.browser.launchId === target.browser.launchId)) {
+    throw new Error('Disposable guest review requires its reserved account and distinct browser ownership.');
+  }
+}
+
+export function reviewAttemptImages(run, reviewer, target, scenarioId) {
   const scenario = target.scenarios.find(item => item.id === scenarioId), attempt = scenario?.attempts?.at(-1);
-  if (!attempt || !attempt.id || attempt.source !== run.deployment?.identity?.fingerprint) throw new Error('Review requires a recorded current-source attempt.');
+  if (!attempt || !attempt.id || attempt.source !== run.deployment?.identity?.fingerprint) {
+    throw new Error('Review requires a recorded current-source attempt.');
+  }
+  if (attempt.reviewer === reviewer.agent) throw new Error('An agent cannot review its own attempt.');
+  const images = (target.captures || []).filter(capture =>
+    attempt.evidence.includes(capture.path) && capture.kind === 'image' && capture.phase === 'scenario' &&
+    capture.scenario === scenarioId && capture.generation === attempt.generation &&
+    capture.scenarioAttempt === attempt.scenarioAttempt && capture.source === attempt.source &&
+    capture.agent === attempt.reviewer && capture.inspections?.some(item =>
+      item.agent === reviewer.agent && item.sha256 === capture.sha256));
+  if (!images.length) throw new Error('Reviewer must inspect the target attempt image and record its hash-bound receipt first.');
+  return { attempt, images };
+}
+
+export function recordReview(run, reviewer, target, scenarioId, input, verifiedImages) {
+  assertReviewerLane(run, reviewer, target);
+  const { attempt, images } = reviewAttemptImages(run, reviewer, target, scenarioId);
   if (!['accepted', 'confirmed-defect', 'prerequisite-mistake', 'unsupported-action', 'not-reproduced'].includes(input.verdict)) throw new Error('Review needs an explicit adjudication verdict.');
-  const captures = (target.captures || []).filter(capture => attempt.evidence.includes(capture.path) && capture.phase === 'scenario' && capture.scenario === scenarioId && capture.generation === attempt.generation && capture.scenarioAttempt === attempt.scenarioAttempt && capture.source === attempt.source && capture.agent === attempt.reviewer);
   if (input.verdict === 'accepted' && (attempt.functional !== 'passed' || attempt.visual !== 'passed')) throw new Error('A failed or blocked attempt cannot become accepted.');
-  if (!captures.some(capture => capture.kind === 'image' && (capture.inspections || []).some(item => item.agent === reviewer.agent && item.sha256 === capture.sha256))) throw new Error('Reviewer must inspect the target attempt image and record its hash-bound receipt first.');
+  const targetImages = images.filter(image => verifiedImages?.get(image.path) === image.sha256)
+    .map(({ path, sha256 }) => ({ path, sha256 }));
+  if (run.guestBinding && !targetImages.length) throw new Error('Disposable guest review requires a current hash check of the inspected target image.');
   const receipt = { id: randomUUID(), reviewerLane: reviewer.id, agent: reviewer.agent, username: reviewer.username, nativeSession: reviewer.native?.sessionId,
     targetLane: target.id, scenario: scenarioId, attempt: attempt.id, source: run.deployment.identity.fingerprint,
-    verdict: input.verdict, note: requiredText(input.note, 'Review expected/actual reason'), evidence: input.evidence || [], provenance: input.provenance || 'assigned-reviewer-session', at: new Date().toISOString() };
+    verdict: input.verdict, note: requiredText(input.note, 'Review expected/actual reason'), evidence: input.evidence || [], ...(run.guestBinding ? {targetImages} : {}), provenance: run.guestBinding ? 'assigned-isolated-reviewer-session' : input.provenance || 'assigned-reviewer-session', at: new Date().toISOString() };
   if (input.finding) {
     if (input.verdict === 'accepted') throw new Error('Finding adjudication needs a defect/prerequisite/unsupported/not-reproduced verdict.');
     const finding = (run.findings || []).find(item => item.id === input.finding && item.lane === target.id && item.scenario === scenarioId);
@@ -356,6 +387,13 @@ export function acceptance(run) {
     const review = attempt?.id ? (run.reviews || []).filter(review => review.targetLane === lane.id && review.scenario === scenario.id && review.attempt === attempt.id && review.source === run.deployment?.identity?.fingerprint && review.agent !== lane.agent).at(-1) : null;
     if (review?.verdict === 'accepted') reviewed++;
     else reasons.push(`${lane.id}/${scenario.id}: independent review pending${review ? ` (${review.verdict})` : ''}`);
+  }
+  if (run.guestBinding && run.reviewerAccount) {
+    const reviewer = run.lanes.find(lane => lane.role === 'reviewer' && lane.username === run.reviewerAccount);
+    if (!reviewer || reviewer.status !== 'complete' ||
+        reviewer.scenarios.some(scenario => scenario.functional !== 'passed' || scenario.visual !== 'passed')) {
+      reasons.push('independent guest reviewer case observations pending');
+    }
   }
   for (const finding of run.findings || []) {
     if (!finding.reviews?.length || finding.verificationStatus === 'unverified') reasons.push(`${finding.id}: finding adjudication pending`);

@@ -194,7 +194,7 @@ starting the controller. Use separate guest-owned browser profiles and leave TLS
 verification enabled. The harness checks the declared certificate against the
 launcher’s canonical certificate and verifies HTTPS without relaxing trust.
 
-Provide a mode-0600 JSON file in private storage outside Git with exactly these
+Provide a mode-0600 JSON file in private storage outside Git with these required
 fields.
 
 | Field | Value |
@@ -211,6 +211,28 @@ mode refuses machine-local Compose overrides and noncanonical launcher settings.
 A shared deployment must have the same guest binding. Prepare a new run after
 rebooting the guest. The receipt covers local readiness only and records remote
 preview as untested.
+
+The harness pins the launcher to the VM’s system engine endpoint with an
+empty private Docker client configuration. Persistent client contexts do not
+select the engine. Do not supply Docker or Compose overrides, inherited demo
+reset, alternate secret/lock paths, or other launcher overrides. The supported
+fixture settings are the database and role variables (`SCHEMII_TEST_POSTGRES_DB`,
+`SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`,
+`SCHEMII_METADATA_APP_USER`), and optional fixture egress. To approve
+fixture egress, add a private `fixture` object containing `mode` (`internal-only`
+or `external`) and `hosts` (a bounded array of exact approved hostnames or IP
+addresses). The launcher receives those values as `SCHEMII_TARGET_EGRESS_MODE`
+and `SCHEMII_ALLOWED_TARGET_HOSTS`. Inherited versions of those settings must
+match the binding exactly.
+
+For independent review in the guest, pass `--reviewer-account ACCOUNT` and
+`--runtime-slots N` along with the binding and both accounts. The account must
+be separately selected and claimable. `--parallel` counts testers. Reserve one
+observed slot each for the coordinator and reviewer. Both lanes run their
+configured cases with isolated browser processes. The reviewer uses their own
+claimed session to inspect the tester’s evidence and submit an adjudication.
+The controller rechecks each cited target image’s hash at review time and
+preserves the original checkpoint outcome.
 
 Treat `plan`, `prepare`, `status`, launcher logs and all run receipts as private.
 Clean up the harness lease and its scoped test objects before shutting down the

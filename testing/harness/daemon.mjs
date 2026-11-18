@@ -8,7 +8,7 @@ import { BrowserFleet } from './browser.mjs';
 import { assertScenarioPrerequisite, readinessChecks } from './prerequisites.mjs';
 import { assertLaneReadyToClaim, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
 import { startDeployment, sourceIdentity, revalidateDisposableGuest } from './deployment.mjs';
-import { nativeMode, recoverNativeLane, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, acceptance } from './native.mjs';
+import { nativeMode, recoverNativeLane, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, assertReviewerLane, reviewAttemptImages, acceptance } from './native.mjs';
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
 
 process.umask(0o077);
@@ -192,6 +192,7 @@ async function workerRequest(req){
       if(req.targetLane) {
         if(l.role!=='reviewer')throw new Error('Only the assigned reviewer may inspect another lane evidence.');
         target=lane(req.targetLane);
+        if(run.guestBinding && target!==l)assertReviewerLane(run,l,target);
       }
       const capture=(target.captures||[]).find(c=>c.path===req.evidence[0]);
       if(!capture||capture.kind!=='image')throw new Error('Inspect needs a registered image.');
@@ -211,7 +212,21 @@ async function workerRequest(req){
       if(nativeMode(run))await assertNativeConnection(l,browserRoot);
       const evidence=await ownedEvidence(req.evidence,l);
       for(const path of evidence)currentCapture(run,l,path,{inspection:true});
-      const receipt=recordReview(run,l,lane(req.targetLane),req.scenario,{...req.args,verdict:req.verdict,note:req.note,evidence,finding:req.finding});await persist();return receipt;
+      const target=lane(req.targetLane);
+      let verifiedImages;
+      if(run.guestBinding) {
+        assertReviewerLane(run,l,target);
+        const {images}=reviewAttemptImages(run,l,target,req.scenario);
+        verifiedImages=new Map();
+        for(const image of images) {
+          const [file]=await ownedEvidence([image.path],target);
+          const sha256=createHash('sha256').update(await readFile(resolve(dir,file))).digest('hex');
+          if(sha256!==image.sha256)throw new Error('Target image changed after independent inspection.');
+          verifiedImages.set(image.path,sha256);
+        }
+      }
+      const receipt=recordReview(run,l,target,req.scenario,{...req.args,verdict:req.verdict,note:req.note,evidence,finding:req.finding},verifiedImages);
+      await persist();return receipt;
     }
     if(req.command==='action') {
       if(nativeMode(run))throw new Error('Native lanes use their own schemii_browser connection; legacy action handles cannot drive it.');
@@ -269,7 +284,7 @@ async function workerRequest(req){
       await event(dir,{kind:'checkpoint',lane:l.id,scenario:s.id,functional:s.functional,visual:s.visual});await persist();return s;
     }
     if(req.command==='finish') {
-      if(l.role!=='reviewer'&&l.scenarios.some(s=>s.functional==='not-run'||s.visual==='not-run'))throw new Error('Every scenario needs explicit results; use blocked for unavailable checks.');
+      if((l.role!=='reviewer'||run.guestBinding)&&l.scenarios.some(s=>s.functional==='not-run'||s.visual==='not-run'))throw new Error('Every scenario needs explicit results; use blocked for unavailable checks.');
       if(nativeMode(run))await closeNativeReceipt(l);
       else await fleet.closeLane(l.id);
       if(l.worker)recordWorkerBrowserClosure(l,{...l.worker,generation:l.worker.generation??l.generation});

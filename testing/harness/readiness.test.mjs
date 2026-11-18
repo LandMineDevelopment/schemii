@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { assertLaneReadyToClaim, assertProductNavigationAllowed, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile, symlink } from 'node:fs/promises';
 import https from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkHTTPS, DESKTOP_PREVIEW, disposableGuestBinding, readPrivateDeploymentJSON, startDeployment } from './deployment.mjs';
+import { checkHTTPS, DESKTOP_PREVIEW, disposableGuestBinding, readPrivateDeploymentJSON, startDeployment, withDisposableLauncher } from './deployment.mjs';
 
 
 test('a wave starts product streams only after every session passes logout isolation', async () => {
@@ -211,4 +211,71 @@ test('deployment input refuses public files, symlinks, FIFOs and oversized JSON 
     await assert.rejects(readPrivateDeploymentJSON(candidate), /bounded private regular file/);
   }
   await assert.rejects(readPrivateDeploymentJSON(file, 4), /bounded private regular file/);
+});
+
+test('guest launcher sanitizes engine configuration and refuses reset or inherited authority before launch', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'qa-guest-engine-'));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const client = join(root, '.docker');
+  await mkdir(client, {mode:0o700});
+  await writeFile(join(client,'config.json'), JSON.stringify({currentContext:'non-guest-context'}), {mode:0o600});
+  const ambient = {
+    HOME:root, PATH:process.env.PATH, SCHEMII_TARGET_EGRESS_MODE:'external',
+    SCHEMII_ALLOWED_TARGET_HOSTS:'demo-postgres,fixture.internal', SCHEMII_TEST_POSTGRES_DB:'fixture_db',
+  };
+  const binding=disposableGuestBinding({
+    bootId:'12345678-1234-1234-1234-123456789012',commit:'a'.repeat(40),certificateSha256:'b'.repeat(64),
+    fixture:{mode:'external',hosts:['demo-postgres','fixture.internal']},
+  });
+  let config;
+  await withDisposableLauncher(root, binding, async env => {
+    config=env.DOCKER_CONFIG;
+    assert.notEqual(config,client);
+    assert.deepEqual(await readdir(config),[]);
+    assert.equal((await stat(config)).mode & 0o777,0o700);
+    assert.equal(env.DOCKER_HOST,'unix:///var/run/docker.sock');
+    assert.equal(env.DOCKER_CONTEXT,undefined);
+    assert.equal(env.SCHEMII_RESET_MIGRATION_DEMO,'0');
+    assert.equal(env.SCHEMII_TEST_APP_PORT,'8001');
+    assert.equal(env.SCHEMII_ALLOWED_TARGET_HOSTS,ambient.SCHEMII_ALLOWED_TARGET_HOSTS);
+    assert.equal(env.SCHEMII_TARGET_EGRESS_MODE,ambient.SCHEMII_TARGET_EGRESS_MODE);
+    assert.equal(env.SCHEMII_TEST_POSTGRES_DB,ambient.SCHEMII_TEST_POSTGRES_DB);
+  },ambient);
+  await assert.rejects(stat(config),{code:'ENOENT'});
+  const neverLaunch=()=>assert.fail('refused input reached the launcher');
+  for(const denied of [
+    {SCHEMII_RESET_MIGRATION_DEMO:'1'}, {SCHEMII_SECRET_DIRECTORY:'/other'},
+    {SCHEMII_LAUNCH_LOCK_FILE:'/other'}, {DOCKER_CONTEXT:'non-guest-context'},
+    {DOCKER_HOST:'tcp://other:2376'}, {DOCKER_CONFIG:client}, {COMPOSE_PROJECT_NAME:'other'},
+    {SCHEMII_TEST_APP_PORT:'8443'}, {SCHEMII_ALLOWED_TARGET_HOSTS:'*'},
+  ]) {
+    await assert.rejects(withDisposableLauncher(root,binding,neverLaunch,{...ambient,...denied}),/Disposable QA/);
+  }
+  await assert.rejects(withDisposableLauncher(root,{},neverLaunch,ambient),/outside the approved binding/);
+  await assert.rejects(withDisposableLauncher(root,binding,neverLaunch,{
+    ...ambient,SCHEMII_ALLOWED_TARGET_HOSTS:'another.internal',
+  }),/outside the approved binding/);
+  await mkdir(join(root,'.schemii'));
+  await writeFile(join(root,'.schemii','compose.local.yaml'),'services: {}');
+  await assert.rejects(withDisposableLauncher(root,binding,neverLaunch,ambient),/Compose override/);
+});
+
+test('guest CLI reserves a separate isolated reviewer without dropping any lane cases', async t => {
+  const dir=await mkdtemp(join(tmpdir(),'qa-guest-review-plan-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const file=join(dir,'binding.json');
+  await writeFile(file,JSON.stringify({
+    bootId:'12345678-1234-1234-1234-123456789012',commit:'a'.repeat(40),certificateSha256:'b'.repeat(64),
+  }),{mode:0o600});
+  const cli=new URL('./cli.mjs',import.meta.url).pathname;
+  const plan=(...args)=>spawnSync(process.execPath,[cli,'plan','--accounts','tester,verifier',
+    '--products','schemii,schemoo,schemer','--reviewer-account','verifier','--runtime-slots','3',...args],{encoding:'utf8'});
+  const r=plan('--disposable-guest-binding',file);
+  assert.equal(r.status,0,r.stderr);
+  const result=JSON.parse(r.stdout);
+  assert.equal(result.parallel,1);
+  assert.deepEqual(result.lanes.map(l=>[l.role,l.scenarios.length]),[['tester',6],['reviewer',6]]);
+  assert.match(plan().stderr,/explicit disposable guest binding/);
+  assert.match(plan('--disposable-guest-binding',file,'--parallel','2').stderr,/observed --runtime-slots|counts testers/);
+  assert.match(plan('--disposable-guest-binding',file,'--browser','native').stderr,/guest-local isolated/);
 });

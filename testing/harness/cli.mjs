@@ -177,15 +177,15 @@ async function selection(o, reservedAccounts, guestBinding) {
   if (!Number.isInteger(agentTimeout) || agentTimeout < 30 || agentTimeout > 3600) throw new Error('--agent-timeout must be 30 through 3600 seconds.');
   if (new Set(accounts.map(a => a.toLowerCase())).size !== accounts.length || accounts.some(a => !/^[a-zA-Z0-9_.@-]{1,64}$/.test(a))) throw new Error('Accounts must be unique usernames.');
   if (o.parallel !== undefined && !/^(?:[1-9]|10)$/.test(o.parallel)) throw new Error('--parallel must be an integer from 1 through 10.');
-  const parallel = Number(o.parallel || Math.min(2, accounts.length));
-  if (!Number.isInteger(parallel) || parallel < 1 || parallel > 10 || parallel > accounts.length) throw new Error('Parallelism must be 1–10 and no greater than the selected accounts.');
   const reviewerAccount = o['reviewer-account'] || null;
+  const parallel = Number(o.parallel || Math.min(2, accounts.length - (guestBinding && reviewerAccount ? 1 : 0)));
+  if (!Number.isInteger(parallel) || parallel < 1 || parallel > 10 || parallel > accounts.length) throw new Error('Parallelism must be 1–10 and no greater than the selected accounts.');
   const runtimeSlots = o['runtime-slots'] === undefined ? null : Number(o['runtime-slots']);
-  if (browser === 'native') {
-    if (!reviewerAccount || !accounts.includes(reviewerAccount) || accounts.length < 2) throw new Error('Native QA requires --reviewer-account naming a separately selected account.');
-    if (!/^[0-9]+$/.test(o['runtime-slots'] || '') || !Number.isSafeInteger(runtimeSlots) || runtimeSlots < parallel + 2) throw new Error('Native QA requires observed --runtime-slots for active testers plus coordinator and independent reviewer.');
-    if (parallel > accounts.length - 1) throw new Error('Native --parallel counts testers; reserve one selected reviewer account separately.');
-  } else if (reviewerAccount || runtimeSlots !== null) throw new Error('--reviewer-account and --runtime-slots currently require --browser native.');
+  if (browser === 'native' || (guestBinding && reviewerAccount)) {
+    if (!reviewerAccount || !accounts.includes(reviewerAccount) || accounts.length < 2) throw new Error('Independent QA review requires --reviewer-account naming a separately selected account.');
+    if (!/^[0-9]+$/.test(o['runtime-slots'] || '') || !Number.isSafeInteger(runtimeSlots) || runtimeSlots < parallel + 2) throw new Error('Independent QA review requires observed --runtime-slots for active testers plus coordinator and reviewer.');
+    if (parallel > accounts.length - 1) throw new Error('--parallel counts testers; reserve one selected reviewer account separately.');
+  } else if (reviewerAccount || runtimeSlots !== null) throw new Error('--reviewer-account and --runtime-slots require native QA or an explicit disposable guest binding.');
   const products = list(o.products, 'schemoo');
   if (products.some(x => !['schemii','schemoo','schemer'].includes(x))) throw new Error('Unknown product.');
   const tracks = list(o.tracks, 'harness');

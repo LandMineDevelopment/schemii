@@ -466,3 +466,33 @@ test('closed native recovery prepares pending-only reconciliation while retainin
   assert.equal(prepared,true);assert.deepEqual(result.pending,[f.scenario.id]);assert.equal(result.status,'ready');
   assert.equal(f.lane.scenarios[1].functional,'passed');assert.equal(f.lane.recovery.reconciliationRequired,true);
 });
+
+test('guest reviewer needs distinct owned browser and rechecked current hash; review preserves both outcomes', () => {
+  const f=attemptedFixture();
+  f.run.browser='isolated';
+  f.run.guestBinding={};
+  f.run.reviewerAccount=f.reviewer.username;
+  f.lane.browser={pid:101,launchId:'tester-browser'};
+  f.reviewer.browser={pid:102,launchId:'reviewer-browser'};
+  f.reviewer.scenarios=[{id:f.scenario.id,functional:'not-run',visual:'not-run'}];
+  const review={verdict:'accepted',note:'Independent fixture readback matched.'};
+  inspectionReceipt(f.capture,f.reviewer.agent,{tool:'view_image',invocation:'reviewer tool',note:'Expected match; actual match.'});
+  const verified=new Map([[f.capture.path,f.capture.sha256]]);
+  assert.throws(()=>recordReview(f.run,{...f.reviewer,role:'tester'},f.lane,f.scenario.id,review,verified),/distinct reviewer/);
+  const browser=f.reviewer.browser;
+  f.reviewer.browser=f.lane.browser;
+  assert.throws(()=>recordReview(f.run,f.reviewer,f.lane,f.scenario.id,review,verified),/distinct browser/);
+  f.reviewer.browser=browser;
+  assert.throws(()=>recordReview(f.run,f.reviewer,f.lane,f.scenario.id,review,new Map([[f.capture.path,'wrong']])),/current hash/);
+  const attempt=f.scenario.attempts[0];
+  attempt.functional='failed';
+  assert.throws(()=>recordReview(f.run,f.reviewer,f.lane,f.scenario.id,review,verified),/failed or blocked/);
+  attempt.functional='passed';
+  const receipt=recordReview(f.run,f.reviewer,f.lane,f.scenario.id,review,verified);
+  assert.deepEqual(receipt.targetImages,[{path:f.capture.path,sha256:f.capture.sha256}]);
+  assert.equal(attempt.functional,'passed');
+  assert.match(acceptance(f.run).reasons.join(),/reviewer case observations pending/);
+  Object.assign(f.reviewer.scenarios[0],{functional:'passed',visual:'passed'});
+  f.reviewer.status='complete';
+  assert.equal(acceptance(f.run).status,'reviewed-acceptance');
+});
