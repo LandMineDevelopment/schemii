@@ -21,6 +21,10 @@ PACKAGE = "development.landmine.schemii.android.host"
 STUBS = {
     "android/os/Bundle.java": "package android.os; public class Bundle {}",
     "android/content/Context.java": "package android.content; public class Context {}",
+    "android/content/pm/ApplicationInfo.java": """
+package android.content.pm;
+public class ApplicationInfo { public String nativeLibraryDir="/fixture/framework-library"; }
+""",
     "android/content/Intent.java": """
 package android.content;
 public class Intent {
@@ -163,6 +167,9 @@ public class Activity extends Context {
         noTitle=feature==1;return true;
     }
     public Resources getResources() { return new Resources(); }
+    public android.content.pm.ApplicationInfo getApplicationInfo() {
+        return new android.content.pm.ApplicationInfo();
+    }
     public void setContentView(View value) { content=value; }
     public void startForegroundService(Intent intent) { actions.add(intent.action); }
 }
@@ -172,6 +179,21 @@ package development.landmine.schemii.android.host;
 public class HostService {
     public static String value="initial refusal";
     public static String status() { return value; }
+}
+""",
+    "development/landmine/schemii/android/host/NativeOwner.java": """
+package development.landmine.schemii.android.host;
+public class NativeOwner {
+    static final class OwnMapping {
+        static String value="Own mapping not checked";
+        static int starts;
+        static void start(String directory) {
+            if (!directory.equals("/fixture/framework-library")) throw new AssertionError("framework reference");
+            ++starts;
+            value="Own mapping pending";
+        }
+        static String status() { return value; }
+    }
 }
 """,
 }
@@ -216,6 +238,30 @@ public class ActivityHarness {
             s.dispatchInsets(new WindowInsets(new Insets(44,0,44,12),null));
             padding(s,44,0,44,12);padding(layout,36,36,36,36);
             Resources.density=2f;ScrollView next=scroll(create());padding(body(next),48,48,48,48);
+        } else if(args[0].equals("mapping")) {
+            require(layout.children.size()==7,"one separate action and status");
+            Button mapping=(Button)layout.children.get(5);
+            TextView evidence=(TextView)layout.children.get(6);
+            require(mapping.text.equals("Check own mapping") && evidence.text.equals("Own mapping not checked"),
+                "explicit mapping action inside the inset-aware layout");
+            a.onResume(); ((Button)layout.children.get(4)).performClick();
+            require(NativeOwner.OwnMapping.starts==0 && a.actions.isEmpty(),"refresh and resume do not start work");
+            mapping.performClick();
+            require(evidence.text.equals("Own mapping pending") && a.actions.isEmpty()
+                && NativeOwner.OwnMapping.starts==1,"tap updates only mapping state");
+            require(((TextView)layout.children.get(1)).text.equals("initial refusal"),"separate host status");
+            HostActivity next=create();
+            LinearLayout recreated=body(scroll(next));
+            TextView nextEvidence=(TextView)recreated.children.get(6);
+            require(nextEvidence.text.equals("Own mapping pending") && NativeOwner.OwnMapping.starts==1,
+                "recreation reads pending without starting another check");
+            NativeOwner.OwnMapping.value="Own mapping matched";
+            ((Button)recreated.children.get(4)).performClick();
+            require(nextEvidence.text.equals("Own mapping matched") && next.actions.isEmpty(),
+                "existing refresh reads terminal mapping state without service intent");
+            next.onResume();
+            require(nextEvidence.text.equals("Own mapping matched") && NativeOwner.OwnMapping.starts==1,
+                "resume preserves terminal status");
         } else {
             TextView status=(TextView)layout.children.get(1);
             require(status.text.equals("initial refusal"),"initial status preserved");
@@ -270,3 +316,6 @@ class HostActivityLayoutTests(unittest.TestCase):
 
     def test_fixed_actions_long_status_and_resume(self):
         self.run_case("dispatch")
+
+    def test_own_mapping_action_and_recreated_status(self):
+        self.run_case("mapping")

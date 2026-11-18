@@ -119,3 +119,37 @@ require the UI observation-loss notice. Logcat rotation/drop/collection loss
 must be reported externally, bound to actual installed bytes; this is not a
 private durable export/recovery mechanism. No background control/start surface,
 Direct Boot receiver, exemption, timer or provisioning path is introduced.
+
+## Closed CE own-mapping check
+
+Run **Check host prerequisites** first when collecting a controlled comparison.
+Then tap **Check own mapping**. The Activity displays a separate result on
+**Refresh status** or when it resumes. A tap reserves one sample per app
+process. Recreation, repeat taps and cancellation of the host check leave
+that sample in place. If an SDK or kernel call stalls, the sample remains
+pending. A collection deadline establishes an inconclusive observation.
+
+The worker borrows a read-only descriptor for the fixed owner library in the
+app's framework library directory. JNI scans only `/proc/self/maps`, with
+1 MiB total and 8 KiB per record limits, ignoring path text. A match requires
+a complete scan with exactly one covering readable, executable, nonwritable
+row for the executing probe function, with the held file's device and inode
+and a mapped byte position within its size. Both descriptors must close
+cleanly for a reported match. Other terminal outcomes read **Own mapping
+unknown**. This measures the known reference at a point in the scan. The
+original refused image's backing object and provenance remain unknown.
+
+The separate in-process scalar carries version, closed profile, compiled
+commit, process-local sample number and start/end bounds from Android elapsed
+realtime. It reports the first operation phase and observed errno, independent
+maps and Java reference dispositions (0 unopened, 1 closed, 2 close failed,
+3 unobserved), and the maps close errno if observed. Errno 0 means none
+observed. `complete=1` describes a finished scan with bound source and timing,
+including a complete nonmatch. `loss=1` means source, timing or a trustworthy
+JNI result was unavailable. The scalar contains no map rows or private
+identifiers and stays in process memory. A private external receipt must bind
+the capture to the installed APK, signature and run context and record any
+capture loss. Host JVM/Linux controls and unsigned ARM64 inspection qualify
+source only. Access under the stock nondebuggable Android app remains to be
+measured. Stage 10 and the existing acquisition and admission controls continue
+to govern host prerequisite checks.

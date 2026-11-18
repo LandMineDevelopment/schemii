@@ -1,4 +1,11 @@
 package development.landmine.schemii.android.host;
+
+import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
+import java.io.File;
+import java.io.IOException;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 /** Closed scalar projection only. No UUID/anchor/trust setter crosses JNI. */
 public final class NativeOwner {
     private NativeOwner() {}
@@ -10,6 +17,118 @@ public final class NativeOwner {
     static native String observationSource();
     static native long[] imageRefusal();
     static native int close();
+
+    private static native long[] checkOwnMapping(int referenceFd, long begin);
+
+    /** Independent of acquisition. Reading UI state does not initialize the outer JNI class. */
+    static final class OwnMapping {
+        // Native ABI v1 phase numbers in order. Remaining phases are Java-only.
+        enum Phase {
+            NONE, REFERENCE_STAT, MAPS_OPEN, MAPS_READ, MAPS_FORMAT, MAPS_LIMIT, MAPS_MATCH,
+            DISPATCH, CLOCK, SOURCE, REFERENCE_OPEN, REFERENCE_BORROW, JNI
+        }
+        private static final int NOT_OPENED = 0, CLOSED = 1, CLOSE_FAILED = 2, UNOBSERVED = 3;
+        private static final AtomicBoolean started = new AtomicBoolean();
+        private static volatile String terminal;
+
+        static void start(String libraryDir) {
+            if (!started.compareAndSet(false, true)) return;
+            try {
+                new Thread(() -> measure(libraryDir), "schemii-own-mapping").start();
+            } catch (RuntimeException | OutOfMemoryError failure) {
+                publish("unbound", -1, -1, Phase.DISPATCH, 0, NOT_OPENED, 0, NOT_OPENED);
+            }
+        }
+
+        static String status() {
+            String result = terminal;
+            if (result != null) return result;
+            return started.get() ? "Own mapping pending — refresh status to check"
+                : "Own mapping not checked";
+        }
+
+        private static long now() {
+            try { return SystemClock.elapsedRealtimeNanos(); }
+            catch (RuntimeException | LinkageError | OutOfMemoryError failure) { return -1; }
+        }
+
+        private static void measure(String libraryDir) {
+            long begin = now();
+            String source = "unbound";
+            Phase phase = Phase.CLOCK;
+            int error = 0, maps = NOT_OPENED, mapsError = 0, reference = NOT_OPENED;
+            ParcelFileDescriptor held = null;
+            try {
+                if (begin >= 0) {
+                    phase = Phase.SOURCE;
+                    String compiled = observationSource();
+                    if (compiled != null && compiled.matches("[0-9a-f]{40}")) {
+                        source = compiled;
+                        phase = Phase.REFERENCE_OPEN;
+                        if (libraryDir != null && new File(libraryDir).isAbsolute()) {
+                            held = ParcelFileDescriptor.open(new File(libraryDir, "libschemii_owner.so"),
+                                ParcelFileDescriptor.MODE_READ_ONLY);
+                            phase = Phase.REFERENCE_BORROW;
+                            int fd = held.getFd();
+                            if (fd >= 0) {
+                                phase = Phase.JNI;
+                                maps = UNOBSERVED;
+                                long[] raw = checkOwnMapping(fd, begin);
+                                if (valid(raw, begin)) {
+                                    phase = Phase.values()[(int)raw[2]];
+                                    error = (int)raw[3];
+                                    maps = (int)raw[4];
+                                    mapsError = (int)raw[5];
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (IOException | RuntimeException | LinkageError | OutOfMemoryError failure) {
+                // The current phase identifies the first operation failure.
+                // SDK exceptions are not a syscall errno or safe output.
+            } finally {
+                if (held != null) {
+                    reference = CLOSE_FAILED;
+                    try {
+                        held.close();
+                        reference = CLOSED;
+                    } catch (IOException | RuntimeException | LinkageError | OutOfMemoryError failure) {
+                        // One close attempt, even if the descriptor's disposition is uncertain.
+                    }
+                }
+            }
+            long end = now();
+            if (end < begin && phase == Phase.NONE) phase = Phase.CLOCK;
+            publish(source, begin, end, phase, error, maps, mapsError, reference);
+        }
+
+        private static boolean valid(long[] raw, long begin) {
+            if (raw == null || raw.length != 6 || raw[0] != 1 || raw[1] != begin
+                || raw[2] < 0 || raw[2] > Phase.MAPS_MATCH.ordinal()
+                || raw[3] < 0 || raw[3] > 4095 || raw[5] < 0 || raw[5] > 4095) return false;
+            int phase = (int)raw[2];
+            if ((phase == Phase.MAPS_OPEN.ordinal() || phase == Phase.MAPS_READ.ordinal())
+                && raw[3] == 0) return false;
+            if ((phase == 0 || phase >= Phase.MAPS_FORMAT.ordinal()) && raw[3] != 0) return false;
+            if (phase == Phase.REFERENCE_STAT.ordinal() || phase == Phase.MAPS_OPEN.ordinal())
+                return raw[4] == NOT_OPENED && raw[5] == 0;
+            return (raw[4] == CLOSED && raw[5] == 0) || (raw[4] == CLOSE_FAILED && raw[5] > 0);
+        }
+
+        private static void publish(String source, long begin, long end, Phase phase, int error,
+                                    int maps, int mapsError, int reference) {
+            boolean loss = begin < 0 || end < begin || source.equals("unbound") || maps == UNOBSERVED;
+            boolean complete = !loss && (phase == Phase.NONE || phase == Phase.MAPS_MATCH);
+            boolean matched = complete && phase == Phase.NONE && maps == CLOSED && reference == CLOSED;
+            terminal = (matched ? "Own mapping matched" : "Own mapping unknown")
+                + "\nv=1 profile=closed-connected-host-v1 source=" + source
+                + " sample=1 beginNs=" + begin + " endNs=" + end
+                + " outcome=" + (matched ? "match" : "unknown") + " phase=" + phase + " errno=" + error
+                + " mapsClose=" + maps + " mapsCloseErrno=" + mapsError + " referenceClose=" + reference
+                + " complete=" + (complete ? 1 : 0) + " loss=" + (loss ? 1 : 0);
+        }
+    }
 
     /** Separate observation ABI v1, never an admission or cleanup grant. */
     static final class Observation {
