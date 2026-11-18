@@ -26,6 +26,7 @@ Usage: schemii COMMAND [ARGUMENTS]
   verify-backup DIRECTORY         Verify a private backup without restoring
   backup DIRECTORY               Make a private cold backup (stops the backend)
   restore DIRECTORY              Restore only into a fresh empty runtime state
+  stage-portable BUNDLE          Inspect a dual-plane PostgreSQL 17 restore in isolation
   enable-boot | disable-boot     Manage only Schemii's Termux:Boot script
 Install Termux and Termux:Boot from the same official source. Keep this release
 inside Termux's private home, and connect the official Tailscale Android app.
@@ -68,14 +69,24 @@ guest() {
   local -a invocation=(proot-distro login --isolated --user "$guest_user"
     --env PROOT_DONT_SHARE_LIBANDROID_SHMEM=1
     --bind "$SCHEMII_ANDROID_ROOT:/opt/schemii"
-    --bind "$SCHEMII_ANDROID_CONTROL:/mnt/schemii-control"
-    --work-dir /opt/schemii "$SCHEMII_ANDROID_ALIAS" --)
+    --bind "$SCHEMII_ANDROID_CONTROL:/mnt/schemii-control")
+  if [[ ${1-} == --portable-bundle ]]; then
+    invocation+=(--bind "$2:/mnt/schemii-portable-bundle")
+    shift 2
+  fi
+  invocation+=(--work-dir /opt/schemii "$SCHEMII_ANDROID_ALIAS" --)
   # Read-only probes must not defeat the outer startup deadline if PRoot stalls.
   if [[ "$guest_user" == schemii && ${1-} == /opt/schemii-venv/bin/python && ${2-} == /opt/schemii/dev/android/runtime.py && ${3-} == status ]]; then
     timeout --signal=TERM --kill-after=2s 12s "${invocation[@]}" "$@"
   else
     "${invocation[@]}" "$@"
   fi
+}
+stage_portable() {
+  python -B "$SCHEMII_ANDROID_ROOT/dev/android/portable_stage.py" \
+    "$1" "$HOME" "$PREFIX" "$SCHEMII_ANDROID_ROOT" "$SCHEMII_ANDROID_CONTROL" || return
+  guest schemii --portable-bundle "$1" /opt/schemii-venv/bin/python -B \
+    /opt/schemii/dev/android/runtime.py stage-portable /mnt/schemii-portable-bundle
 }
 native_host() { [[ -f "$SCHEMII_ANDROID_ROOT/dev/android/host.py" ]] || return 1; python "$SCHEMII_ANDROID_ROOT/dev/android/host.py" "$@"; }
 native_mode() { native_host enabled; }
@@ -416,7 +427,10 @@ main() {
   local action=${1:---help}
   case "$action" in --help|-h|help) usage; return;; esac
   shift
-  case "$action" in install|configure|start|stop|restart|status|doctor|logs|backup|restore|verify-backup|export-ca|credentials|reset-password|tailnet-enable|tailnet-disable|tailnet-login|enable-boot|disable-boot|wait-network) ;; *) fail "Unknown command: $action"; return 1;; esac
+  case "$action" in install|configure|start|stop|restart|status|doctor|logs|backup|restore|verify-backup|stage-portable|export-ca|credentials|reset-password|tailnet-enable|tailnet-disable|tailnet-login|enable-boot|disable-boot|wait-network) ;; *) fail "Unknown command: $action"; return 1;; esac
+  if [[ "$action" == stage-portable ]] && { (($# != 1)) || [[ "$1" != /* ]]; }; then
+    fail 'Usage: schemii stage-portable ABSOLUTE_PRIVATE_BUNDLE' || return 2
+  fi
   if [[ "$action" == reset-password ]]; then
     if ! { (($# == 1)) || { (($# == 2)) && [[ "$1" == -- ]]; }; }; then
       fail 'Usage: schemii reset-password [--] USERNAME; enter the password only at the hidden prompts.' || return 2
@@ -436,12 +450,13 @@ main() {
   if [[ "$action" == install ]]; then install_runtime "$@"; return; fi
   require_proot
   require_owned
-  case "$action" in start|restart|configure|enable-boot|tailnet-enable) require_installed_source;; esac
+  case "$action" in start|restart|configure|enable-boot|tailnet-enable|stage-portable) require_installed_source;; esac
   if [[ "$action" == backup ]] && native_active; then stop_runtime || return; fi
   case "$action" in
     start) start_runtime "$@";;
     stop) stop_runtime "$@";;
     restart) restart_runtime "$@";;
+    stage-portable) stage_portable "$@";;
     wait-network) (($# == 0)) || fail 'wait-network takes no arguments.'; native_host wait-network;;
     enable-boot|disable-boot) (($# == 0)) || fail "$action takes no arguments."; manage_boot "$action";;
     *) runtime "$action" "$@";;
