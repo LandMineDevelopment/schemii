@@ -225,18 +225,20 @@ def database():
                     assert storage.operate(migrator, "migrate", name, identity)[
                         "applied_versions"
                     ] == [1]
-                assert storage.operate(migrator, "plan", name, identity)[
-                    "pending_versions"
-                ] == [2]
-                assert storage.operate(migrator, "migrate", name, identity)[
-                    "applied_versions"
-                ] == [2]
-                assert (
-                    storage.operate(migrator, "migrate", name, identity)[
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setattr(storage, "migration_files", lambda: original[:2])
+                    assert storage.operate(migrator, "plan", name, identity)[
+                        "pending_versions"
+                    ] == [2]
+                    assert storage.operate(migrator, "migrate", name, identity)[
                         "applied_versions"
-                    ]
-                    == []
-                )
+                    ] == [2]
+                    assert (
+                        storage.operate(migrator, "migrate", name, identity)[
+                            "applied_versions"
+                        ]
+                        == []
+                    )
             yield config
         finally:
             if (data / "postmaster.pid").exists():
