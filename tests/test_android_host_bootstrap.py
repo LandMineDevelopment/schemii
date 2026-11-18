@@ -5,6 +5,7 @@ HostService, StorageProfile, NativeOwner and JNI are compiled unchanged. No
 positive native admission, APK build, framework process or device is exercised.
 """
 
+import ctypes
 from pathlib import Path
 import shutil
 import stat
@@ -12,6 +13,7 @@ import hashlib
 import os
 import zipfile
 import subprocess
+import tempfile
 
 import pytest
 
@@ -589,12 +591,15 @@ def java_bootstrap(tmp_path_factory):
 #include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <jni.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include "native_bootstrap.h"
 static int inventory_calls, armed, flock_calls;
 static int owner_closes;
@@ -631,31 +636,79 @@ static int variant(const char *name) {
     const char *mode=getenv("SCHEMII_FIXTURE_MAPS");
     return mode && !strcmp(mode,name);
 }
-static void substitute_maps(int fd) {
-    FILE *in=fdopen(dup(fd),"r"), *out=tmpfile();
-    if (!in || !out) abort();
+int __real_open(const char *,int,...);
+extern void Java_development_landmine_schemii_android_host_NativeOwner_open(void);
+
+struct fixture_row {
+    uintptr_t lo, hi;
+    uint64_t offset, inode;
+    unsigned device_major, device_minor;
+    char permissions[5];
+};
+
+/* Get the executing ELF segment from real procfs and its file identity from
+ * the loader's own fixture path. Never use the display path from a maps row. */
+static struct fixture_row fixture_owner_row(int fd, struct stat *module) {
+    uintptr_t entry=(uintptr_t)&Java_development_landmine_schemii_android_host_NativeOwner_open;
+    Dl_info image;
+    if (!dladdr((void *)entry,&image)) abort();
+    int reference=__real_open(image.dli_fname,O_RDONLY|O_CLOEXEC);
+    if (reference<0 || fstat(reference,module) || close(reference)
+        || !S_ISREG(module->st_mode) || module->st_size<=0) abort();
+    FILE *in=fdopen(fd,"r");
+    if (!in) abort();
+    struct fixture_row owner={0};
     char *line=NULL;
     size_t capacity=0;
     unsigned found=0;
     while (getline(&line,&capacity,in)>=0) {
-        if (!strstr(line," r-xp ") || !strstr(line,"/libschemii_owner.so")) {
-            fputs(line,out);
-            continue;
-        }
-        ++found;
-        char range[64], perm[5], offset[32], device[32], inode[32];
-        if (sscanf(line,"%63s %4s %31s %31s %31s",range,perm,offset,device,inode)!=5) abort();
-        if (variant("absent")) continue;
-        if (variant("duplicate")) fputs(line,out);
-        if (variant("zero-inode")) strcpy(inode,"0");
-        if (variant("wrong-device")) strcpy(device,"ffff:ffff");
-        if (variant("writable")) strcpy(perm,"rwxp");
-        if (variant("nonexec")) strcpy(perm,"r--p");
-        if (variant("offset-overflow")) strcpy(offset,"ffffffffffffffff");
-        if (variant("bad-inode")) strcpy(inode,"18446744073709551616");
-        fprintf(out,"%s %s %s %s %s /SECRET-ignored-path\n",range,perm,offset,device,inode);
+        struct fixture_row row;
+        if (sscanf(line,"%" SCNxPTR "-%" SCNxPTR " %4s %" SCNx64 " %x:%x %" SCNu64,
+                   &row.lo,&row.hi,row.permissions,&row.offset,&row.device_major,&row.device_minor,&row.inode)!=7)
+            abort();
+        if (row.lo<=entry && entry<row.hi) { owner=row; ++found; }
     }
-    if (found!=1 || ferror(in)) abort();
+    free(line);
+    if (ferror(in) || fclose(in) || found!=1 || strcmp(owner.permissions,"r-xp")
+        || owner.offset>=(uint64_t)module->st_size || !owner.inode) abort();
+    return owner;
+}
+
+/* Independent raw precondition for unmodified real-procfs controls. Return
+ * only the identity category to the test runner. */
+int fixture_map_identity(void) {
+    struct stat module;
+    struct fixture_row row=fixture_owner_row(__real_open("/proc/self/maps",O_RDONLY|O_CLOEXEC),&module);
+    if (row.inode!=(uint64_t)module.st_ino) return 0;
+    return row.device_major==major(module.st_dev) && row.device_minor==minor(module.st_dev) ? 1 : 2;
+}
+
+static void substitute_maps(int fd) {
+    struct stat module;
+    struct fixture_row row=fixture_owner_row(dup(fd),&module);
+    FILE *out=tmpfile();
+    if (!out) abort();
+    /* Same valid executable range/offset, with the loaded module's held-file
+     * device and inode regardless of how this filesystem reports procfs IDs. */
+    const char *permissions=row.permissions, *path="/fixture/owner.so";
+    unsigned device_major=major(module.st_dev), device_minor=minor(module.st_dev);
+    uint64_t offset=row.offset, inode=(uint64_t)module.st_ino;
+    if (variant("opaque-path")) path="/SECRET-ignored-path";
+    if (variant("zero-inode")) inode=0;
+    if (variant("wrong-device")) device_minor^=1;
+    if (variant("writable")) permissions="rwxp";
+    if (variant("nonexec")) permissions="r--p";
+    if (variant("offset-overflow")) offset=UINT64_MAX;
+    char inode_field[32];
+    snprintf(inode_field,sizeof(inode_field),"%" PRIu64,inode);
+    if (variant("bad-inode")) strcpy(inode_field,"18446744073709551616");
+    fputs("1-2 r--p 0 00:00 0\n",out);
+    if (!variant("absent")) {
+        int copies=variant("duplicate") ? 2 : 1;
+        for (int i=0;i<copies;++i)
+            fprintf(out,"%" PRIxPTR "-%" PRIxPTR " %s %" PRIx64 " %x:%x %s %s\n",
+                    row.lo,row.hi,permissions,offset,device_major,device_minor,inode_field,path);
+    }
     if (variant("malformed")) fputs("malformed after a match\n",out);
     if (variant("truncated")) fputs("1-2 r--p 0 00:00 0",out);
     if (variant("embedded-nul")) {
@@ -669,10 +722,8 @@ static void substitute_maps(int fd) {
     }
     if (variant("total-cap"))
         for (int i=0;i<65536;++i) fputs("1-2 r--p 0 00:00 0\n",out);
-    free(line);
-    if (fclose(in) || fflush(out) || fseek(out,0,SEEK_SET) || dup2(fileno(out),fd)!=fd || fclose(out)) abort();
+    if (fflush(out) || fseek(out,0,SEEK_SET) || dup2(fileno(out),fd)!=fd || fclose(out)) abort();
 }
-int __real_open(const char *,int,...);
 int __wrap_open(const char *path,int flags,...) {
     if (strcmp(path,"/proc/self/maps")) {
         if (!(flags&O_CREAT)) return __real_open(path,flags);
@@ -683,15 +734,15 @@ int __wrap_open(const char *path,int flags,...) {
     if (flags!=(O_RDONLY|O_CLOEXEC) || ++maps_opens!=1) abort();
     if (variant("open-denied")) { errno=EACCES; return -1; }
     maps_fd=__real_open(path,flags);
-    if (maps_fd>=0 && getenv("SCHEMII_FIXTURE_MAPS") && !variant("read-denied")
-        && !variant("close-fail") && !variant("read-close-fail") && !variant("stall"))
+    if (maps_fd>=0 && getenv("SCHEMII_FIXTURE_MAPS")
+        && !variant("real") && !variant("real-mismatch"))
         substitute_maps(maps_fd);
     return maps_fd;
 }
 ssize_t __real_read(int,void *,size_t);
 ssize_t __wrap_read(int fd,void *out,size_t size) {
     if (fd==maps_fd) {
-        if (variant("read-denied") || variant("read-close-fail")) { errno=EPERM; return -1; }
+        if (variant("read-denied") || variant("read-both-closes-fail")) { errno=EPERM; return -1; }
         if (variant("stall")) {
             pthread_mutex_lock(&latch);
             blocked=1;
@@ -711,12 +762,11 @@ int __wrap_close(int fd) {
     int result=__real_close(fd);
     if (fd>=0 && fd==maps_fd) {
         if (++maps_closes!=1) abort();
-        if (variant("close-fail") || variant("read-close-fail")) { errno=EIO; return -1; }
+        if (variant("close-fail") || variant("read-both-closes-fail")) { errno=EIO; return -1; }
     }
     if (armed) { armed=0; errno=EIO; return -1; }
     return result;
 }
-extern void Java_development_landmine_schemii_android_host_NativeOwner_open(void);
 int __wrap_dl_iterate_phdr(int (*callback)(struct dl_phdr_info *,size_t,void *), void *arg) {
     Dl_info image;
     if (!dladdr((void *)&Java_development_landmine_schemii_android_host_NativeOwner_open,&image)) return 1;
@@ -785,16 +835,54 @@ int __wrap_dl_iterate_phdr(int (*callback)(struct dl_phdr_info *,size_t,void *),
     return java, classes, library
 
 
+def mapping_identity(library: Path) -> int:
+    if os.statvfs(library).f_flag & os.ST_NOEXEC:
+        return 0
+    return ctypes.CDLL(str(library)).fixture_map_identity()
+
+
+@pytest.fixture
+def own_mapping_library(java_bootstrap, mode):
+    _, _, library = java_bootstrap
+    if mode == "real":
+        # Qualify the caller's root first. If procfs reports a different
+        # device identity there, try a separate executable filesystem.
+        if mapping_identity(library) == 1:
+            yield library
+            return
+        with tempfile.TemporaryDirectory(
+            prefix="schemii-own-mapping-", dir="/tmp"
+        ) as work:
+            candidate = Path(work) / library.name
+            shutil.copyfile(library, candidate)
+            if mapping_identity(candidate) != 1:
+                pytest.skip(
+                    "no executable fixture root with matching procfs and held-file identity"
+                )
+            yield candidate
+    elif mode == "real-mismatch":
+        # Keep the caller's actual backing filesystem and unmodified maps.
+        if mapping_identity(library) != 2:
+            pytest.skip("temporary root has no observed same-inode device mismatch")
+        yield library
+    elif mode == "unbound":
+        yield library.parent / "unbound" / library.name
+    else:
+        yield library
+
+
 @pytest.mark.parametrize(
     ("mode", "phase", "errno", "maps", "maps_errno", "reference", "complete", "loss"),
     [
         ("real", "NONE", 0, 1, 0, 1, 1, 0),
+        ("real-mismatch", "MAPS_MATCH", 0, 1, 0, 1, 1, 0),
+        ("known-good", "NONE", 0, 1, 0, 1, 1, 0),
         ("opaque-path", "NONE", 0, 1, 0, 1, 1, 0),
         ("stall", "NONE", 0, 1, 0, 1, 1, 0),
         ("open-denied", "MAPS_OPEN", 13, 0, 0, 1, 0, 0),
         ("read-denied", "MAPS_READ", 1, 1, 0, 1, 0, 0),
         ("close-fail", "NONE", 0, 2, 5, 1, 1, 0),
-        ("read-close-fail", "MAPS_READ", 1, 2, 5, 2, 0, 0),
+        ("read-both-closes-fail", "MAPS_READ", 1, 2, 5, 2, 0, 0),
         ("reference-close-fail", "NONE", 0, 1, 0, 2, 1, 0),
         ("missing-reference", "REFERENCE_OPEN", 0, 0, 0, 0, 0, 0),
         ("borrow-fail", "REFERENCE_BORROW", 0, 0, 0, 1, 0, 0),
@@ -824,6 +912,7 @@ int __wrap_dl_iterate_phdr(int (*callback)(struct dl_phdr_info *,size_t,void *),
 )
 def test_own_mapping_linked_fixture(
     java_bootstrap,
+    own_mapping_library,
     tmp_path,
     mode,
     phase,
@@ -834,8 +923,8 @@ def test_own_mapping_linked_fixture(
     complete,
     loss,
 ):
-    java, classes, library = java_bootstrap
-    library_dir = library.parent / "unbound" if mode == "unbound" else library.parent
+    java, classes, _ = java_bootstrap
+    library = own_mapping_library
     reference_dir = library.parent
     if mode in {"missing-reference", "wrong-reference", "empty-reference", "stall"}:
         reference_dir = tmp_path
@@ -853,15 +942,13 @@ def test_own_mapping_linked_fixture(
     )
     env = os.environ.copy()
     env.pop("SCHEMII_FIXTURE_MAPS", None)
-    if mode == "open-denied" or (
-        maps and mode not in {"real", "wrong-reference", "reference-close-fail"}
-    ):
+    if mode == "open-denied" or maps:
         env["SCHEMII_FIXTURE_MAPS"] = mode
     run_java(
         [
             java,
             "--add-opens=java.base/java.io=ALL-UNNAMED",
-            "-Djava.library.path=" + str(library_dir),
+            "-Djava.library.path=" + str(library.parent),
             "-Dfixture.module=" + str(library),
             "-Dfixture.phase=" + phase,
             "-Dfixture.fields=" + fields,
