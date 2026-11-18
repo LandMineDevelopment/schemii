@@ -3,8 +3,8 @@
 This offline adapter covers the collection and evidence boundary of
 [#281](https://github.com/LandMineDevelopment/schemii/issues/281). It takes
 GitHub GraphQL-shaped pages through an injected transport and projects them into
-sanitized observations. The repository includes no authenticated transport,
-collector command, schedule, database writer or Schemii view for this source.
+sanitized observations. A guarded storage API accepts approved saved receipts
+and exposes typed PostgreSQL readback.
 
 Run the provider-shaped controls from the project's constrained Python environment.
 
@@ -111,33 +111,98 @@ patches, actors, raw errors and response headers stay outside the projection.
 Repeated events have the same logical ID across attempts. Evidence references
 identify individual observations, including conflicting versions. A report
 retains already observed facts when a later page fails, while withholding the
-flow and checkpoint proposal. Store a fresh report on replay; never rewrite the
-first failure as successful.
+flow and checkpoint proposal. Reuse the saved report on replay. Preserve the
+original failure.
 
-To commit progress, first save the completed report and both checkpoints.
-Use `advance_checkpoint(current, receipt)` to validate the report digest and
-decide the new checkpoint. Atomically compare-and-set against the current prior
-checkpoint in the caller's private store. On lost acknowledgement, reread that
-store and reconcile the *same saved receipt*. The same committed proposal is
-idempotent. Any other intervening checkpoint is a conflict. After partial
-traversal, resume with the last committed checkpoint, the same cutoff and a new
-attempt UUID. This repeats discovery from a fresh first page without trusting
-a stale cursor. The adapter performs no persistence or acknowledgement itself.
+## Save and publish a receipt
+
+Save an immutable private JSON envelope for the traversal, including failures.
+The caller supplies the approved scope and expected canonical envelope SHA-256
+from the evidence owner. The envelope uses UTF-8 and contains these fields.
+
+| Field | Value |
+| --- | --- |
+| `format_version` | Integer `1` |
+| `scope` | `repository_id`, `installation_id`, `repository_key`, `provider_repository_id`, `window_start`, and integer `overlap_us` |
+| `before` | `through`, `attempt_id`, and `evidence_sha256`. An initial checkpoint uses the window start and two nulls. |
+| `proposal` | The same checkpoint fields for a complete attempt, or null for a partial attempt |
+| `report` | The entire sanitized adapter report |
+
+Use canonical UUID strings and the adapter's UTC ISO 8601 timestamps. Compute
+each digest from JSON with sorted keys, compact separators, ASCII escapes
+and no nonfinite numbers. A complete proposal points to the report's own
+attempt ID, cutoff and canonical SHA-256. The outer digest also binds the
+overlap and exact prior attempt, including for partials. Digests verify saved
+content against approval. The evidence owner supplies source authenticity.
+
+Call `publish(raw, expected_sha256, scope, **target)` from
+`scripts.devops.github_lifecycle_storage`. `raw` is the saved envelope in bytes
+(up to 20 MiB). `target` requires `guard_profile`, `collector_profile`,
+`database_name` and `database_id`. Follow the existing
+[private profile and target contract](devops-import.md). The profiles and
+database UUID must agree and the collector must pass the effective-role guard.
+Migration 003 must be applied through the storage migration operator. The
+repository UUID must already identify the approved GitHub repository key in
+the registry. The first saved attempt binds that installation's provider
+repository ID, window and overlap. A changed visibility context or scope
+requires a separately approved installation UUID.
+
+Publication validates the envelope before connecting. A transaction adds the
+attempt, per-PR coverage and observations together. Complete attempts advance
+the checkpoint from the exact committed prior tuple. After a partial, retain
+that original receipt and restart listing at page one with a fresh attempt
+UUID. The current checkpoint and approved overlap supply the next scan floor.
+
+If a commit acknowledgement is lost, call
+`readback(raw, expected_sha256, scope, **target)` with the same saved envelope.
+It uses the same guard and returns the current checkpoint and the exact
+attempt ID and seal. `replay` confirms a saved partial or the complete receipt
+at the current checkpoint. `historically-committed` confirms an earlier
+complete receipt and reports a checkpoint conflict with the actual current
+tuple. `absent` reports whether the saved prior still permits publication.
+A valid delayed partial can cite the true initial tuple or a committed prior
+complete attempt. A reused attempt ID with a different seal is refused.
+Preserve uncertain outcomes and original saved envelopes when reconciling.
+
+## Read typed history
+
+Filter the `devops.v1_github_pr_lifecycle_attempts`,
+`devops.v1_github_pr_lifecycle_coverage`, and
+`devops.v1_github_pr_lifecycle_observations` views by both repository and
+installation UUIDs. Join on both UUIDs and the attempt UUID. For a PR join,
+also match its provider PR ID. Only the current complete row has
+`is_current_checkpoint`; no such row means the series is at its initial
+window start. For example, the current tuple for two bound UUID parameters is:
+
+```sql
+SELECT through, attempt_id, report_sha256
+FROM devops.v1_github_pr_lifecycle_attempts
+WHERE repository_id = $1 AND installation_id = $2 AND is_current_checkpoint;
+```
+
+Coverage represents the initially selected PRs. Timeline and formal-review
+states are independent. A missing coverage row carries no assertion. Distinguish
+observations by attempt and evidence ref, logical events by logical UUID, and
+value versions by logical UUID plus evidence SHA-256, all within the qualified
+series. A 304 retains its revalidation bounds and the original attempt/request
+pointer as lineage, even when the donor row is unavailable. To report zero
+formal submissions, require complete PR review coverage and check that no
+observed nonpending review lacks a submission timestamp. Independent review
+and other uncollected evidence remain unknown. Derived flow and readiness
+episodes stay in the private adapter receipt. The local CI batch ledger and
+freshness remain independent of lifecycle receipts.
 
 ## Integration gates
 
-The accepted [storage contract](devops-metrics.md) and
-[local-CI importer](devops-import.md) have no PR snapshot/event/review tables,
-no GitHub lifecycle import-batch source kind, and no lifecycle coverage,
-checkpoint or writer contract. Passing this projection into the local-CI
-importer would misidentify the source. A future integration needs an explicit
-lifecycle fact and health contract and a durable receipt/checkpoint boundary.
-Independent T3 review and local/hosted check evidence need their own qualified
-sources.
+Run the sealed synthetic control with an explicitly disposable, socket-only
+PostgreSQL cluster using the constrained project Python environment.
 
-The remaining issue gates include independent current-head review, a
-coordinator-authorized bounded read-only GitHub reconciliation (including
-actual cursor, count and visibility semantics), and Schemii readback against
-an approved disposable target after a compatible persistence interface exists.
-GitHub Actions remains disabled. No browser, device, runtime or database
-acceptance is established by the offline fixture suite.
+```sh
+SCHEMII_DEVOPS281_POSTGRES=1 python scripts/ci/python-tests.py tests/devops/test_github_lifecycle_storage.py
+```
+
+Migration 003 changes the pending-migration gate for any executable that uses
+the current target guard. Coordinate code and schema activation. Issue #281
+still requires independent current-head review, a coordinator-authorized
+bounded read-only GitHub reconciliation of actual cursor, count and visibility
+semantics, and matching Schemii readback against an approved disposable target.
