@@ -541,7 +541,7 @@ async function compile(ticket) {
   }
   const count = diagnostics.cycleEdges?.length || 0;
   const additions=sourceAdditionText(),sourceIssues=currentSourceIssues();
-  $("graph-status").textContent = sourceIssues.length ? `${sourceIssues.length} source change${sourceIssues.length===1?"":"s"} need${sourceIssues.length===1?"s":""} review` : count ? `${count} connections belong to cycles · resolve before running` : additions || `${draft.nodes.length} objects · cycle-free model`;
+  $("graph-status").textContent = sourceIssues.length ? `${sourceIssues.length} source change${sourceIssues.length===1?"":"s"} need${sourceIssues.length===1?"s":""} review` : count ? `${count} connections belong to cycles · previews need unambiguous paths` : additions || `${draft.nodes.length} objects · cycle-free model`;
   $("graph-status").classList.toggle("has-cycles",count > 0);
   renderRelationships(); renderParameterValues($("parameter-values"), filterOptions());refreshFilterNavigation();
   renderObjectSourceIssues();
@@ -635,7 +635,7 @@ const tooltips = {
   "show-query": "Inspect the generated SQL and the last preview's rows.",
   "sql-tab": "SQL compiled from the selected fields, model rules, and report filters.",
   "results-tab": "Rows from your last read-only preview. Changed selections require another run.",
-  run: "Run a read-only preview of up to 100 rows. Required active parameters must have values and the model must be cycle-free.",
+  run: "Run a read-only preview of up to 100 rows. Required active parameters must have values and participating sources must have unambiguous connection paths.",
   fit: "Zoom and center to show all model objects.",
 };
 for (const [id, text] of Object.entries(tooltips)) $(id).dataset.uiTooltip = text;

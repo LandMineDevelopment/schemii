@@ -8,7 +8,7 @@ from sqlglot import exp, parse_one
 
 from schemii.schemoo.catalog import source_issues
 from schemii.schemoo.models import ModelDefinition
-from schemii.schemoo.prototype import compile_preview
+from schemii.schemoo.prototype import ModelValidationError, analyze_model, compile_preview, validate_definition
 
 
 CATALOG = {
@@ -84,6 +84,65 @@ def test_list_is_ordered_and_uses_author_labels():
 def test_unused_derived_source_costs_no_join_or_aggregation():
     sql = compile_preview(CATALOG, request(fields=[{"table": "people", "column": "id"}]))["sql"]
     assert "JOIN" not in sql and "COUNT" not in sql
+
+
+def cyclic_summary():
+    catalog = deepcopy(CATALOG)
+    for table in catalog["tables"][1:]:
+        table["columns"][0]["dataType"] = "text"
+    query = request()
+    query["edges"] = [{"id": edge["id"], "relationshipId": edge["id"], "source": edge["sourceTable"],
+                       "target": edge["targetTable"]} for edge in catalog["relationships"]]
+    query["edges"].append({"id": "contributors", "kind": "logical", "source": "cert", "sourceColumn": "person_id",
+                           "target": "assignment", "targetColumn": "person_id"})
+    return catalog, query
+
+
+def test_unused_calculation_and_unused_contributors_do_not_block_preview():
+    catalog, query = cyclic_summary()
+    query["fields"] = [{"table": "people", "column": "id"}]
+    assert compile_preview(catalog, query)["usedRelationships"] == []
+    outputs = query["nodes"][-1]["derivation"]["outputs"]
+    outputs.append({"id": "owners", "label": "Owners", "operation": "count_distinct", "column": "id"})
+    query["fields"] = [{"table": "derived", "column": "owners"}]
+    plan = compile_preview(catalog, query)
+    assert plan["usedRelationships"] == ["derived:derived"]
+    assert 'COUNT(DISTINCT t0."id")' in plan["sql"]
+    assert '"main"."cert"' not in plan["sql"]
+
+
+def test_selected_calculated_contributor_rejects_ambiguous_inner_route():
+    catalog, query = cyclic_summary()
+    with pytest.raises(ModelValidationError, match="ambiguous") as error:
+        compile_preview(catalog, query)
+    assert error.value.details["cycleEdges"] == ["cert_fk", "assignment_fk", "contributors"]
+    assert error.value.details["ambiguousRelationships"] == ["cert_fk"]
+
+
+def test_unused_calculated_condition_accepts_any_possible_contributor_route():
+    catalog, query = cyclic_summary()
+    query["nodes"][-1]["derivation"]["outputs"][0]["conditions"] = [
+        {"table": "assignment", "column": "name", "operator": "eq", "value": "A"}]
+    query["fields"] = [{"table": "people", "column": "id"}]
+    assert compile_preview(catalog, query)["usedRelationships"] == []
+    assert validate_definition(catalog, query) == analyze_model(catalog, query)
+    query["fields"] = [{"table": "derived", "column": "n"}]
+    with pytest.raises(ModelValidationError, match="ambiguous"):
+        compile_preview(catalog, query)
+
+
+def test_unused_calculated_condition_still_rejects_separate_cyclic_branch():
+    catalog, query = cyclic_summary()
+    query["nodes"] += [{"id": node, "table": "cert"} for node in ("other_cert", "third_cert")]
+    query["edges"] += [{"id": node, "relationshipId": "cert_fk", "source": node, "target": "people"}
+                       for node in ("other_cert", "third_cert")]
+    query["edges"].append({"id": "other_contributors", "kind": "logical", "source": "other_cert", "sourceColumn": "person_id",
+                           "target": "third_cert", "targetColumn": "person_id"})
+    query["nodes"][3]["derivation"]["outputs"][0]["conditions"] = [
+        {"table": "other_cert", "column": "name", "operator": "eq", "value": "A"}]
+    query["fields"] = [{"table": "people", "column": "id"}]
+    with pytest.raises(ValueError, match="separate relationship branch"):
+        compile_preview(catalog, query)
 
 
 def source_summary(**changes):

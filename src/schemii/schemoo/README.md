@@ -59,8 +59,9 @@ document (1 MiB by default). Model lists return summaries without loading all mo
 documents into memory.
 
 The initial canvas imports every supported foreign key, including self-links.
-Every connection belonging to a cycle is red, and execution is blocked until
-enabled connections are cycle-free. Drag headers to arrange objects, click them
+Every connection belonging to a cycle is red. Execution requires unambiguous
+paths for participating query sources; unused cycles can stay enabled.
+Drag headers to arrange objects, click them
 to create labeled aliases, and click connections to redirect their endpoints to
 occurrences of the same physical table. Disabled connections remain visible.
 
