@@ -85,23 +85,32 @@ export async function stopChild(child, completion, { graceMs = 5000 } = {}) {
   const pid = child.pid;
   const initial = await identity(pid);
   if (initial && (initial.group !== pid || initial.session !== pid)) throw new Error('child_group_not_owned');
-  const started = performance.now(); let killed = false;
+  const escalateAt = performance.now() + graceMs;
+  const deadline = escalateAt + 2000;
+  // A member can fork after enumeration. Track successful escalation by
+  // process incarnation so later sweeps still reach newly discovered members.
+  const escalated = new Map();
   while (true) {
     const members = await groupMembers(pid);
     if (!members.length) break;
     const parent = await identity(pid);
-    if (parent && initial && parent.birthTick !== initial.birthTick) throw new Error('child_identity_changed');
-    if (!killed) {
-      for (const member of members) {
-        const current = await identity(member.pid);
-        if (current?.birthTick === member.birthTick && current.group === pid && current.session === pid) {
-          try { process.kill(member.pid, performance.now() - started < graceMs ? 'SIGTERM' : 'SIGKILL'); }
-          catch (error) { if (error.code !== 'ESRCH') throw error; }
-        }
+    if (parent && (!initial || parent.birthTick !== initial.birthTick)) throw new Error('child_identity_changed');
+    for (const member of members) {
+      if (escalated.get(member.pid) === member.birthTick) continue;
+      const current = await identity(member.pid);
+      if (current?.birthTick !== member.birthTick || current.group !== pid ||
+          current.session !== pid || current.state === 'Z') continue;
+      const now = performance.now();
+      if (now > deadline) throw new Error('owned_child_not_reaped');
+      const signal = now < escalateAt ? 'SIGTERM' : 'SIGKILL';
+      try {
+        process.kill(member.pid, signal);
+        if (signal === 'SIGKILL') escalated.set(member.pid, member.birthTick);
+      } catch (error) {
+        if (error.code !== 'ESRCH') throw error;
       }
-      killed = performance.now() - started >= graceMs;
     }
-    if (performance.now() - started > graceMs + 2000) throw new Error('owned_child_not_reaped');
+    if (performance.now() > deadline) throw new Error('owned_child_not_reaped');
     await pause(25);
   }
   return completion;
