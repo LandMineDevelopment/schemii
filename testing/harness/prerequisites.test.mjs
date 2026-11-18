@@ -1,3 +1,4 @@
+import { disposablePreviewBinding, disposableRoute, assertDisposableSource } from './deployment.mjs';
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { assertProviderAvailable, expandFixtureScenario, assertScenarioPrerequisite, readinessChecks } from './prerequisites.mjs';
@@ -63,4 +64,41 @@ test('retained legacy claim metadata supports recovery without claiming new init
   const retained={agent:'actual-previous-owner',checks:[initial],scenarios:[]};
   assert.equal(readinessChecks(retained).phase,'recovery');
   assert.equal(readinessChecks({checks:[initial],scenarios:[]}).phase,'initial');
+});
+
+const binding = {
+  origin:'https://test-unit.test-network.ts.net', nodeId:'test-device',
+  bootId:'12345678-1234-1234-1234-123456789012', commit:'a'.repeat(40),
+};
+
+test('disposable preview only accepts an exact non-desktop test origin and clean source binding', () => {
+  assert.deepEqual(disposablePreviewBinding(binding), binding);
+  for (const origin of [
+    'http://test-unit.test-network.ts.net', 'https://test-unit.test-network.ts.net/',
+    'https://test-unit.test-network.ts.net:443', 'https://user@test-unit.test-network.ts.net',
+    'https://localhost:8001', 'https://test-unit.example.net',
+    'https://other-device.taile4f57f.ts.net',
+  ]) assert.throws(() => disposablePreviewBinding({...binding, origin}), /test-tailnet HTTPS origin/);
+  assert.throws(() => disposablePreviewBinding({...binding, extra:'value'}), /test-tailnet HTTPS origin/);
+  assert.doesNotThrow(() => assertDisposableSource(binding, {commit:binding.commit, dirty:false}, binding.bootId));
+  assert.throws(() => assertDisposableSource(binding, {commit:binding.commit, dirty:true}, binding.bootId), /clean checkout/);
+  assert.throws(() => assertDisposableSource(binding, {commit:'b'.repeat(40), dirty:false}, binding.bootId), /clean checkout/);
+  assert.throws(() => assertDisposableSource(binding, {commit:binding.commit, dirty:false}, 'different-boot'), /this boot/);
+});
+
+test('disposable route requires the bound guest node and a single persistent private Serve proxy', () => {
+  const host = new URL(binding.origin).hostname;
+  const hostPort = `${host}:443`;
+  const target = 'https+insecure://localhost:8001';
+  const status = {BackendState:'Running', Self:{ID:binding.nodeId, DNSName:`${host}.`, TailscaleIPs:['100.65.0.1','fd7a:115c:a1e0::1']}};
+  const serve = {TCP:{443:{HTTPS:true}}, Web:{[hostPort]:{Handlers:{'/':{Proxy:target}}}}};
+  assert.deepEqual(disposableRoute(binding, status, serve), {nodeId:binding.nodeId, addresses:status.Self.TailscaleIPs, target});
+  for (const fields of [{ID:'different'}, {DNSName:'other.test-network.ts.net.'}, {TailscaleIPs:['127.0.0.1']}]) {
+    assert.throws(() => disposableRoute(binding, {...status, Self:{...status.Self, ...fields}}, serve), /bound guest node/);
+  }
+  for (const handlers of [{'/':{Proxy:'https+insecure://localhost:8002'}}, {'/':{Proxy:target}, '/api-map':{Proxy:target}}]) {
+    assert.throws(() => disposableRoute(binding, status, {...serve, Web:{[hostPort]:{Handlers:handlers}}}), /bound guest node/);
+  }
+  assert.throws(() => disposableRoute(binding, status, {...serve, AllowFunnel:{[hostPort]:true}}), /tailnet-only/);
+  assert.throws(() => disposableRoute(binding, status, {...serve, Foreground:{session:{}}}), /persistent/);
 });

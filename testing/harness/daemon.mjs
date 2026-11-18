@@ -83,7 +83,13 @@ function assertLease(req) {
   l.heartbeatAt=stamp();return l;
 }
 function queueLane(id,fn){const task=(operations.get(id)||Promise.resolve()).then(fn);operations.set(id,task.catch(()=>{}));return task;}
-async function checkSource(){const actual=sourceIdentity(root);if(run.deployment&&actual.fingerprint!==run.deployment.identity.fingerprint)throw new Error('Source changed since startup. Stop and prepare a new run; the tested build is no longer attributable to this checkout.');}
+async function checkSource() {
+  const actual = sourceIdentity(root);
+  const expected = run.deployment?.identity;
+  if (expected && (actual.commit !== expected.commit || actual.fingerprint !== expected.fingerprint)) {
+    throw new Error('Source changed since startup. Stop and prepare a new run; the tested build is no longer attributable to this checkout.');
+  }
+}
 async function readyLane(l) {
   const readiness=readinessChecks(l);
   l.status='preparing';l.generation++;tokens.delete(l.id);l.browserLaunchPending=true;await persist();
@@ -390,7 +396,7 @@ try{
     for(const l of run.lanes)if(l.status!=='complete'){l.status='queued';l.generation++;tokens.delete(l.id);}
     // Resume verifies the active deployment or rebuilds through the supported launcher.
   }
-  run.deployment=await startDeployment({root,runDir:dir});
+  run.deployment=await startDeployment({root,runDir:dir,localURL:run.baseURL,previewURL:run.previewURL,previewBinding:run.previewBinding});
   if(stopping)throw new Error('Controller was stopped during startup.');
   for(const l of run.lanes)if(l.status==='preparing')l.status='queued';
   await prepareWave();starting=false;
