@@ -110,8 +110,19 @@ test("graph status follows idle, pending, settled, failed, switched and deleted 
   await expect(status).toHaveText("Loading model and relationships…");
   await expect(page.locator("#workbench")).toHaveAttribute("inert", "");
   await expect(library).toBeVisible();
+  catalogGates.set("model_fast", deferred());
   modelGates.get("model_fast").resolve({ json: models.model_fast });
+  await expect.poll(() => started.has("model_fast:catalog")).toBe(true);
+  await expect(page.locator("#model-name")).toHaveValue(names.model_ready);
+  await library.getByRole("button", { name: "Delete model Ready model", exact: true }).click();
+  await page.getByRole("dialog", { name: "Delete model?", exact: true }).getByRole("button", { name: "Delete model", exact: true }).click();
+  await expect(library).toContainText("Deleted “Ready model”");
+  await expect(page.locator("#model-name")).toHaveValue("");
+  await expect(status).toHaveText("Loading model and relationships…");
+  await expect(library).toBeVisible();
+  catalogGates.get("model_fast").resolve();
   await settle("model_fast");
+  await expect(library).not.toBeVisible();
   await expect(page.locator("#model-name")).toHaveValue(names.model_fast);
 
   // A validation failure must not label a model cycle-free.
@@ -128,6 +139,7 @@ test("graph status follows idle, pending, settled, failed, switched and deleted 
   await choose("model_empty");
   await expect(status).toHaveText("No objects yet · add a table to build this model");
   await expect(page.locator(".sc-node")).toHaveCount(0);
+  deleting = false;
   await page.locator("#delete-model").click();
   await page.getByRole("dialog", { name: "Delete model?", exact: true }).getByRole("button", { name: "Delete model", exact: true }).click();
   await expect.poll(() => deleting).toBe(true);

@@ -39,7 +39,8 @@ function setModelName(value) {
   else $("model-name-heading").removeAttribute("aria-label");
 }
 let catalog, draft, canvas, plan, diagnostics = {}, selected, storageKey, timer, version = 0, busy = false;
-let model, saving = false, dirty = false, conflicted = false, catalogTicket = 0;
+let model, saving = false, dirty = false, conflicted = false;
+let pendingModelLoad = null;
 let initialLayout;
 let inspectorTab = "model", selectedFilterId = null;
 let sourceAdditions = {tables:[],columns:[],relationships:[],initialized:false};
@@ -713,21 +714,25 @@ syncInspectorTools();
 async function loadModel(id) {
   if (busy || saving || previewLibrary.isPending()) throw new Error("Wait for the current operation to finish.");
   if (dirty && !confirm("Discard unsaved model, layout, and Explore changes?")) return false;
-  const ticket = ++catalogTicket; clearTimeout(timer); version++; showError();
+  const load = { id };
+  pendingModelLoad = load;
+  clearTimeout(timer); version++; showError();
   $("workbench").inert = true;
   renderGraphStatus("loading");
   let nextModel, nextCatalog;
   try {
     nextModel = await requestJson(`${API}/models/${encodeURIComponent(id)}`);
-    if (ticket !== catalogTicket) return false;
+    if (pendingModelLoad !== load) return false;
     nextCatalog = await requestJson(`${API}/catalog?connection_id=${encodeURIComponent(nextModel.connectionId)}&namespace=${encodeURIComponent(nextModel.namespace)}`,{timeoutMs:MODEL_EXECUTION_TIMEOUT_MS});
   } catch (error) {
-    if (ticket !== catalogTicket) return false;
+    if (pendingModelLoad !== load) return false;
+    pendingModelLoad = null;
     $("workbench").inert=!model;
     renderGraphStatus("load-error");
     throw error;
   }
-  if (ticket !== catalogTicket) return false;
+  if (pendingModelLoad !== load) return false;
+  pendingModelLoad = null;
   model=nextModel; catalog=nextCatalog; draft=joinModel(model); initialLayout=undefined; selected=null; plan=null; diagnostics={}; conflicted=false;
   sourceAdditions=reconcileSourceCatalog(draft,catalog);
   if (columnEditor) disposeSelects(columnEditor.element);
@@ -792,12 +797,21 @@ function openLibrary() {
   return openModelLibrary(loadModel, {
     onAssistant: () => assistant.open(),
     canDelete: () => !busy && !saving && !previewLibrary.isPending(),
-    onDeleted: deleted => { if (deleted.id === model?.id) clearDeletedModel(); },
+    onDeleted: deleted => handleDeletedModel(deleted.id),
   });
 }
-function clearDeletedModel() {
-  dirty=false; model=null; canvas?.destroy(); canvas=null; draft=null; clearTimeout(timer); version++; catalogTicket++;
-  renderGraphStatus("idle");
+function handleDeletedModel(id) {
+  const cancelledLoad = pendingModelLoad?.id === id;
+  if (cancelledLoad) pendingModelLoad = null;
+  if (model?.id !== id) {
+    if (cancelledLoad) {
+      $("workbench").inert = !model;
+      renderGraphStatus(model ? "load-error" : "idle");
+    }
+    return;
+  }
+  dirty=false; model=null; canvas?.destroy(); canvas=null; draft=null; clearTimeout(timer); version++;
+  renderGraphStatus(pendingModelLoad ? "loading" : "idle");
   void previewLibrary.load(null);
   setModelName(""); $("model-name").disabled=true; $("save-model").disabled=true; $("reload-model").disabled=true; $("delete-model").disabled=true; $("run").disabled=true; $("workbench").inert=true;
   $("target").textContent="Choose a saved model or create one"; $("draft-status").textContent="Model deleted";
@@ -809,7 +823,11 @@ $("close-model-library").onclick=()=>$("model-library").close();
 $("reload-model").onclick=async()=>{try{await loadModel(model.id);}catch(error){showError(error.message);$("workbench").inert=false;}};
 $("delete-model").onclick=async()=>{
   if(!model||busy||saving||previewLibrary.isPending())return;
-  if(await confirmModelDeletion(model)) { clearDeletedModel(); await openLibrary(); }
+  const deleting = model;
+  if (await confirmModelDeletion(deleting)) {
+    handleDeletedModel(deleting.id);
+    if (!model && !pendingModelLoad) await openLibrary();
+  }
 };
 window.addEventListener("beforeunload",event=>{if(dirty){event.preventDefault();event.returnValue="";}});
 try {
