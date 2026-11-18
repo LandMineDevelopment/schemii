@@ -136,23 +136,26 @@ publish a capacity estimate while a correctness/isolation/leak/OOM gate is unres
 
 ## Observer source map and current gaps
 
-Source inspection for this foundation used `49ed0a3`; the metadata admission
-snapshot was also inspected on `audit/metadata-bounds` at `13ec07c`. Those source
-checks did not collect runtime metrics. The current load adapter consumes a private
-observer file; it does not implement the observer or turn unavailable fields into
-zero. A refreshed timestamp must describe newly sampled values.
+Historical source inspection used `49ed0a3` and `audit/metadata-bounds` at
+`13ec07c`; it did not collect runtime metrics. The current adapter consumes a private
+observer file. Integrated PR160 supplies launcher-owned process/cgroup receipts and
+an authenticated, administrator-only, no-store aggregate application snapshot.
+The opt-in witness in [the load guide](../testing/load/README.md#opt-in-run-witness-and-active-recovery)
+adds bounded run-owned source/job evidence. Neither turns unavailable fields into
+zero. A refreshed timestamp must describe newly sampled values; no live capacity
+qualification is established by these deterministic boundaries.
 
 | Observer field | Concrete read-only source | Ownership / remaining boundary |
 | --- | --- | --- |
 | appRssBytes | Host `/proc/PID/status` `VmRSS` for a verified API PID; cgroup v2 `memory.current` separately describes the whole app cgroup | Record PID birth identity and scope; process RSS and cgroup memory usage are distinct |
 | appMemoryLimitBytes | Resolve the verified API process's `/proc/PID/cgroup`, read that cgroup's `memory.max` and effective finite ancestors | `compose.test.yaml` is a default, not proof of a live limit; `max` must remain unmeasured |
 | appCpuPercent | Delta of verified cgroup v2 `cpu.stat` `usage_usec` over monotonic time; read `cpu.max` for effective quota | Specify whether percent is one-core or quota-normalized; do not mix denominators |
-| apiProcesses, threads, fds | Read-only host `/proc` process identities, `status` Threads and accessible `fd` entries, restricted to the verified app cgroup | A launcher-owned identity/export seam is still needed; names alone do not establish deployment ownership |
-| retainedSessions, openCursors | Live `ConsoleService` retained/read/transaction and driver cursor registries under their existing locks | No aggregate read-only API/export exists; PostgreSQL `pg_cursors` is session-local and cannot prove every app cursor closed |
-| ordinaryPermits, retainedPermits | Live gateway `_connection_capacity` acquire/release state; monitor/control have separate capacity objects | No public locked snapshot exists in the inspected gateway; DB connections are not equivalent to permits while connecting or closing |
-| ownedBackends | Dedicated read-only source observer querying `pg_stat_activity` with the fixture's database roles, app name, database and captured PID/backend-start identity | Account/role filtering alone is insufficient for a shared-profile run; source visibility and exact run identity must be proven |
-| activeJobs | GET `/api/v1/schemii/workspaces/{owned-workspace}/bulk-jobs` plus exact receipt-owned job IDs/status; Console execution GET/activity for exact execution IDs | This fixture adapter creates no bulk jobs. A workspace-wide total is not a run-owned count; internal active worker state is not fully exposed |
-| metadataActive, metadataRejected | `MetadataConnectionFactory.admission_snapshot()` fields active/rejected in the reviewed metadata-bounds implementation | Internal factory seam only, with no live process export; creating another factory produces unrelated counters |
+| apiProcesses, threads, fds | Verified launcher/cgroup `/proc` identities, supported Uvicorn argv, endpoint namespace PID, Threads and readable FDs | Shells are distinguished from workers; unknown sidecars, unreadable argv and replacement cannot qualify one API process. Raw argv is not retained |
+| retainedSessions, openCursors | Administrator `/api/v1/admin/runtime-observation` snapshots live Console and driver registries without waiting for busy locks | Deployment aggregate only; PostgreSQL `pg_cursors` is session-local and application handles cannot prove source release |
+| ordinaryPermits, retainedPermits | The same authenticated snapshot reads reviewed gateway acquire/release state; monitoring/control remain separate | DB connections are not equivalent to permits while connecting or closing; aggregate is not run attribution |
+| ownedBackends | Opt-in `testing/load/source_monitor.py`, explicit provisioned run-exclusive role, empty baseline, captured PID/backend-start/database/role/application | Exact same-role read-only authority; idle is live, stale/replaced/denied evidence fails closed. Borrowed/shared roles and ended `/activity` cannot qualify release |
+| activeJobs | `testing/load/ownership.mjs` reads only receipt-owned IDs via owner execution and `/console/bulk-jobs/{id}` APIs | Immutable no-job adapters have a limited authenticated zero; missing/foreign/uncertain records stay unavailable, never a workspace-wide total |
+| metadataActive, metadataRejected | Authenticated aggregate export of `MetadataConnectionFactory.admission_snapshot()` active/rejected | Actual process factory, not a newly constructed unrelated factory; wait durations remain unavailable |
 | sourceConnections / lock waits | The source observer's bounded aggregate `pg_stat_activity` / `pg_locks`; existing owned execution `/activity` exposes database/wait/blocker state | `/activity` sets monitoringAvailable false for ended **or** visibility-restricted sessions and is not a source-release proof |
 | ingressConnections | Verified ingress network namespace socket observation | `dev/ingress/nginx.conf` exposes timing logs, no connection-count or stub-status endpoint |
 | eventLoopLagMs / executor pressure | A bounded instrument in the running API event loop / executor | No runtime sampler/export exists in the inspected source |
@@ -165,10 +168,14 @@ handler timing is not a streaming body-drain measurement. Private `metadata.limi
 can explain rejection/eviction classes to an authorized observer; it is neither a
 live permit gauge nor a product-readable metrics route.
 
-The smallest remaining observer work is a launcher-owned read-only deployment
-identity/cgroup exporter plus a live, locked, numeric-only application snapshot for
-retained/cursor/admission state and an explicit source observer. Preserve normal
+The bounded foundation records generator PID/start, RSS, FDs, threads, namespace
+network counters, Node CPU/scheduling measurements and external CPU ticks with
+host `CLK_TCK` when available. Network capacity, competing traffic and CPU/memory
+headroom remain unknown. Active
+recovery now requires a fresh authenticated read, exact SELECT terminal, captured
+backend and independently observed release. Live qualification, missing workload
+and cardinality provisioners, a weighted mix and independent cleanup/review remain
+pending. The hard report guard remains `capacityEligible: false`. Preserve normal
 end-user grants, exclude SQL/row/credential/owner labels from public metrics, and
-keep observer connections in separately disclosed budgets. No Docker/socket access,
-additional server, inferred zero counters or missing-source fallback qualifies as
-capacity evidence.
+disclose observer budgets. Docker/socket access, inferred zero counters and
+missing-source fallback cannot qualify capacity evidence.

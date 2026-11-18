@@ -8,6 +8,8 @@ import { ordinaryRequest, streamRequest } from './fixtures.mjs';
 import { observeChild, stopChild } from './children.mjs';
 import { publicObservation, K6_VERSION } from './plan.mjs';
 import { privateJSON, writeJSON } from '../harness/store.mjs';
+import { processIdentity, sampleGenerator, generatorHeadroom, clockTickFrequency, writePrivateJSON, readPrivateJSON } from './runtime.mjs';
+import { sourceEvidence, fresh, readOwnershipConfig, ownershipPaths, ownedRecovery, observeOwnedWork, sampleSource } from './ownership.mjs';
 
 export async function birthTick(pid) {
   try {
@@ -20,9 +22,18 @@ export async function requireStopped(owner) {
   if (!owner || !Number.isSafeInteger(owner.pid) || typeof owner.birthTick !== 'string') throw new Error('unknown_process_owner');
   if (await birthTick(owner.pid) === owner.birthTick) throw new Error('owned_process_still_live');
 }
-export async function observation(file) {
+export async function observation(file, expectedRunId = null) {
   if (!file) return null;
-  return publicObservation(await privateJSON(file));
+  const value = await privateJSON(file);
+  // Preserve numeric-only external smoke observations, which remain unqualified
+  // for owned release. An explicit failure or owned witness must fail closed.
+  if ((value.status && value.status !== 'available') || (value.ownership && value.status !== 'available')) throw new Error('observer_unavailable');
+  if (expectedRunId && value.ownership?.runId !== expectedRunId) throw new Error('owned_run_observation_mismatch');
+  if (value.ownership) {
+    sourceEvidence(value.ownership.source, value.ownership.runId);
+    if (!fresh(value.ownership.work) || value.ownership.work.runId !== value.ownership.runId || value.ownership.work.status !== 'available') throw new Error('owned_work_observation_unavailable');
+  } else if ('ownedBackends' in value || 'activeJobs' in value) throw new Error('unattributed_resource_observation');
+  return publicObservation(value);
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -163,13 +174,22 @@ export async function verifyK6(binary) {
 }
 
 export async function executePlan({ spec, receipt, dir, origin, binary, observerFile, allowUnobserved,
-  signal, abort, onStage = async () => {}, onGenerator = async () => {}, onExecution = async () => {} }) {
+  signal, abort, onStage = async () => {}, onGenerator = async () => {}, onExecution = async () => {},
+  runStage = options => options.spec.engine === 'k6' ? runK6(options) : runStreams(options),
+  generatorSampler = sampleGenerator, tickFrequencyReader = clockTickFrequency, sleep = pause }) {
   const results = [], before = await observation(observerFile);
-  if (!before && !allowUnobserved) throw new Error('observer_required');
   let monitorError = null, timer;
+  let ownershipConfig = null;
+  const paths = ownershipPaths(dir);
+  try { ownershipConfig = await readOwnershipConfig(paths.config); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (ownershipConfig && (ownershipConfig.runId !== receipt.tag || ownershipConfig.workload !== spec.workload ||
+      ownershipConfig.fixtureReceipt !== join(dir, 'fixtures-private.json'))) throw new Error('ownership_run_mismatch');
+  if (ownershipConfig) await observation(observerFile, ownershipConfig.runId);
+  if (!before && !allowUnobserved) throw new Error('observer_required');
   if (observerFile) timer = setInterval(async () => {
     try {
-      const observed = await observation(observerFile);
+      const observed = await observation(observerFile, ownershipConfig?.runId);
       if (observed.appRssBytes / observed.appMemoryLimitBytes >= spec.stopRssRatio) throw new Error('memory_stop_threshold');
     } catch (error) { monitorError = error.message; abort(); }
   }, 2000);
@@ -177,21 +197,63 @@ export async function executePlan({ spec, receipt, dir, origin, binary, observer
     for (const stage of spec.stages) {
       if (signal.aborted) break;
       const startedAt = new Date().toISOString();
-      const options = { spec, stage, receipt, dir, origin, binary, signal, onGenerator, onExecution, onFatal: abort };
-      const summary = await (spec.engine === 'k6' ? runK6(options) : runStreams(options));
+      const ticksPerSecond = await tickFrequencyReader();
+      const generatorOwner = spec.engine === 'incremental-node' ? await processIdentity(process.pid) : null;
+      let generatorBefore = generatorOwner ? await generatorSampler(generatorOwner, { ticksPerSecond }) : null, generatorAfter = generatorBefore;
+      let sampleCount = generatorBefore?.status === 'available' ? 1 : 0, peakRssBytes = generatorBefore?.rssBytes || 0;
+      let currentGenerator = generatorOwner, resourceFailure = null, samplerBusy = false;
+      if (generatorBefore && generatorBefore.status !== 'available') { resourceFailure = 'generator_observation_unavailable'; abort(); }
+      const generatorFile = join(dir, 'generator-private.json');
+      const sample = async () => {
+        if (!currentGenerator || samplerBusy) return;
+        const sampledOwner = currentGenerator;
+        samplerBusy = true;
+        try {
+          const value = await generatorSampler(sampledOwner, { ticksPerSecond });
+          if (currentGenerator !== sampledOwner) return; // A joined generator ended during this sample.
+          await writePrivateJSON(generatorFile, { ...value, runId: receipt.tag });
+          if (value.status !== 'available') { resourceFailure = 'generator_observation_unavailable'; abort(); }
+          else { generatorBefore ||= value; generatorAfter = value; sampleCount++; peakRssBytes = Math.max(peakRssBytes, value.rssBytes); }
+        } catch { resourceFailure = 'generator_observation_unavailable'; abort(); }
+        finally { samplerBusy = false; }
+      };
+      const resources = setInterval(() => { void sample(); }, 1000);
+      const options = { spec, stage, receipt, dir, origin, binary, signal,
+        onGenerator: async owner => {
+          await onGenerator(owner);
+          if (owner.exited) currentGenerator = null;
+          else if (owner.pid && owner.birthTick) { currentGenerator = owner; await sample(); }
+        }, onExecution, onFatal: abort };
+      let summary;
+      try { await sample(); summary = await runStage(options); }
+      finally { clearInterval(resources); while (samplerBusy) await pause(1); }
+      if (generatorOwner) { generatorAfter = await generatorSampler(generatorOwner, { ticksPerSecond }); sampleCount++; peakRssBytes = Math.max(peakRssBytes, generatorAfter.rssBytes || 0); }
+      summary.generatorObservation = generatorHeadroom(generatorBefore, generatorAfter, summary);
+      summary.generatorObservation.sampleCount = sampleCount;
+      summary.generatorObservation.peakSampledRssBytes = peakRssBytes;
       const intentional = ['disconnect', 'cancel'].includes(spec.workload);
       const failures = intentional ? (summary.arrivals.failed ? ['unexpected_control_failure'] : []) : assertHealthy(summary, spec.budgets);
       failures.push(...(summary.accountingFailures || []));
       if (summary.arrivals.dropped || summary.arrivals.notOfferedAfterStop) failures.push('generator_underdelivery');
       if (summary.thresholdsPassed === false) failures.push('k6_thresholds');
+      if (resourceFailure) failures.push(resourceFailure);
       const result = { ...stage, startedAt, endedAt: new Date().toISOString(), summary, failures };
       results.push(result); await onStage(results);
       // Capacity knees are a stopping point, not a reason to retry stages.
       if (failures.length || monitorError) break;
     }
-    await pause(spec.recoverySeconds * 1000);
-    const after = await observation(observerFile);
-    const recovery = verifyRecovery(before, after);
+    await sleep(spec.recoverySeconds * 1000);
+    let probe = null, ownedWork = null;
+    if (ownershipConfig?.recovery) {
+      try {
+        probe = await ownedRecovery({ receipt, config: { ...ownershipConfig.recovery, runId: receipt.tag }, origin,
+          journal: paths.recoveryJournal, onExecution,
+          monitor: () => sampleSource(ownershipConfig.sourceConfig, ownershipConfig.sourceOutput) });
+        ownedWork = await observeOwnedWork(await readPrivateJSON(ownershipConfig.fixtureReceipt), spec.workload, { origin });
+      } catch { probe = { verified: false }; }
+    }
+    const after = await observation(observerFile, ownershipConfig?.runId);
+    const recovery = verifyRecovery(before, after, { requireOwnedProbe: true, probe, ownedWork });
     const failures = [...new Set(results.flatMap(result => result.failures))];
     if (monitorError) failures.push(monitorError);
     if (signal.aborted) failures.push('run_stopped');

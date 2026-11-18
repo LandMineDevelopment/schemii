@@ -4,7 +4,11 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { ordinaryRequest } from './fixtures.mjs';
 import { LOCAL, PREVIEW } from './http.mjs';
-import { reconcileK6 } from './engine.mjs';
+import { reconcileK6, executePlan } from './engine.mjs';
+import { plan } from './plan.mjs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 // Execute the actual generator script/request path. Only its external k6
 // primitives are injected; no application request or k6 process is started.
@@ -84,4 +88,32 @@ test('actual compile authentication failure still counts failed work and configu
     assert.equal(vm.runInContext('options.thresholds.schemii_failed[0].abortOnFail', run.context), true);
     assert.equal(vm.runInContext('options.thresholds.schemii_failed[0].threshold', run.context), 'count==0');
   }
+});
+test('engine records generator resource uncertainty and never substitutes passive drain for active recovery', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'schemii-load-engine-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const spec = plan({ workload: 'report-1' }), aborter = new AbortController(); let calls = 0;
+  const result = await executePlan({ spec, receipt: { tag: 'load_0123456789abcdef' }, dir, allowUnobserved: true,
+    signal: aborter.signal, abort: () => aborter.abort(), sleep: async () => {}, tickFrequencyReader: async () => 100,
+    generatorSampler: async owner => ({ status: 'available', at: new Date().toISOString(), owner, rssBytes: 100, threads: 1, fds: 2,
+      cpuUsec: ++calls * 100, monotonicMs: calls * 1000, interfaces: [] }),
+    runStage: async () => ({ http: { incomplete: 0, failed: 0, rejected: 0 }, arrivals: { dropped: 0, failed: 0 },
+      latency: { firstRowMs: { samples: 1, p95: 1 }, fullDrainMs: { samples: 1, p95: 1 }, schedulingLagMs: { samples: 1, p95: 0 } } }),
+  });
+  assert.equal(result.capacityEligible, false); assert.equal(result.recovery.verified, false);
+  assert(result.failures.includes('missing_resource_observation'));
+  assert.equal(result.stages[0].summary.generatorObservation.headroomVerified, false);
+  assert.equal(result.stages[0].summary.generatorObservation.networkHeadroom, 'unavailable');
+});
+test('lost generator ownership stops offered stages and remains a failed run', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'schemii-load-engine-fail-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const aborter = new AbortController(); let aborted = false;
+  const result = await executePlan({ spec: plan({ workload: 'cancel' }), receipt: { tag: 'load_0123456789abcdef' }, dir,
+    allowUnobserved: true, signal: aborter.signal, abort: () => { aborted = true; aborter.abort(); }, sleep: async () => {}, tickFrequencyReader: async () => null,
+    generatorSampler: async () => ({ status: 'unavailable', headroomVerified: false }),
+    runStage: async options => {
+      assert.equal(options.signal.aborted, true);
+      return { http: {}, arrivals: { dropped: 0, failed: 0 }, latency: {} };
+    },
+  });
+  assert(aborted); assert.equal(result.capacityEligible, false); assert(result.failures.includes('generator_observation_unavailable'));
 });

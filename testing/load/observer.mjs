@@ -3,9 +3,11 @@ import { readFile, appendFile, stat, lstat, unlink, readdir } from 'node:fs/prom
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { processIdentity, cgroupIdentity, readPrivateJSON, writePrivateJSON } from './runtime.mjs';
+import { processIdentity, cgroupIdentity, processRole, readPrivateJSON, writePrivateJSON } from './runtime.mjs';
+import { fresh, sourceEvidence, observeOwnership } from './ownership.mjs';
 import { credentials } from '../harness/store.mjs';
 import { HTTPClient } from './http.mjs';
+import { isDeepStrictEqual as same } from 'node:util';
 
 const finite = value => Number.isFinite(value) && value >= 0;
 const failure = error => ['ENOENT', 'ESRCH'].includes(error.code) || error.message === 'process_exited' ? 'process_exited' :
@@ -56,6 +58,9 @@ export async function sampleContainer(container, { procRoot = '/proc', cgroupRoo
         if (!rss) throw new Error('rss_unavailable');
         const nsPid = status.match(/^NSpid:\s+([\d\s]+)$/m)?.[1].trim().split(/\s+/).map(Number).at(-1);
         const process = { ...owner, rssBytes: counter(rss[1]) * 1024, namespacePid: nsPid ?? null };
+        // Classify only supported argv shapes; never retain command lines, SQL
+        // or environment. A shell or unrelated sidecar is not another API worker.
+        process.role = await readFile(`${procRoot}/${pid}/cmdline`, 'utf8').then(processRole).catch(() => 'unknown');
         const threads = status.match(/^Threads:\s+(\d+)$/m);
         if (threads) process.threads = counter(threads[1]);
         else process.threadStatus = 'not_available';
@@ -87,13 +92,14 @@ export async function sampleContainer(container, { procRoot = '/proc', cgroupRoo
     return { status: 'unavailable', reason };
   }
 }
-export function combineObservation(receipt, containers, internal, { previous = null, now = Date.now(), monotonicMs = performance.now() } = {}) {
+export function combineObservation(receipt, containers, internal, { previous = null, now = Date.now(), monotonicMs = performance.now(), ownership = null } = {}) {
   const app = containers.schemii;
   const output = { at: new Date(now).toISOString(), monotonicMs, version: 1, status: app?.status === 'available' ? 'available' : 'unavailable',
     qualification: { scope: 'deployment_aggregate', method: 'launcher_PID_birth_cgroup_inode_and_authenticated_admin_snapshot',
       generatorPlacement: receipt.topology.generatorPlacement, generatorHeadroomVerified: false,
       capacityEligible: false, runOwnedBackends: 'unavailable', activeJobs: 'unavailable',
-      ingressConnections: 'not_sampled', databaseActivity: 'not_sampled', eventLoopLagMs: 'not_sampled' },
+      ingressConnections: 'not_sampled', databaseActivity: 'not_sampled', eventLoopLagMs: 'not_sampled',
+      executorWaitMs: 'not_sampled', ingressWaitMs: 'not_sampled', metadataWaitMs: 'not_sampled', sourceWaitMs: 'not_sampled' },
     containers, internal: internal || { status: 'unavailable' } };
   if (app?.status !== 'available') return output;
   if (finite(app.memoryLimitBytes) && app.memoryLimitBytes > 0 && app.memoryCurrentBytes >= app.memoryLimitBytes * 0.85) {
@@ -109,15 +115,41 @@ export function combineObservation(receipt, containers, internal, { previous = n
   if (before?.status === 'available' && elapsed > 0 && app.cpuUsageUsec >= before.cpuUsageUsec)
     output.appCpuPercent = (app.cpuUsageUsec - before.cpuUsageUsec) / (elapsed * 1000) * 100;
   output.qualification.cpuPercentBasis = 'one_core_100_percent_monotonic_elapsed';
+  if (ownership) {
+    let validSource = false;
+    try { sourceEvidence(ownership.source, ownership.runId, now); validSource = true; } catch { /* Unknown stays unavailable. */ }
+    if (!validSource || ownership.status !== 'available' || !fresh(ownership, now) || !fresh(ownership.work, now) || ownership.work.status !== 'available' ||
+        !Number.isSafeInteger(ownership.work.activeJobs) || ownership.work.activeJobs < 0 || ownership.work.runId !== ownership.runId) {
+      output.status = 'unavailable'; output.reason = 'owned_observation_unavailable'; return output;
+    }
+    const old = previous?.ownership;
+    if (old && (old.runId !== ownership.runId || !same(old.source.authority, ownership.source.authority) ||
+        old.source.captured.some(value => !ownership.source.captured.some(current => JSON.stringify(current) === JSON.stringify(value))) ||
+        ['executions', 'jobs'].some(key => (old.work[key] || []).some(value => !(ownership.work[key] || []).some(current => current.id === value.id))))) {
+      output.status = 'unavailable'; output.reason = 'owned_authority_or_journal_changed'; return output;
+    }
+    output.ownership = ownership;
+    output.ownedBackends = ownership.source.ownedBackends;
+    output.activeJobs = ownership.work.activeJobs;
+    output.qualification.runOwnedBackends = 'bound_server_and_complete_captured_rechecks';
+    output.qualification.activeJobs = ownership.work.jobScope;
+  }
+  const apis = app.processes.filter(process => process.role === 'api');
+  if (previous?.apiProcesses === 1 && JSON.stringify(previous.containers.schemii.processes.filter(process => process.role === 'api').map(({ pid, birthTick }) => ({ pid, birthTick }))) !==
+      JSON.stringify(apis.map(({ pid, birthTick }) => ({ pid, birthTick })))) {
+    output.status = 'unavailable'; output.reason = 'api_process_identity_changed'; return output;
+  }
   if (!internal || internal.version !== 1 || internal.scope !== 'process_aggregate' ||
       !Number.isFinite(Date.parse(internal.at)) || Math.abs(now - Date.parse(internal.at)) > 15000 ||
       !app.processes.some(process => process.namespacePid === internal.processPid)) {
     output.qualification.internalStatus = 'unavailable_or_wrong_process';
+    if (ownership) { output.status = 'unavailable'; output.reason = 'owned_app_snapshot_unavailable'; }
     return output;
   }
   output.qualification.internalStatus = 'available';
-  if (app.processes.length === 1) output.apiProcesses = 1;
-  output.qualification.apiProcessScope = app.processes.length === 1 ? 'single_cgroup_process_matches_endpoint' : 'worker_count_unverified';
+  if (apis.length === 1 && apis[0].namespacePid === internal.processPid &&
+      app.processes.every(process => ['api', 'launcher_shell'].includes(process.role))) output.apiProcesses = 1;
+  output.qualification.apiProcessScope = output.apiProcesses === 1 ? 'verified_cgroup_argv_and_endpoint_pid' : 'worker_count_unverified';
   const source = internal.sources?.source;
   if (source?.status === 'available') {
     const lanes = ['ordinary', 'monitoring', 'control'].map(key => source.counts?.[key]);
@@ -141,15 +173,15 @@ export function combineObservation(receipt, containers, internal, { previous = n
   }
   return output;
 }
-export async function collect(receipt, { internal = null, previous = null, procRoot = '/proc', cgroupRoot = '/sys/fs/cgroup', now = Date.now() } = {}) {
+export async function collect(receipt, { internal = null, previous = null, procRoot = '/proc', cgroupRoot = '/sys/fs/cgroup', now = Date.now(), ownership = null } = {}) {
   const boot = (await readFile(`${procRoot}/sys/kernel/random/boot_id`, 'utf8')).trim();
   if (receipt.version !== 1 || boot !== receipt.bootId || !Array.isArray(receipt.containers) || receipt.containers.length > 16) throw new Error('runtime_receipt_wrong_boot_or_version');
   const entries = await Promise.all(receipt.containers.map(async container => [container.service, await sampleContainer(container, { procRoot, cgroupRoot })]));
-  return combineObservation(receipt, Object.fromEntries(entries), internal, { previous, now });
+  return combineObservation(receipt, Object.fromEntries(entries), internal, { previous, now, ownership });
 }
 export function parseObserver(args) {
   if (args.length === 2 && args[0] === '--recover') return { recover: resolve(args[1]) };
-  const allowed = new Set(['runtime-receipt', 'output', 'credentials-file', 'account', 'seconds']);
+  const allowed = new Set(['runtime-receipt', 'output', 'credentials-file', 'account', 'seconds', 'ownership-config']);
   const options = {};
   for (let index = 0; index < args.length; index += 2) {
     const name = args[index]?.slice(2);
@@ -160,9 +192,10 @@ export function parseObserver(args) {
   const seconds = Number(options.seconds || 10800);
   if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 10800) throw new Error('observer_duration_limit');
   return { receiptPath: resolve(options['runtime-receipt']), output: resolve(options.output),
+    ownershipConfig: options['ownership-config'] ? resolve(options['ownership-config']) : null,
     credentialPath: options['credentials-file'] ? resolve(options['credentials-file']) : null, account: options.account || null, seconds };
 }
-export async function observe(options, { signal, clientFactory = args => new HTTPClient(args), collector = collect } = {}) {
+export async function observe(options, { signal, clientFactory = args => new HTTPClient(args), collector = collect, ownedCollector = observeOwnership } = {}) {
   const receipt = await readPrivateJSON(options.receiptPath);
   if (receipt.version !== 1 || receipt.bootId !== (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim())
     throw new Error('runtime_receipt_wrong_boot_or_version');
@@ -192,7 +225,8 @@ export async function observe(options, { signal, clientFactory = args => new HTT
         try { internal = await client.json('GET', '/api/v1/admin/runtime-observation'); }
         catch { internal = { status: 'unavailable', reason: 'admin_snapshot_request_failed' }; }
       }
-      const current = await collector(receipt, { previous, internal });
+      const ownership = options.ownershipConfig ? await ownedCollector(options.ownershipConfig, { origin: receipt.origin }) : null;
+      const current = await collector(receipt, { previous, internal, ownership });
       // Unknown counters stay absent. This log keeps qualifications stripped by public reports.
       const line = `${JSON.stringify(current)}\n`;
       const size = await stat(log).then(info => info.size).catch(error => { if (error.code !== 'ENOENT') throw error; return 0; });

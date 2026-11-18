@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, stat, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { buildReceipt, processIdentity, writePrivateJSON, readPrivateJSON } from './runtime.mjs';
+import { buildReceipt, processIdentity, processRole, sampleGenerator, generatorHeadroom, writePrivateJSON, readPrivateJSON } from './runtime.mjs';
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'schemii-runtime-contract-'));
@@ -52,4 +52,36 @@ test('private receipts are atomic, do not overwrite peer files and reject symlin
   await symlink(path, join(o.root, 'link.json'));
   await assert.rejects(readPrivateJSON(join(o.root, 'link.json')), /invalid_private_receipt/);
   assert.equal((await readFile(path, 'utf8')).trim(), '{\n  "value": 1\n}');
+});
+test('only supported single API commands qualify; argv content is not retained', () => {
+  for (const argv of [['uvicorn', 'schemii.main:app'], ['/opt/venv/bin/python', '-m', 'uvicorn', 'schemii.main:app', '--workers', '1'],
+    ['/opt/venv/bin/python', '/opt/venv/bin/uvicorn', 'schemii.main:app']])
+    assert.equal(processRole(argv.join('\0')), 'api');
+  for (const argv of [['uvicorn', 'schemii.main:app', '--workers', '2'], ['uvicorn', 'schemii.main:app', '--reload'],
+    ['python', 'some-sidecar.py'], ['uvicorn', 'foreign:app'], ['uvicorn', 'foreign:app', '--log-config', 'schemii.main:app'],
+    ['uvicorn', 'schemii.main:app', '--workers=2', '1']]) assert.equal(processRole(argv.join('\0')), 'unknown');
+  assert.equal(processRole('/bin/sh\0-c\0exec uvicorn schemii.main:app'), 'launcher_shell');
+});
+test('generator resources and network namespace counters retain qualification and replacement fences', async t => {
+  const f = await fixture(t), owner = { pid: 100, birthTick: '1000' };
+  await mkdir(join(f.procRoot, '100/fd')); await mkdir(join(f.procRoot, '100/net'));
+  await writeFile(join(f.procRoot, '100/status'), 'VmRSS:\t80 kB\nThreads:\t3\n');
+  await writeFile(join(f.procRoot, '100/net/dev'), 'Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n eth0: 100 1 0 0 0 0 0 0 200 1 0 0 0 0 0 0\n');
+  const value = await sampleGenerator(owner, { procRoot: f.procRoot, ownPid: 100 });
+  assert.equal(value.status, 'available'); assert.equal(value.rssBytes, 81920); assert.equal(value.threads, 3);
+  assert.equal(value.headroomVerified, false); assert.equal(value.networkCapacity, 'unavailable');
+  assert.equal(value.networkScope, 'network_namespace_aggregate_not_run_attributed');
+  assert.equal((await sampleGenerator({ ...owner, birthTick: 'foreign' }, f)).status, 'unavailable');
+  const external = await sampleGenerator(owner, { ...f, ticksPerSecond: 100 });
+  assert.equal(external.cpuTickFrequency, 100); assert.equal(external.cpuScope, 'proc_stat_with_host_CLK_TCK');
+  assert.equal(external.cpuUsec, 0);
+  const summary = { arrivals: { dropped: 0 }, latency: { schedulingLagMs: { samples: 10, p95: 2 } } };
+  const before = { ...value, cpuUsec: 1000, monotonicMs: 1000 }, after = { ...value, cpuUsec: 501000, monotonicMs: 2000,
+    interfaces: value.interfaces.map(row => ({ ...row, sentBytes: row.sentBytes + 1000 })) };
+  const result = generatorHeadroom(before, after, summary);
+  assert.equal(result.cpuPercentOneCore, 50); assert.equal(result.networkNamespace[0].sentBytesPerSecond, 1000);
+  assert.equal(result.headroomVerified, false); assert.equal(result.schedulingLagMs.p95, 2);
+  assert.equal(generatorHeadroom(before, { ...after, owner: { ...owner, birthTick: 'replacement' } }, summary).status, 'unavailable');
+  const reset = { ...after, interfaces: [{ ...after.interfaces[0], sentBytes: 0 }] };
+  assert.equal(generatorHeadroom(before, reset, summary).status, 'unavailable');
 });
