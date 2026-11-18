@@ -1929,6 +1929,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     for command in ("backup", "restore", "verify-backup", "export-ca", "credentials"):
         subcommands.add_parser(command).add_argument("path", type=Path)
+    subcommands.add_parser("stage-portable").add_argument("path", type=Path)
     internal_bootstrap = subcommands.add_parser(
         "internal-bootstrap", help=argparse.SUPPRESS
     )
@@ -2000,6 +2001,13 @@ def main(argv: list[str] | None = None) -> int:
             result = runtime.credentials(args.path)
         elif args.command == "reset-password":
             result = runtime.reset_password(args.username)
+        elif args.command == "stage-portable":
+            if __package__:
+                from . import portable_stage
+            else:
+                import portable_stage
+
+            result = portable_stage.stage_portable(runtime, args.path)
         else:
             import recovery
 
