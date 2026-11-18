@@ -9,9 +9,8 @@ class SchemiiSweepTest(unittest.TestCase):
         lanes = {}
         for account in ACCOUNTS:
             resources = {"schema": account, "connectionId": "pg_" + "0" * 32}
-            if account in WRITERS:
-                resources.update(writableConnectionId="pg_" + "1" * 32,
-                                 writableSchema="qa_write_designer_" + account[-3:])
+            resources.update(writableConnectionId="pg_" + "1" * 32,
+                             writableSchema="qa_write_designer_" + account[-3:])
             lanes[account] = {"persona": "designer", "resources": resources,
                               "expectedCapabilities": ["schemii:access"], "deniedProducts": [],
                               "checks": [{"path": "/api/v1/auth/me", "status": 200}]}
@@ -24,8 +23,8 @@ class SchemiiSweepTest(unittest.TestCase):
             account: {"prefix": "qa_sweep1_" + account[-3:] + "_",
                       "localWorkspaceId": "ws_" + format(index * 3 + 1, "032x"),
                       "readerWorkspaceId": "ws_" + format(index * 3 + 2, "032x"),
-                      "writerWorkspaceId": "ws_" + format(index * 3 + 3, "032x") if account in WRITERS else None,
-                      "localCreated": True, "readerCreated": True, "writerCreated": account in WRITERS}
+                      "writerWorkspaceId": "ws_" + format(index * 3 + 3, "032x"),
+                      "localCreated": True, "readerCreated": True, "writerCreated": True}
             for index, account in enumerate(ACCOUNTS)
         }}
 
@@ -78,6 +77,39 @@ class SchemiiSweepTest(unittest.TestCase):
                 self.assertIn("not independent mobile creation", scenario["viewportContracts"]["mobile"]["instructions"])
         self.assertEqual(len(ids), 2)
 
+    def test_pilot_copy_uses_marked_writer_and_exact_oracle(self):
+        manifest = build_pilot(self.fixture(), "sweep1", self.workspaces())
+        for username, lane in manifest["lanes"].items():
+            resources = lane["resources"]
+            self.assertEqual(resources["writableSchema"], "qa_write_designer_" + username[-3:])
+            self.assertEqual(resources["copyRows"], [[1, "Alpha", 2], [2, "Beta", 3], [3, "Gamma", 0]])
+            files = next(s for s in lane["scenarios"] if s["id"] == "pilot-files")
+            self.assertIn("FROM STDIN", files["instructions"])
+            self.assertIn("TO STDOUT", files["instructions"])
+            self.assertIn("cleanup-sweep does not remove SQL", files["instructions"])
+            self.assertNotIn("Upload the downloaded", files["instructions"])
+            self.assertTrue(any(c.get("equals", {}).get("username") == resources["writableSchema"] for c in lane["checks"]))
+
+    def test_pilot_missing_wrong_or_shared_writer_blocks_before_dispatch(self):
+        for mutation in ["missing-profile", "wrong-schema", "reader-profile", "missing-workspace", "unowned", "reader-workspace"]:
+            source, workspaces = self.fixture(), self.workspaces()
+            resources = source["lanes"]["qa_designer_005"]["resources"]
+            mapped = workspaces["lanes"]["qa_designer_005"]
+            if mutation == "missing-profile":
+                resources.pop("writableConnectionId")
+            if mutation == "wrong-schema":
+                resources["writableSchema"] = "qa_write_designer_006"
+            if mutation == "reader-profile":
+                resources["writableConnectionId"] = resources["connectionId"]
+            if mutation == "missing-workspace":
+                mapped.pop("writerWorkspaceId")
+            if mutation == "unowned":
+                mapped["writerCreated"] = False
+            if mutation == "reader-workspace":
+                mapped["writerWorkspaceId"] = mapped["readerWorkspaceId"]
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, "marked writer"):
+                build_pilot(source, "sweep1", workspaces)
+
     def test_pilot_refuses_unowned_starting_state_or_missing_effective_grant(self):
         workspaces = self.workspaces()
         workspaces["lanes"]["qa_designer_005"]["localCreated"] = False
@@ -94,6 +126,7 @@ class SchemiiSweepTest(unittest.TestCase):
                             ("qa_designer_012", "qa_designer_013", "qa_designer_014"), strict=True):
             source["lanes"][new] = copy.deepcopy(source["lanes"][old])
             source["lanes"][new]["resources"]["schema"] = new
+            source["lanes"][new]["resources"]["writableSchema"] = "qa_write_designer_" + new[-3:]
             workspaces["lanes"][new] = copy.deepcopy(workspaces["lanes"][old])
             workspaces["lanes"][new]["prefix"] = "qa_sweep1_" + new[-3:] + "_"
         manifest = build_pilot(source, "sweep1", workspaces,

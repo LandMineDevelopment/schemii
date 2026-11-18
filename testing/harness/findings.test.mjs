@@ -38,3 +38,16 @@ test('historical execution and unadjudicated findings render review pending', ()
   assert.match(html,/Independent acceptance: <strong>review-pending<\/strong>/);
   assert.match(html,/finding-one: finding adjudication pending/);
 });
+
+
+test('report distinguishes initial failure latest execution coverage remediation and actual verification counts',()=>{
+  const html=reportHTML({id:'qa-receipt-report',status:'stopped',lanes:[{username:'qa_tester',status:'complete',scenarios:[{
+    title:'Current saved state',functional:'passed',visual:'passed',initialResult:{functional:'failed',visual:'blocked'},note:'Original failure retained',evidence:[]}]}],
+    acceptance:{status:'review-pending',intended:2,dispatched:2,started:1,completed:1,reviewed:0,firstAttemptFailures:1,reasons:['Second case not run']},
+    verificationHistory:[{phase:'focused',status:'passed',note:'Original private receipt',source:{commit:'source'},profile:'harness',commands:[{command:['npm','test'],status:'passed',summary:{collected:3,unique_observed:3,attempt_outcomes:{skipped:1},first_attempt_failures:0,retry_recovered:0}}]}],
+    importedFindings:[{findingId:'finding-original',disposition:'resolved-defect',originalRun:'qa-old',reproduction:{attempt:'attempt-new',reviewer:'independent-reviewer'},provenance:'Actual review <reference>',note:'Exact expected/actual',source:'new-source'}]});
+  assert.match(html,/dispatched: 2; started: 1; first-attempt failures: 1/);
+  assert.match(html,/Initial: failed/);assert.match(html,/Initial: blocked/);
+  assert.match(html,/collected 3; observed 3; skipped 1/);
+  assert.match(html,/finding-original/);assert.match(html,/Actual review &lt;reference&gt;/);
+});

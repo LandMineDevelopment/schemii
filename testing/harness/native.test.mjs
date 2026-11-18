@@ -4,10 +4,12 @@ import { mkdtemp, mkdir, writeFile, readFile, utimes, rm, symlink, rename, lstat
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { workspaceNavigationHref } from '../../src/schemii/schemii/web/assets/workspace-navigation.js';
 import { recordWorkerExit, recordWorkerBrowserClosure } from './leases.mjs';
 import { writeJSON } from './store.mjs';
-import { bindNative, readNativeSession, processIdentity, nativeBrowserProcesses, closeNativeReceipt, releaseNativeTransport, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, recoverNativeLane, acceptance } from './native.mjs';
+import { sourceIdentity } from './deployment.mjs';
+import { bindNative, readNativeSession, processIdentity, nativeBrowserProcesses, closeNativeReceipt, releaseNativeTransport, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, recoverNativeLane, recordCheckpoint, importVerification, importRemediation, acceptance } from './native.mjs';
 
 const fingerprint = 'a'.repeat(64);
 function fixture() {
@@ -465,4 +467,186 @@ test('closed native recovery prepares pending-only reconciliation while retainin
   });
   assert.equal(prepared,true);assert.deepEqual(result.pending,[f.scenario.id]);assert.equal(result.status,'ready');
   assert.equal(f.lane.scenarios[1].functional,'passed');assert.equal(f.lane.recovery.reconciliationRequired,true);
+});
+
+
+test('latest execution can pass while the immutable initial failure and independent review gate remain',()=>{
+  const f=captureFixture();
+  const first=recordCheckpoint(f.run,f.lane,f.scenario,{functional:'failed',visual:'blocked',note:'Original empty result'},[]);
+  const original=JSON.stringify(first);
+  recordCheckpoint(f.run,f.lane,f.scenario,{functional:'passed',visual:'passed',note:'Later observed expected saved state'},[f.capture.path]);
+  assert.deepEqual(f.scenario.initialResult,{functional:'failed',visual:'blocked'});
+  assert.equal(JSON.stringify(f.scenario.attempts[0]),original);
+  assert.equal(f.scenario.functional,'passed');
+  assert.equal(acceptance(f.run).status,'review-pending');
+  inspectionReceipt(f.capture,f.reviewer.agent,{tool:'view_image',invocation:'independent actual image inspection',note:'Expected saved state; actual matches.'});
+  assert.throws(()=>recordReview(f.run,f.reviewer,f.lane,f.scenario.id,{verdict:'accepted',note:'Matches'}),/acknowledge/);
+  const review=recordReview(f.run,f.reviewer,f.lane,f.scenario.id,{verdict:'accepted',historyAcknowledged:true,note:'Original failure retained; later state independently matches'});
+  assert.equal(review.priorAttempts[0].id,first.id);
+});
+
+async function remediationFixture(t) {
+  const directory=await mkdtemp(join(tmpdir(),'schemii-remediation-test-'));
+  t.after(()=>rm(directory,{recursive:true,force:true}));
+  const f=reviewedLegacyFixture();f.run.id='qa-current-run';
+  const oldSource='b'.repeat(64), oldHash=createHash('sha256').update(png()).digest('hex');
+  const original={id:'qa-original-run',deployment:{identity:{fingerprint:oldSource}},lanes:[{
+    id:'lane-old',username:'qa_designer_002',scenarios:[{id:'old-case',attempts:[{
+      id:'original-failed-attempt',scenarioAttempt:'old-begin',generation:1,source:oldSource,reviewer:'original-reporter',
+      functional:'failed',visual:'failed',evidence:['lane-old/failure.png']}]}],
+    captures:[{kind:'image',phase:'scenario',path:'lane-old/failure.png',source:oldSource,scenario:'old-case',scenarioAttempt:'old-begin',generation:1,agent:'original-reporter',sha256:oldHash}]}],
+    findings:[{id:'finding-original',lane:'lane-old',agent:'original-reporter',username:'qa_designer_002',scenario:'old-case',source:oldSource,scenarioAttempt:'old-begin',generation:1,evidence:['lane-old/failure.png'],verificationStatus:'confirmed-defect',reviews:[{verdict:'confirmed-defect'}]}]};
+  const originalPath=join(directory,original.id,'manifest.json'),currentPath=join(directory,f.run.id,'manifest.json');
+  await mkdir(join(directory,original.id,'lane-old'),{recursive:true,mode:0o700});
+  await mkdir(join(directory,f.run.id,'lane-1'),{recursive:true,mode:0o700});
+  await writeFile(join(directory,original.id,'lane-old/failure.png'),png(),{mode:0o600});
+  const image=join(directory,f.run.id,f.capture.path);await writeFile(image,png(),{mode:0o600});
+  f.capture.sha256=createHash('sha256').update(png()).digest('hex');
+  for(const receipt of f.capture.inspections)receipt.sha256=f.capture.sha256;
+  await writeJSON(originalPath,original);await writeJSON(currentPath,f.run);
+  const input={targetLane:f.lane.id,scenario:f.scenario.id,disposition:'resolved-defect',provenance:'Independent current-source review transcript and original finding',note:'Original missing rows; new source reproduction returns exact expected rows'};
+  return {...f,original,originalPath,currentPath,input,image};
+}
+test('cross-run remediation preserves original finding and binds exact independent reproduction and image hashes',async t=>{
+  const f=await remediationFixture(t), before=JSON.stringify(f.original.findings);
+  const receipt=importRemediation(f.original,f.run,'finding-original',f.input,f);
+  assert.equal(JSON.stringify(f.original.findings),before);
+  assert.equal(f.original.remediations[0].id,receipt.id);
+  assert.equal(f.run.importedFindings[0].id,receipt.id);
+  await writeJSON(f.originalPath,f.original);await writeJSON(f.currentPath,f.run);
+  assert.equal(acceptance(f.run).status,'reviewed-acceptance');
+  await writeFile(f.image,Buffer.from('changed evidence'));
+  assert.match(acceptance(f.run).reasons.join(),/remediation evidence changed/);
+});
+test('remediation rejects self-review stale source failed attempts changed bytes and confirmed-defect relabeling',async t=>{
+  const f=await remediationFixture(t);
+  const invoke=()=>importRemediation(f.original,f.run,'finding-original',f.input,f);
+  f.original.findings[0].username=f.reviewer.username;f.original.lanes[0].username=f.reviewer.username;assert.throws(invoke,/reporter/);f.original.findings[0].username='qa_designer_002';f.original.lanes[0].username='qa_designer_002';
+  f.scenario.attempts[0].functional='failed';assert.throws(invoke,/passing reproduction/);f.scenario.attempts[0].functional='passed';
+  f.run.deployment.identity.fingerprint='c'.repeat(64);assert.throws(invoke,/current-source/);f.run.deployment.identity.fingerprint=fingerprint;
+  f.input.disposition='unsupported-action';assert.throws(invoke,/confirmed defect/);f.input.disposition='resolved-defect';
+  f.original.deployment.identity.fingerprint=fingerprint;assert.throws(invoke,/later changed source/);f.original.deployment.identity.fingerprint='b'.repeat(64);
+  await writeFile(f.image,Buffer.from('changed'));assert.throws(invoke,/changed after review/);
+});
+test('new contract requires unchanged final CI verification and keeps rejected imports append-only',async t=>{
+  const f=reviewedLegacyFixture();f.run.acceptanceContract=2;
+  assert.match(acceptance(f.run).reasons.join(),/final application verification/);
+  const directory=await mkdtemp(join(tmpdir(),'schemii-verification-test-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const receiptPath=join(directory,'receipt.json');await writeJSON(receiptPath,{status:'cancelled'});
+  const identity=sourceIdentity(new URL('../../',import.meta.url).pathname);
+  const run={deployment:{identity},verificationHistory:[]};
+  assert.throws(()=>importVerification(run,receiptPath,{root:new URL('../../',import.meta.url).pathname,note:'Original synthetic cancelled negative control'}),/rejected/);
+  assert.equal(run.verificationHistory.length,1);assert.equal(run.verificationHistory[0].status,'rejected');
+  const bytes=await readFile(receiptPath);
+  f.run.verificationHistory=[{id:'synthetic-gate-control',phase:'final',status:'passed',source:{fingerprint},files:[{path:receiptPath,sha256:createHash('sha256').update(bytes).digest('hex')}]}];
+  assert.equal(acceptance(f.run).status,'review-pending','A synthetic gate receipt without original runner provenance cannot supply acceptance.');
+  await writeJSON(receiptPath,{status:'changed'});
+  assert.match(acceptance(f.run).reasons.join(),/verification pending or changed/);
+});
+
+
+test('synthetic complete-looking CI receipts cannot establish original execution provenance',async t=>{
+  // Synthetic receipt parser control only: no application checks are executed
+  // and these temporary records never establish actual source acceptance.
+  const directory=await mkdtemp(join(tmpdir(),'schemii-ci-import-parser-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const root=new URL('../../',import.meta.url).pathname;
+  const control=`
+import json,sys
+from pathlib import Path
+from scripts.ci.local_ci import selected_plan, source_identity, lane_for
+root,directory=Path(sys.argv[1]),Path(sys.argv[2]);p=selected_plan(root,'origin/main');identity=source_identity(root)
+entries=[]
+for index,command in enumerate(p['commands']):
+ entry={'command':command,'status':'passed','exit_code':0,'duration_ms':1};key=lane_for(command)
+ if key:
+  meta={'schema':1,'source_sha':identity['commit'],'run_id':1,'run_attempt':1,'lane':key[0],'project':key[1],'shard':key[2]}
+  records=[dict(meta,kind='start',planned=1),dict(meta,kind='plan',test_id='a'*64),dict(meta,kind='attempt',test_id='a'*64,source_id='b'*64,source_line=1,attempt=0,outcome='passed',skip='none',setup_ms=0,execution_ms=1,teardown_ms=0),dict(meta,kind='end',outcome='passed',wall_ms=1)]
+  name='synthetic-control-'+str(index)+'.jsonl';f=directory/name;f.write_text(''.join(json.dumps(r)+'\\n' for r in records));f.chmod(0o600);entry['timing_evidence']=name
+ entries.append(entry)
+r={'schema':1,'run_id':1,'source':identity,'base_ref':'origin/main','mode':'selected','profile':p['classification']['profile'],'commands':entries,'status':'passed','acceptance':True,'pending_commands':[],'pending_layers':[]}
+f=directory/'receipt.json';f.write_text(json.dumps(r));f.chmod(0o600)
+`;
+  execFileSync('python3',['-c',control,root,directory],{cwd:root,stdio:'pipe'});
+  const receiptPath=join(directory,'receipt.json'), original=JSON.parse(await readFile(receiptPath));
+  const run={deployment:{identity:sourceIdentity(root)}};
+  assert.throws(()=>importVerification(run,receiptPath,{root,note:'Explicit fabricated original negative control'}),/rejected/);
+  assert.equal(run.verificationHistory[0].status,'rejected');
+  for(const status of ['failed','cancelled','pending','feedback-passed']) {
+    await writeJSON(receiptPath,{...original,status});
+    assert.throws(()=>importVerification(run,receiptPath,{root,note:'Synthetic negative terminal control'}),/rejected/);
+    assert.equal(run.verificationHistory.at(-1).status,'rejected');
+  }
+  await writeJSON(receiptPath,{...original,source:{...original.source,fingerprint:'0'.repeat(64)}});
+  assert.throws(()=>importVerification(run,receiptPath,{root,note:'Synthetic wrong source'}),/rejected/);
+  await writeJSON(receiptPath,{...original,base_ref:'HEAD'});
+  assert.throws(()=>importVerification(run,receiptPath,{root,note:'Synthetic wrong narrowed comparison base'}),/rejected/);
+  await writeJSON(receiptPath,{...original,commands:original.commands.slice(1)});
+  assert.throws(()=>importVerification(run,receiptPath,{root,note:'Synthetic missing required command'}),/rejected/);
+  await writeJSON(receiptPath,original);
+  const timing=join(directory,original.commands.find(c=>c.timing_evidence).timing_evidence);
+  await writeFile(timing,'changed original telemetry');
+  assert.throws(()=>importVerification(run,receiptPath,{root,note:'Synthetic changed original evidence'}),/rejected/);
+  assert.equal(run.verificationHistory[0].status,'rejected','Synthetic parser control remains excluded from acceptance.');
+});
+
+
+test('replacement original bytes and missing authentic historical attempt provenance are never imported',async t=>{
+  const f=await remediationFixture(t), oldImage=join(new URL('.',`file://${f.originalPath}`).pathname,'lane-old/failure.png');
+  const originalBytes=await readFile(oldImage);
+  await writeFile(oldImage,'replacement unrelated bytes');
+  assert.throws(()=>importRemediation(f.original,f.run,'finding-original',f.input,f),/Original evidence bytes/);
+  await writeFile(oldImage,originalBytes);
+  const captures=f.original.lanes[0].captures;f.original.lanes[0].captures=[];
+  assert.throws(()=>importRemediation(f.original,f.run,'finding-original',f.input,f),/authentic retained capture/);
+  f.original.lanes[0].captures=captures;
+  const attempt=f.original.lanes[0].scenarios[0].attempts[0];attempt.scenarioAttempt='wrong-original-attempt';
+  assert.throws(()=>importRemediation(f.original,f.run,'finding-original',f.input,f),/binding is missing or changed/);
+  attempt.scenarioAttempt='old-begin';
+  importRemediation(f.original,f.run,'finding-original',f.input,f);
+  await writeJSON(f.originalPath,f.original);await writeJSON(f.currentPath,f.run);
+  assert.equal(acceptance(f.run).status,'reviewed-acceptance');
+  f.original.lanes[0].captures[0].source='c'.repeat(64);await writeJSON(f.originalPath,f.original);
+  assert.match(acceptance(f.run).reasons.join(),/remediation evidence changed/);
+});
+
+
+test('QA importer honors the immutable selected base when a named ref moves during actual execution',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'schemii-actual-ci-origin-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const ownerRoot=new URL('../../',import.meta.url).pathname;
+  const control=String.raw`
+import json,sys,shutil,subprocess
+from pathlib import Path
+owner,root=Path(sys.argv[1]),Path(sys.argv[2])
+shutil.copytree(owner/'scripts',root/'scripts',ignore=shutil.ignore_patterns('__pycache__','*.pyc','*.test.js','*.test.mjs'))
+(root/'.gitignore').write_text('.schemii/\n__pycache__/\n')
+(root/'package.json').write_text(json.dumps({'type':'module','scripts':{'test':'node scripts/ci/node-tests.mjs'}}))
+body="import test from 'node:test';import assert from 'node:assert/strict';test('real child discovery',()=>assert.equal(2+2,4));\n"
+for name in ['tests/frontend/api.test.js','testing/harness/origin.test.mjs','scripts/ci/origin.test.mjs','testing/load/origin.test.mjs']:
+ path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(body)
+def git(*args):return subprocess.check_output(['git','-C',str(root),*args],text=True).strip()
+git('init','-q');git('config','user.name','Origin selftest');git('config','user.email','selftest@example.invalid');git('add','.');git('commit','-qm','tiny original runner source');base=git('rev-parse','HEAD')
+(root/'tests/frontend/api.test.js').write_text(body+"test('second actually collected case',()=>assert.equal(3+3,6));\n")
+git('add','.');git('commit','-qm','owned frontend regression');later=git('rev-parse','HEAD')
+path=root/'tests/frontend/api.test.js'
+path.write_text(path.read_text()+"import {execFileSync} from 'node:child_process';\n"+"test('move named base inside actual child',()=>execFileSync('git',['update-ref','refs/heads/qa-base','"+later+"','"+base+"']));\n"+"test('seventh actual case',()=>assert.equal(7,7));\n")
+git('add','.');git('commit','-qm','faithful named-ref movement control');git('update-ref','refs/heads/qa-base',base)
+p=subprocess.run([sys.executable,'scripts/ci/local_ci.py','--base','qa-base'],cwd=root,capture_output=True,text=True)
+if p.returncode: raise RuntimeError(p.stdout+p.stderr)
+receipt=next((root/'.schemii/local-ci').glob('run-*/receipt.json'))
+print(json.dumps({'path':str(receipt),'base':base,'later':later}))
+`;
+  const childEnvironment={...process.env};delete childEnvironment.NODE_TEST_CONTEXT;
+  const created=JSON.parse(execFileSync('python3',['-c',control,ownerRoot,directory],{encoding:'utf8',stdio:'pipe',env:childEnvironment}));
+  const run={acceptanceContract:2,verificationBase:created.base,deployment:{identity:sourceIdentity(directory)}};
+  const imported=importVerification(run,created.path,{root:directory,note:'Actual canonical runner seven-case moving-ref provenance control, no application acceptance'});
+  assert.equal(imported.status,'passed');assert.equal(imported.commands[0].summary.collected,7);
+  run.verificationBase=created.later;
+  assert.throws(()=>importVerification(run,created.path,{root:directory,note:'Later prepared base must not adopt original scope'}),/rejected/);
+  run.verificationBase=created.base;
+  assert.match(imported.origin.path,/local-ci-origins/);
+  const original=JSON.parse(await readFile(created.path));
+  assert.equal(original.base_commit,created.base);assert.equal(original.classification.base,created.base);
+  const timing=join(new URL('.',`file://${created.path}`).pathname,original.commands[0].timing_evidence);
+  await writeFile(timing,'invented truncated original');
+  assert.throws(()=>importVerification(run,created.path,{root:directory,note:'Changed actual-origin negative control'}),/rejected/);
 });

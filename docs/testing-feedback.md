@@ -75,6 +75,39 @@ state private. No artifacts are uploaded automatically. Record prerequisite,
 setup and execution boundaries honestly; a local elapsed time cannot establish
 hosted queue savings. Preserve failed and blocked attempts.
 
+## Original local execution provenance
+
+The existing local runner now records importable provenance only for its own
+canonical planner selection and actual child invocations. After successful original
+execution, it publishes an authenticated record in the repository common Git
+directory under `local-ci-origins/`, separate from the receipt bundle. That record
+binds the original absolute receipt location and bytes, source/index identity,
+comparison commit, classification, loaded discovery/validation policy bytes,
+command/PID/exit/cleanup observations, original timing bytes, actual discovered
+case IDs and executed case/source/line/attempt/outcome inventories. Executed source
+IDs must resolve to actual versioned/nonignored source files and their original
+content hashes. No environment values, credentials or row contents are recorded.
+
+This is a cooperative local runner ownership boundary. It does not defend against
+an actor controlling the runner process, its source or the private Git directory.
+The private owner key is never exported or included in reports/artifacts. Retain
+that private repository state with the original evidence; missing/corrupt keys or
+origin records do not authorize reconstruction from imported claims.
+
+The QA receipt importer is read-only: it verifies the independent original owner
+record, current source/base/policy and actual original inventories through the
+existing validators. It neither creates provenance nor executes suites. A copied
+receipt, invented single-case lane, changed timing/source inventory, edited owner
+record, cancellation or incomplete required command cannot become accepted.
+Custom/mocked runner plans and synthetic parser controls cannot mint this origin.
+Positive protocol controls use tiny real canonical child executions in disposable
+Git fixtures; they establish the importer/runner contract, not app acceptance.
+
+Historical legitimate receipts without this provenance remain useful retained
+evidence requiring explicit source/scope/execution reconciliation. They are never
+automatically upgraded to new-contract final verification. No hosted Actions,
+new suite runner or reduced discovery is introduced.
+
 ## Selected local acceptance
 
 The planner applies the complete committed/staged/unstaged change and selects the

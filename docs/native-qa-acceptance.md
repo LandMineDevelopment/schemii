@@ -220,3 +220,72 @@ without these receipts stay review-pending. No declaration in this runbook prove
 live acceptance. Keep the legacy execution path until the pilot and subsequent
 concurrent writable/paging/modal/upload/download/interrupted-write workflows pass
 with independently reviewed desktop/mobile evidence and cleanup parity.
+
+## Later attempts, external review and final verification
+
+New prepared runs use acceptance contract 2. Each checkpoint appends an immutable
+attempt. The displayed execution result is the latest attempt; initial failure/block,
+notes, screenshots and full history stay available. A later pass is review-pending
+until the distinct reviewer accepts that exact attempt and explicitly supplies
+`--args-json '{"historyAcknowledged":true}'` when earlier failed/blocked attempts exist.
+Confirmed defects remain unresolved in their original run; changing source requires
+a **new** prepared run, with fresh deployment/fixtures and independent reproduction.
+The live checkpoint/finish source fence is unchanged.
+
+After both source runs are stopped and owned transports are verified stopped,
+link a historical finding to a current-source passing, image-inspected and exactly
+reviewed reproduction:
+
+```bash
+./test.sh resolve-finding --run CURRENT_RUN --from-run ORIGINAL_RUN \
+  --finding ORIGINAL_FINDING --target-lane TESTER_LANE --scenario CURRENT_CASE \
+  --disposition resolved-defect --provenance 'Original finding and independent review reference' \
+  --note 'Original expected/actual; exact later-source reproduction and observed fix'
+```
+
+For originally unverified findings the explicit adjudications `not-reproduced`,
+`prerequisite-mistake` and `unsupported-action` are also available. A confirmed
+defect cannot be reclassified to avoid remediation. This appends provenance-linked
+receipts to both runs; it does not change the original finding, review or attempts,
+and cannot make old-source execution accepted. The current run imports the original
+finding/image digests and exact reproduction/review proof. Each original image
+must resolve to its authentic retained lane, source, scenario, generation, agent,
+checkpoint attempt and capture digest; replacement bytes are rejected. Historical
+records lacking that binding remain unverified. Ongoing applicability rechecks
+those original proof records, in addition to the later reproduction. Changed files, source,
+latest attempts, reviews, original finding content, or reporter self-review invalidate
+the import. A GitHub issue closure or free-text claim is insufficient.
+
+The coordinator still schedules existing `./ci.sh` checks according to ownership.
+Prepare freezes `verificationBase` to the intended origin/main commit. Use
+`./ci.sh --base VERIFICATION_BASE_SHA` so later ref movement cannot narrow the
+required inventory; receipt imports reject a different comparison base.
+Import their original private receipt after it finishes; this command executes no
+suite and does not substitute a new runner:
+
+```bash
+./test.sh verify-receipt --run CURRENT_RUN --phase focused \
+  --receipt /private/original-local-ci/receipt.json --note 'Original focused receipt provenance'
+./test.sh verify-receipt --run CURRENT_RUN --phase final \
+  --receipt /private/original-local-ci/receipt.json --note 'Original complete selected acceptance'
+```
+
+The import first requires the independent authenticated original-runner record
+from the common Git directory, then reuses the existing change planner and timing/inventory validators,
+checks exact source, command inventory/status, original per-attempt timing records,
+counts, pending scopes and file digests. Feedback can establish only focused checks;
+final acceptance requires the complete applicable plan, no failed/cancelled/missing
+checks and no pending layers. Synthetic or copied receipt bundles and unknown historical originals are rejected;
+the importer never creates missing provenance. Original command lifecycle and
+actual discovered/executed case/source inventories are bound before import.
+Rejected imports append a rejection receipt. Changed
+imported files revoke their applicability. New-run reviewed acceptance requires a
+current final receipt in addition to actual independently reviewed UI cases and
+observed cleanup. Reports show intended, dispatched, started, completed, reviewed,
+first-attempt failures, initial/latest results, and focused/final receipt outcomes.
+
+Same-state image sharing across different scenarios remains unsupported: begin and
+capture each exact assigned scenario. Existing stale/wrong-resource rejection and
+independent image review remain required. Full live integration for #138/#140/#141,
+including provider turns, modal/download behavior, simultaneous writes, interrupted
+writes, paging and cleanup, remains separate acceptance work.

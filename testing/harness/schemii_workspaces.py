@@ -20,21 +20,25 @@ def journal_path(output: Path) -> Path:
     return output.with_name(output.name + ".journal.json")
 
 
-def seed(state: Path, tag: str, output: Path, accounts=ACCOUNTS) -> dict:
+def seed(state: Path, tag: str, output: Path, accounts=ACCOUNTS, writer_accounts=None) -> dict:
     if (not accounts or len(set(accounts)) != len(accounts)
             or any(not re.fullmatch(r"qa_designer_[0-9]{3}", account) for account in accounts)):
         raise ValueError("Seed accounts must be unique exact retained designer usernames")
+    writers = set(WRITERS).intersection(accounts) if writer_accounts is None else set(writer_accounts)
+    if not writers.issubset(accounts) or writer_accounts is not None and len(writers) != len(writer_accounts):
+        raise ValueError("Writer accounts must be a unique subset of seeded accounts")
     journal_file = journal_path(output)
     if output.exists():
         raise ValueError("Output already exists; use a unique run tag")
     if journal_file.exists():
         result = json.loads(private_read(journal_file))
         if (result.get("tag") != tag or not isinstance(result.get("lanes"), dict)
-                or not set(result["lanes"]).issubset(accounts)):
+                or not set(result["lanes"]).issubset(accounts)
+                or set(result.get("writerAccounts", set(WRITERS).intersection(accounts))) != writers):
             raise ValueError("Existing ownership journal belongs to another tag")
     else:
         output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        result = {"tag": tag, "lanes": {}}
+        result = {"tag": tag, "lanes": {}, "writerAccounts": sorted(writers)}
         write_private(journal_file, result, replace=False)
 
     def record(username: str, lane: dict) -> None:
@@ -47,7 +51,8 @@ def seed(state: Path, tag: str, output: Path, accounts=ACCOUNTS) -> dict:
         slot = slots[username]
         if not slot.get("provisioned") or not slot.get("connectionId"):
             raise ValueError(f"Designer account lacks retained connection: {username}")
-        if username in WRITERS and not slot.get("writableConnectionId"):
+        if username in writers and (not re.fullmatch(r"pg_[0-9a-f]{32}", slot.get("writableConnectionId", ""))
+                                   or slot.get("writableSchema") != "qa_write_designer_" + username[-3:]):
             raise ValueError(f"Writer profile missing for {username}")
         prefix = f"qa_{tag}_{username[-3:]}_"
         lane = result["lanes"].get(username, {"prefix": prefix})
@@ -100,8 +105,10 @@ def seed(state: Path, tag: str, output: Path, accounts=ACCOUNTS) -> dict:
                                               expected=201)["workspace"])
 
             postgres_workspace("reader", slot["connectionId"], username)
-            if username in WRITERS:
+            if username in writers:
                 postgres_workspace("writer", slot["writableConnectionId"], slot["writableSchema"])
+                lane["writerConnectionId"] = slot["writableConnectionId"]
+                record(username, lane)
             else:
                 lane.update({"writerWorkspaceId": None, "writerCreated": False})
                 record(username, lane)
@@ -118,11 +125,13 @@ def main() -> None:
     parser.add_argument("--state-dir", type=Path, default=ROOT / ".schemii/testing")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--accounts", help="Exact retained designer seed subset, comma separated")
+    parser.add_argument("--writer-accounts", help="Explicit marked writer subset; use all pilot accounts including reviewer")
     args = parser.parse_args()
     if not args.tag or len(args.tag) > 32 or not args.tag.replace("-", "").replace("_", "").isalnum():
         parser.error("--tag must be 1..32 alphanumeric, dash or underscore characters")
     accounts = tuple(args.accounts.split(",")) if args.accounts else ACCOUNTS
-    result = seed(args.state_dir, args.tag, args.output, accounts)
+    result = seed(args.state_dir, args.tag, args.output, accounts,
+                  tuple(args.writer_accounts.split(",")) if args.writer_accounts else None)
     print(json.dumps({"output": str(args.output), "accounts": len(result["lanes"]),
                       "createdLocal": sum(item["localCreated"] for item in result["lanes"].values()),
                       "createdReader": sum(item["readerCreated"] for item in result["lanes"].values()),

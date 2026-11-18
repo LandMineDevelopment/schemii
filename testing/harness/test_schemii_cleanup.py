@@ -8,7 +8,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from testing.harness.cleanup_schemii_sweep import cleanup, cleanup_guard, owned_workspaces, process_birth
+from testing.harness.cleanup_schemii_sweep import cleanup, cleanup_guard, owned_workspaces, process_birth, reset_owned_writers
 from testing.harness.schemii_sweep import ACCOUNTS, WRITERS
 from testing.harness.schemii_workspaces import journal_path, seed
 
@@ -119,6 +119,67 @@ class SchemiiOwnershipTest(unittest.TestCase):
         return {"id": "qa-test-run", "status": "stopped", "createdAt": "2026-09-26T12:00:00Z",
                 "fixtureMode": "declared-retained-resources", "fixtureVersion": "schemii-full-qa-v1",
                 "accounts": list(ACCOUNTS), "lanes": lanes}
+
+    def writer_reset_run(self):
+        output, run_file, run = self.prepared_run()
+        slots = {slot["username"]: slot for slot in self.slots}
+        for lane in run["lanes"]:
+            if lane["username"] in WRITERS:
+                lane["resources"].update({key: slots[lane["username"]][key] for key in ("writableSchema", "writableConnectionId")})
+        run_file.write_text(json.dumps(run))
+        return output, run_file, run
+
+    def test_marked_writer_reset_is_stopped_owned_and_verified_with_failed_history(self):
+        output, run_file, run = self.writer_reset_run()
+        calls = []
+        with patch.multiple("testing.harness.cleanup_schemii_sweep", registry_load=lambda state: {"slots": self.slots}):
+            result = reset_owned_writers(self.root, output, run_file, run, [], invoke=calls.append)
+            self.assertEqual(set(result["verifiedEmpty"]), WRITERS)
+            self.assertEqual(len(calls), 2 * len(WRITERS))
+            for username in WRITERS:
+                self.assertIn(["./start.sh", "--reset-testing-writable", username], calls)
+                self.assertIn(["./start.sh", "--verify-testing-writable", username], calls)
+            with self.assertRaisesRegex(RuntimeError, "failed control"):
+                reset_owned_writers(self.root, output, run_file, run, [], invoke=lambda command: (_ for _ in ()).throw(RuntimeError("failed control")))
+        report = json.loads(run_file.with_name("writer-cleanup.json").read_text())
+        self.assertEqual(report["attempts"][-1]["status"], "failed")
+        self.assertEqual(len([a for a in report["attempts"] if a["status"] == "verified-empty"]), len(WRITERS))
+
+    def test_writer_reset_refuses_wrong_profile_before_any_app_deletion(self):
+        output, run_file, run = self.writer_reset_run()
+        run["lanes"][0]["resources"]["writableSchema"] = "qa_write_designer_999"
+        run_file.write_text(json.dumps(run))
+        with patch.multiple("testing.harness.cleanup_schemii_sweep", Client=FakeClient, registry_load=lambda state: {"slots": self.slots}), self.assertRaisesRegex(ValueError, "exact owned"):
+            cleanup(self.root, output, run_file, reset_writers=True)
+        self.assertEqual(FakeClient.deletes, [])
+
+    def test_writer_reset_refuses_peer_reservation_before_action(self):
+        output, run_file, run = self.writer_reset_run()
+        lease = self.root / ".git/qa-account-leases" / (run["accounts"][0] + ".json")
+        lease.parent.mkdir(parents=True)
+        lease.write_text('{"runId":"qa-live-peer"}')
+        with patch("testing.harness.cleanup_schemii_sweep.reset_owned_writers") as reset, self.assertRaisesRegex(ValueError, "reserved"):
+            cleanup(self.root, output, run_file, reset_writers=True)
+        reset.assert_not_called()
+        self.assertEqual(FakeClient.deletes, [])
+
+    def test_explicit_dynamic_pilot_writer_seed_and_cleanup_remain_exact(self):
+        username = "qa_designer_005"
+        slot = next(slot for slot in self.slots if slot["username"] == username)
+        slot.update(writableConnectionId="pg_" + "5" * 32, writableSchema="qa_write_designer_005")
+        output = self.root / "pilot.json"
+        fixture = seed(self.root, "test1", output, accounts=(username,), writer_accounts=(username,))
+        item = fixture["lanes"][username]
+        run = {"id": "qa-test-run", "status": "stopped", "fixtureMode": "declared-retained-resources", "fixtureVersion": "schemii-full-qa-v1",
+               "accounts": [username], "lanes": [{"username": username, "resources": {"scratchPrefix": item["prefix"],
+               **{key: item[key] for key in ("localWorkspaceId", "readerWorkspaceId", "writerWorkspaceId")},
+               "writableConnectionId": slot["writableConnectionId"], "writableSchema": slot["writableSchema"]}}]}
+        run_file = self.root / "qa-test-run/manifest.json"
+        owned = owned_workspaces(fixture, run, run_file)
+        self.assertEqual(len(owned[username]), 3)
+        run["lanes"][0]["resources"]["writableConnectionId"] = "pg_" + "6" * 32
+        with self.assertRaisesRegex(ValueError, "Unexpected writer"):
+            owned_workspaces(fixture, run, run_file)
 
     def test_seed_retry_keeps_original_ownership_and_preexisting_workspace(self):
         username = ACCOUNTS[0]

@@ -8,7 +8,7 @@ import { BrowserFleet } from './browser.mjs';
 import { assertScenarioPrerequisite, readinessChecks } from './prerequisites.mjs';
 import { assertLaneReadyToClaim, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
 import { startDeployment, sourceIdentity } from './deployment.mjs';
-import { nativeMode, recoverNativeLane, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, acceptance } from './native.mjs';
+import { nativeMode, recoverNativeLane, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordCheckpoint, acceptance } from './native.mjs';
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
 
 process.umask(0o077);
@@ -198,7 +198,12 @@ async function workerRequest(req){
       if(nativeMode(run))await assertNativeConnection(l,browserRoot);
       const evidence=await ownedEvidence(req.evidence,l);
       for(const path of evidence)currentCapture(run,l,path,{inspection:true});
-      const receipt=recordReview(run,l,lane(req.targetLane),req.scenario,{...req.args,verdict:req.verdict,note:req.note,evidence,finding:req.finding});await persist();return receipt;
+      const target=lane(req.targetLane), attempt=target.scenarios.find(s=>s.id===req.scenario)?.attempts?.at(-1);
+      for(const capture of target.captures||[])if(attempt?.evidence.includes(capture.path)&&capture.kind==='image') {
+        const owned=await ownedEvidence([capture.path],target);
+        if(createHash('sha256').update(await readFile(resolve(dir,owned[0]))).digest('hex')!==capture.sha256)throw new Error('Target image changed after inspection.');
+      }
+      const receipt=recordReview(run,l,target,req.scenario,{...req.args,verdict:req.verdict,note:req.note,evidence,finding:req.finding});await persist();return receipt;
     }
     if(req.command==='action') {
       if(nativeMode(run))throw new Error('Native lanes use their own schemii_browser connection; legacy action handles cannot drive it.');
@@ -233,7 +238,7 @@ async function workerRequest(req){
       if(l.currentScenario?.scenario!==s.id)throw new Error('Finding must belong to the current assigned scenario.');
       const evidence=await ownedEvidence(req.evidence,l);
       if(!evidence.length || !evidence.some(path=>(l.captures||[]).some(c=>c.path===path&&c.generation===l.generation&&c.scenario===s.id&&c.scenarioAttempt===l.currentScenario.id&&c.phase==='scenario')))throw new Error('Finding needs at least one screenshot captured by this lane in its current session.');
-      const finding={id:`finding-${randomUUID()}`,lane:l.id,username:l.username,scenario:s.id,agent:l.agent,...fields,evidence,verificationStatus:'unverified',at:stamp()};
+      const finding={id:`finding-${randomUUID()}`,lane:l.id,username:l.username,scenario:s.id,agent:l.agent,generation:l.generation,scenarioAttempt:l.currentScenario.id,source:run.deployment.identity.fingerprint,...fields,evidence,verificationStatus:'unverified',at:stamp()};
       run.findings ||= [];run.findings.push(finding);
       await event(dir,{kind:'finding',id:finding.id,lane:l.id,scenario:s.id,severity:finding.severity,title:finding.title,evidence});
       await persist();return finding;
@@ -248,11 +253,7 @@ async function workerRequest(req){
         if(!evidence.some(path=>{try{currentCapture(run,l,path,{inspection:true});return true;}catch{return false;}}))throw new Error('Visual pass requires current scenario/generation/source/viewport/resource screenshot and image inspection receipt.');
       }
       if(req.functional==='passed'&&s.downloadOracle&&!l.captures?.some(c=>c.kind==='download'&&c.scenario===s.id&&c.scenarioAttempt===l.currentScenario?.id&&c.contentInspection?.result==='passed'))throw new Error('This scenario requires actual downloaded content inspection before functional pass.');
-      s.attempts ||= [];
-      s.attempts.push({id:randomUUID(),generation:l.generation,scenarioAttempt:l.currentScenario?.id,source:run.deployment.identity.fingerprint,functional:req.functional,visual:req.visual,note:req.note,evidence,reviewer:l.agent,at:stamp()});
-      const functional=s.functional==='failed'?'failed':req.functional;
-      const visual=s.visual==='failed'?'failed':req.visual;
-      Object.assign(s,{functional,visual,note:s.attempts.map((a,i)=>`Attempt ${i+1}: ${a.note}`).join('\n'),evidence:[...new Set([...s.evidence,...evidence])],reviewer:l.agent,at:stamp()});
+      recordCheckpoint(run,l,s,req,evidence);
       await event(dir,{kind:'checkpoint',lane:l.id,scenario:s.id,functional:s.functional,visual:s.visual});await persist();return s;
     }
     if(req.command==='finish') {
