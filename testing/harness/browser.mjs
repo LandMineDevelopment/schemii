@@ -40,8 +40,9 @@ export class BrowserFleet {
   #isolationProven = false;
   #pagesParkedForIsolation = false;
 
-  constructor({ baseURL, runDir, headless = false, timeoutMs = 15000, onEvent = () => {}, onLaunch = async () => {} }) {
+  constructor({ baseURL, runDir, headless = false, ignoreHTTPSErrors = true, timeoutMs = 15000, onEvent = () => {}, onLaunch = async () => {} }) {
     this.baseURL = new URL(baseURL).origin;
+    this.ignoreHTTPSErrors = ignoreHTTPSErrors;
     this.runDir = path.resolve(runDir);
     this.headless = headless;
     this.timeoutMs = timeoutMs;
@@ -122,7 +123,7 @@ export class BrowserFleet {
       catch { throw new Error('Cannot connect to the isolated Chromium process'); }
       handle.browser = browser;
       browser.on('disconnected', () => { if (!handle.closing) this.#event(handle, 'disconnected'); });
-      handle.context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: lane.viewport ?? { width: 1440, height: 1000 } });
+      handle.context = await browser.newContext({ ignoreHTTPSErrors: this.ignoreHTTPSErrors, viewport: lane.viewport ?? { width: 1440, height: 1000 } });
       handle.context.setDefaultTimeout(this.timeoutMs);
       handle.context.setDefaultNavigationTimeout(this.timeoutMs);
       handle.page = await handle.context.newPage();

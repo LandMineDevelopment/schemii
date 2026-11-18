@@ -5,8 +5,7 @@ import { readFile, writeFile, open, rm, access } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { root, runPath, readJSON, privateJSON, writeJSON, privateDir, credentials, reportHTML, stamp } from './store.mjs';
-import { deploymentLockPath, disposablePreviewBinding, DESKTOP_PREVIEW, LOCAL_ORIGIN } from './deployment.mjs';
-import { readPrivateJSON } from '../load/runtime.mjs';
+import { deploymentLockPath, disposableGuestBinding, DESKTOP_PREVIEW, LOCAL_ORIGIN, readPrivateDeploymentJSON } from './deployment.mjs';
 import { reserveAccounts, reserveAvailable, releaseAccounts, availableAccounts, withFileLock, withAvailableAccounts } from './leases.mjs';
 import { expandFixtureScenario } from './prerequisites.mjs';
 const stateDir=resolve(process.env.SCHEMII_QA_STATE_DIRECTORY || join(root,'.schemii/testing'));
@@ -67,7 +66,7 @@ Selection: --persona modeler --agents 1..10 OR --accounts USER1,USER2
            --tracks lifecycle,canvas,rules,query,chat --parallel 1..10
            --viewports desktop,mobile --fixtures /path/manifest.json
            --credentials-file /private/accounts.json --headless
-           --disposable-preview-binding /private/guest-binding.json (optional)
+           --disposable-guest-binding /private/guest-binding.json (optional)
 Native:    --browser native --controller t3 --reviewer-account USER --runtime-slots N
            Native UI tools act directly; session CLI records ownership/evidence only.
 Workers:   --controller t3|codex --agent-model MODEL --agent-reasoning EFFORT
@@ -91,7 +90,7 @@ Exit codes: 0 success, 1 failure, 2 invalid args, 3 awaiting agent dispatch,
 `;
 function invalid(message) { return Object.assign(new Error(message), { exitCode: 2 }); }
 function blocked(message) { return Object.assign(new Error(message), { exitCode: 4 }); }
-const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout','persona','reviewer-account','runtime-slots','disposable-preview-binding'];
+const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout','persona','reviewer-account','runtime-slots','disposable-guest-binding'];
 const commandOptions = {
   help: [], '--help': [], '-h': [], personas: [],
   setup: ['copies-per-persona','admin-credentials'], 'provision-chat': ['account','admin-credentials','model','reasoning'],
@@ -140,12 +139,13 @@ const trackSteps = {
   chat: 'Perform every scoped model action through in-app AI chat. Verify provider/model first, approvals, results, persistence and recovery. No editor/API substitute counts.',
   harness: 'Inspect the assigned app in your own browser, capture desktop and mobile evidence, and verify ordinary controls. This is a harness walkthrough, not full app acceptance.',
 };
-async function selection(o, reservedAccounts, previewBinding) {
-  if (o['disposable-preview-binding'] && !previewBinding) {
-    previewBinding = disposablePreviewBinding(await readPrivateJSON(resolve(o['disposable-preview-binding'])));
+async function selection(o, reservedAccounts, guestBinding) {
+  if (o['disposable-guest-binding'] && !guestBinding) {
+    guestBinding = disposableGuestBinding(await readPrivateDeploymentJSON(resolve(o['disposable-guest-binding']), 4096));
   }
   const browser = o.browser || 'isolated';
   if (!['isolated','native'].includes(browser)) throw new Error('--browser must be isolated or native.');
+  if (guestBinding && browser !== 'isolated') throw new Error('Disposable guest QA requires the guest-local isolated browser backend.');
   const controller = o.controller || 't3';
   if (!['t3','codex'].includes(controller)) throw new Error('--controller must be t3 or codex.');
   if (browser === 'native' && controller !== 't3') throw new Error('--browser native requires --controller t3 and thread-owned schemii_browser tools.');
@@ -235,8 +235,8 @@ async function selection(o, reservedAccounts, previewBinding) {
     if (!l.scenarios.length || new Set(l.scenarios.map(x=>x.id)).size !== l.scenarios.length || l.scenarios.some(x=>!/^[a-z0-9-]+$/.test(x.id || ''))) throw new Error('Scenario IDs must be unique kebab-case values.');
   }
   return { browser, reviewerAccount, runtimeSlots, accounts, persona:persona?.id || null, poolCandidates, agents:accounts.length, parallel, controller, agentModel, agentReasoning, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
-    baseURL:LOCAL_ORIGIN,previewURL:previewBinding?.origin ?? DESKTOP_PREVIEW,
-    ...(previewBinding ? { previewBinding } : {}),
+    baseURL:LOCAL_ORIGIN,previewURL:guestBinding ? null : DESKTOP_PREVIEW,
+    ...(guestBinding ? { guestBinding } : {}),
     fixtureMode:o.fixtures ? 'declared-retained-resources' : 'harness-only-no-app-data-writes',
     fixtureVersion:fixture.version || fixture.fixtureVersion || null,
     fixturePath:o.fixtures ? resolve(o.fixtures) : null };
@@ -406,7 +406,7 @@ async function execute(command,o) {
       try {
         if(config.persona) {
           const selected=await reserveAvailable({runId:id,runDir:dir,candidates:config.poolCandidates,count:config.accounts.length});
-          config=await selection(o,selected,config.previewBinding);
+          config=await selection(o,selected,config.guestBinding);
           run={...run,...config};await writeJSON(join(dir,'manifest.json'),run);
         }else await reserveAccounts({runId:id,runDir:dir,accounts:run.accounts});
         return await startBroker(run,dir);

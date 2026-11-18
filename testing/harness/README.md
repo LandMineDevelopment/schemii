@@ -176,43 +176,44 @@ exact QA scopes and writes this entry into the generated private fixtures.
 Use `--accounts qa_designer_001` with the provisioned account for a chat lane;
 automatic persona selection may choose a different designer.
 
-## Disposable preview
+## Disposable guest
 
-The default manual preview remains the desktop Tailscale origin. Use
-`--disposable-preview-binding FILE` with `plan`, `doctor`, or `prepare` only
-inside an explicitly approved disposable Linux guest. Give that guest its own
-engine, data, Git locks, and fixture credentials. Run the controller in the guest
-with ordinary access to its test tailnet and a local system Tailscale daemon.
+Use `--disposable-guest-binding FILE` with `plan`, `doctor` or `prepare` only
+inside an explicitly approved disposable Linux VM. Give the VM its own engine,
+Git checkout and locks, metadata and target databases, fixture accounts, browser
+storage and backup destinations. Run the controller and isolated Playwright
+processes in that VM. The binding does not enable native-thread mode or a
+remote route. The default desktop and CI preview gates still apply to their
+own workflows.
 
-Enroll a fresh guest identity through the approved interactive flow in an existing
-HTTPS-enabled test tailnet. Scope runner access to the test device. Configure
-persistent Tailscale Serve on that guest, with the sole HTTPS root handler
-proxying to `https+insecure://localhost:8001`. Keep Funnel off. The launcher
-uses a self-signed ingress certificate. The harness trusts that exact local
-certificate for its direct check and uses normal trusted TLS for the preview.
+Start only through `./start.sh`. Install the guest launcher’s public localhost
+certificate as a trust anchor in the guest’s own Chromium trust store. For the
+Playwright API client, set `NODE_EXTRA_CA_CERTS` to the same certificate before
+starting the controller. Use separate guest-owned browser profiles and leave TLS
+verification enabled. The harness checks the declared certificate against the
+launcher’s canonical certificate and verifies HTTPS without relaxing trust.
 
-Place a mode-0600 JSON file in private storage outside Git. Include exactly these
+Provide a mode-0600 JSON file in private storage outside Git with exactly these
 fields.
 
 | Field | Value |
 | --- | --- |
-| `origin` | Exact guest HTTPS origin from its local Tailscale DNS name, with no path, explicit port, or trailing slash |
-| `nodeId` | `Self.ID` from the guest's `tailscale status --json` |
-| `bootId` | Guest's `/proc/sys/kernel/random/boot_id` |
-| `commit` | Full commit from the clean guest source checkout |
+| `bootId` | Guest’s `/proc/sys/kernel/random/boot_id` |
+| `commit` | Full commit from the clean guest checkout |
+| `certificateSha256` | Lowercase SHA-256 fingerprint of the launcher’s `.schemii/tls/localhost.crt` in DER form |
 
-Pass the file alongside the usual arguments and fixture credentials. The
-controller records the binding in the private run manifest for resume and
-checks it under the acquired deployment lease. It compares the guest daemon's
-node and persistent route before and after HTTPS probes, verifies that the
-preview connections use that node's addresses, and checks a launcher receipt
-against the current boot, source, and container process/cgroup identities.
-Same-source shared leases must also match the recorded binding. Prepare a new
-run after a guest reboot. Private per-launch logs and runtime receipts remain
-under the run directory, including failed attempts with partial evidence.
-Clean up the harness run before shutting down the disposable guest and removing
-its test device. Keep binding, preview identity, logs and receipts private.
+The controller verifies kernel-held deployment locks, checks the clean source and
+VM boot against a launcher receipt, and correlates fresh HTTPS response IDs with
+the owned ingress records and their upstream application IDs. Correlation and
+live process/cgroup checks are repeated before dispatch and lane claims. The
+mode refuses machine-local Compose overrides and noncanonical launcher settings.
+A shared deployment must have the same guest binding. Prepare a new run after
+rebooting the guest. The receipt covers local readiness only and records remote
+preview as untested.
 
+Treat `plan`, `prepare`, `status`, launcher logs and all run receipts as private.
+Clean up the harness lease and its scoped test objects before shutting down the
+guest. Keep backups in that guest’s private storage.
 
 ## Coordinator runbook
 

@@ -7,7 +7,7 @@ import { CodexWorkers } from './workers.mjs';
 import { BrowserFleet } from './browser.mjs';
 import { assertScenarioPrerequisite, readinessChecks } from './prerequisites.mjs';
 import { assertLaneReadyToClaim, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
-import { startDeployment, sourceIdentity } from './deployment.mjs';
+import { startDeployment, sourceIdentity, revalidateDisposableGuest } from './deployment.mjs';
 import { nativeMode, recoverNativeLane, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, acceptance } from './native.mjs';
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
 
@@ -25,7 +25,7 @@ const browserRoot = nativeBrowserRoots(root);
 const equal = (a,b) => typeof a==='string' && typeof b==='string' && /^[a-f0-9]{64}$/.test(a) && /^[a-f0-9]{64}$/.test(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const terminalStatus = () => run.lanes.filter(x=>x.role!=='reviewer').every(x=>x.scenarios.every(s=>s.functional==='passed'&&s.visual==='passed'))?'execution-complete':'finished-with-gaps';
 const safeError = error => error?.name === 'TimeoutError' || /Call log:|locator\.|page\./.test(error?.message || '') ? 'Browser action failed or timed out. Inspect the current page before repeating a write.' : String(error?.message || 'Unknown error').split('\n')[0];
-const fleet = new BrowserFleet({baseURL:run.baseURL,runDir:dir,headless:run.headless,
+const fleet = new BrowserFleet({baseURL:run.baseURL,runDir:dir,headless:run.headless, ignoreHTTPSErrors:!run.guestBinding,
   onLaunch: async ({laneId,...ownership}) => {
     const l=lane(laneId);l.browser=ownership;l.browserLaunchPending=false;await persist();
   },
@@ -55,6 +55,7 @@ const workers = new CodexWorkers({root,runDir:dir,model:run.agentModel,reasoning
   }
 });
 async function claim(l,agent) {
+  await checkGuestReadiness();
   assertLaneReadyToClaim(l);
   if(!agent||typeof agent!=='string'||agent.length>200)throw new Error('Claim requires the actual assigned agent ID.');
   if(run.lanes.some(x=>x.status==='claimed'&&x.agent===agent))throw new Error('Agent already owns an active lane.');
@@ -90,7 +91,13 @@ async function checkSource() {
     throw new Error('Source changed since startup. Stop and prepare a new run; the tested build is no longer attributable to this checkout.');
   }
 }
+async function checkGuestReadiness() {
+  if (!run.guestBinding) return;
+  run.deployment.localVerification = await revalidateDisposableGuest(root, run.deployment);
+  await persist();
+}
 async function readyLane(l) {
+  await checkGuestReadiness();
   const readiness=readinessChecks(l);
   l.status='preparing';l.generation++;tokens.delete(l.id);l.browserLaunchPending=true;await persist();
   if(stopping)throw new Error('Controller is stopping.');
@@ -283,7 +290,7 @@ async function controllerRequest(req){
   if(req.command==='ping')return {alive:true};
   if(stopping&&['stop','cleanup'].includes(req.command))return {status:'stopping',preserved:'QA accounts, app data, credentials, evidence and reports'};
   if(starting || stopping)throw new Error(starting?'Startup is still running; inspect status.':'Controller is stopping.');
-  if(req.command==='run')return {status:'awaiting-agent-dispatch',available:run.lanes.filter(l=>l.status==='ready'&&l.role!=='reviewer').map(brief),reviewer:run.lanes.filter(l=>l.status==='ready'&&l.role==='reviewer').map(brief),queued:run.lanes.filter(l=>l.status==='queued').map(l=>l.id),requiredSlots:'One coordinator + requested active testers + independent verifier. Check actual runtime availability before claim.'};
+  if(req.command==='run'){await checkGuestReadiness();return {status:'awaiting-agent-dispatch',available:run.lanes.filter(l=>l.status==='ready'&&l.role!=='reviewer').map(brief),reviewer:run.lanes.filter(l=>l.status==='ready'&&l.role==='reviewer').map(brief),queued:run.lanes.filter(l=>l.status==='queued').map(l=>l.id),requiredSlots:'One coordinator + requested active testers + independent verifier. Check actual runtime availability before claim.'};}
   const task=transition.then(async()=>{
     if(req.command==='claim'){
       return claim(lane(req.laneId),req.agent);
@@ -396,7 +403,7 @@ try{
     for(const l of run.lanes)if(l.status!=='complete'){l.status='queued';l.generation++;tokens.delete(l.id);}
     // Resume verifies the active deployment or rebuilds through the supported launcher.
   }
-  run.deployment=await startDeployment({root,runDir:dir,localURL:run.baseURL,previewURL:run.previewURL,previewBinding:run.previewBinding});
+  run.deployment=await startDeployment({root,runDir:dir,localURL:run.baseURL,previewURL:run.previewURL,guestBinding:run.guestBinding});
   if(stopping)throw new Error('Controller was stopped during startup.');
   for(const l of run.lanes)if(l.status==='preparing')l.status='queued';
   await prepareWave();starting=false;
