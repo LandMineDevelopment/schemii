@@ -497,6 +497,22 @@ function openAddTable() {
   $("alias-tools").querySelector("input")?.focus();
 }
 
+function renderGraphStatus(state) {
+  const count = diagnostics.cycleEdges?.length || 0;
+  const sourceIssues = currentSourceIssues();
+  const status = $("graph-status");
+  status.textContent = state === "loading" ? "Loading model and relationships…"
+    : state === "load-error" ? model ? "Could not load model · previous model retained" : "Model unavailable · choose another model"
+    : !draft ? "Choose a model to see its relationships."
+    : state === "checking" ? "Checking relationships…"
+    : !draft.nodes.length ? "No objects yet · add a table to build this model"
+    : sourceIssues.length ? `${sourceIssues.length} source change${sourceIssues.length===1?"":"s"} need${sourceIssues.length===1?"s":""} review`
+    : count ? `${count} connections belong to cycles · resolve before running`
+    : state === "check-error" ? "Model check failed · review Preview"
+    : sourceAdditionText() || `${draft.nodes.length} objects · cycle-free model`;
+  status.classList.toggle("has-cycles", ["ready", "check-error"].includes(state) && count > 0);
+}
+
 function changed(event = {}) {
   if (event?.layoutOnly) { save(); return; }
   version++; plan = null; diagnostics = { ...diagnostics, activeScopes: undefined }; clearTimeout(timer); $("run").disabled = true;
@@ -505,9 +521,13 @@ function changed(event = {}) {
   if (event?.structure) {renderParameterValues($("parameter-values"), filterOptions(true));refreshFilterNavigation();}
   renderFields(); renderTableColumns(); canvas.render({cycleEdges:diagnostics.cycleEdges || [],usedEdges:[],sourceIssues:diagnostics.issues || diagnostics.sourceIssues || []});
   save();
+  renderGraphStatus("checking");
   timer = setTimeout(() => compile(version),300);
 }
 async function compile(ticket) {
+  if (ticket !== version) return;
+  renderGraphStatus("checking");
+  let failed = false;
   try {
     const { definition, explore } = splitDraft(draft);
     const next = await requestJson(`${API}/models/${model.id}/validate`, { method:"POST",body:{expectedRevision:model.revision,definition,explore},timeoutMs:MODEL_EXECUTION_TIMEOUT_MS }); if (ticket !== version) return;
@@ -523,6 +543,7 @@ async function compile(ticket) {
     $("run").disabled = busy;
   } catch (error) {
     if (ticket !== version) return;
+    failed = true;
     diagnostics = error.details || {}; $("plan-status").textContent = error.message; $("sql").textContent = error.message;
     const warnings = (diagnostics.issues || []).map(sourceIssueNotice);
     if (diagnostics.suggestedRoot?.id && draft.nodes.some(node => node.id === diagnostics.suggestedRoot.id)) {
@@ -539,10 +560,7 @@ async function compile(ticket) {
     }
     $("warnings").replaceChildren(...warnings);
   }
-  const count = diagnostics.cycleEdges?.length || 0;
-  const additions=sourceAdditionText(),sourceIssues=currentSourceIssues();
-  $("graph-status").textContent = sourceIssues.length ? `${sourceIssues.length} source change${sourceIssues.length===1?"":"s"} need${sourceIssues.length===1?"s":""} review` : count ? `${count} connections belong to cycles · resolve before running` : additions || `${draft.nodes.length} objects · cycle-free model`;
-  $("graph-status").classList.toggle("has-cycles",count > 0);
+  renderGraphStatus(failed ? "check-error" : "ready");
   renderRelationships(); renderParameterValues($("parameter-values"), filterOptions());refreshFilterNavigation();
   renderObjectSourceIssues();
   canvas.render({cycleEdges:diagnostics.cycleEdges || [],usedEdges:plan?.usedRelationships || [],sourceIssues:diagnostics.issues || diagnostics.sourceIssues || []});
@@ -697,12 +715,19 @@ async function loadModel(id) {
   if (dirty && !confirm("Discard unsaved model, layout, and Explore changes?")) return false;
   const ticket = ++catalogTicket; clearTimeout(timer); version++; showError();
   $("workbench").inert = true;
+  renderGraphStatus("loading");
   let nextModel, nextCatalog;
   try {
     nextModel = await requestJson(`${API}/models/${encodeURIComponent(id)}`);
+    if (ticket !== catalogTicket) return false;
     nextCatalog = await requestJson(`${API}/catalog?connection_id=${encodeURIComponent(nextModel.connectionId)}&namespace=${encodeURIComponent(nextModel.namespace)}`,{timeoutMs:MODEL_EXECUTION_TIMEOUT_MS});
-  } catch (error) { $("workbench").inert=!model; throw error; }
-  if (ticket !== catalogTicket) return;
+  } catch (error) {
+    if (ticket !== catalogTicket) return false;
+    $("workbench").inert=!model;
+    renderGraphStatus("load-error");
+    throw error;
+  }
+  if (ticket !== catalogTicket) return false;
   model=nextModel; catalog=nextCatalog; draft=joinModel(model); initialLayout=undefined; selected=null; plan=null; diagnostics={}; conflicted=false;
   sourceAdditions=reconcileSourceCatalog(draft,catalog);
   if (columnEditor) disposeSelects(columnEditor.element);
@@ -771,7 +796,8 @@ function openLibrary() {
   });
 }
 function clearDeletedModel() {
-  dirty=false; model=null; canvas?.destroy(); canvas=null; draft=null; clearTimeout(timer); version++;
+  dirty=false; model=null; canvas?.destroy(); canvas=null; draft=null; clearTimeout(timer); version++; catalogTicket++;
+  renderGraphStatus("idle");
   void previewLibrary.load(null);
   setModelName(""); $("model-name").disabled=true; $("save-model").disabled=true; $("reload-model").disabled=true; $("delete-model").disabled=true; $("run").disabled=true; $("workbench").inert=true;
   $("target").textContent="Choose a saved model or create one"; $("draft-status").textContent="Model deleted";
