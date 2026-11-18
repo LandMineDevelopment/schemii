@@ -42,7 +42,7 @@ def launcher_fixture():
             qa_state_directory=directory / "qa",
         )
         for key in tuple(environment):
-            if key.startswith("CI_TELEMETRY_") or key.startswith("GITHUB_"):
+            if key.startswith(("CI_TELEMETRY_", "GITHUB_", "COMPOSE_")):
                 environment.pop(key)
         environment["SCHEMII_SECRET_DIRECTORY"] = str(directory / "secrets")
         environment["FAKE_BLOCK_MARKER"] = str(directory / "blocked")
@@ -582,3 +582,43 @@ def test_fixture_ca_requires_preheld_locks_and_ignores_late_compose_inputs():
                 assert "--env-file /dev/null" in build
                 assert "--file " + str(root / ".schemii/staged-ca.json") in build
                 assert "compose.local.yaml" not in build
+
+
+@pytest.mark.parametrize(
+    "setting", ["COMPOSE_PROFILES", "COMPOSE_FILE", "COMPOSE_ENV_FILES", "COMPOSE_PROJECT_NAME"]
+)
+@pytest.mark.parametrize("value", ["", "PRIVATE_COMPOSE_SENTINEL"])
+def test_fixture_ca_refuses_inherited_compose_settings_before_preflight(setting, value):
+    with launcher_fixture() as (root, environment, commands, _):
+        result = run_launcher(
+            root,
+            environment,
+            SCHEMII_QA_FIXTURE_CA_BINDING="/private/fixture-binding.json",
+            SCHEMII_QA_LEASE_FD="3",
+            SCHEMII_QA_GATE_FD="4",
+            SCHEMII_QA_LEASE_MODE="exclusive",
+            DOCKER_HOST="unix:///var/run/docker.sock",
+            **{setting: value},
+        )
+        assert result.returncode == 1
+        assert "fixture CA refuses inherited Compose settings" in result.stderr
+        assert "PRIVATE_COMPOSE_SENTINEL" not in result.stdout + result.stderr
+        assert not commands.exists()
+        assert not list(Path(environment["FAKE_GIT_COMMON_DIRECTORY"]).glob("qa-*.lock"))
+        assert not Path(environment["SCHEMII_LAUNCH_LOCK_FILE"]).exists()
+        assert not Path(environment["SCHEMII_SECRET_DIRECTORY"]).exists()
+
+
+def test_stock_launcher_retains_compose_configuration_without_fixture_ca():
+    with launcher_fixture() as (root, environment, _, _):
+        _, proof = prepare_qa_overlay_fixture(root, environment)
+        result = run_launcher(
+            root,
+            environment,
+            COMPOSE_PROFILES="PRIVATE_COMPOSE_SENTINEL",
+            COMPOSE_FILE="PRIVATE_COMPOSE_SENTINEL",
+            FAKE_QA_BUILD_PROOF=str(proof),
+        )
+        assert result.returncode == 0, result.stderr
+        assert "--file " + str(root / "compose.test.yaml") in proof.read_text()
+        assert "PRIVATE_COMPOSE_SENTINEL" not in result.stdout + result.stderr

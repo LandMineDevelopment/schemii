@@ -8,7 +8,6 @@ if [[ "${1-}" == "--android" ]]; then
   shift
   exec bash "${ROOT_DIR}/dev/android/termux.sh" "$@"
 fi
-COMPOSE_FILE="${ROOT_DIR}/compose.test.yaml"
 ORIGINAL_ARGUMENTS=("$@")
 
 # Local Compose deployment configuration. Environment values may override these defaults.
@@ -186,13 +185,17 @@ if [[ -v SCHEMII_QA_FIXTURE_CA_PATH || -v SCHEMII_QA_FIXTURE_CA_SHA256 ]]; then
   fail "fixture CA requires a private disposable guest binding"
 fi
 if [[ -v SCHEMII_QA_FIXTURE_CA_BINDING ]]; then
+  # Inspect incoming Compose settings before defining the tracked file path.
+  [[ -z "${!COMPOSE_@}" ]] || fail "fixture CA refuses inherited Compose settings"
   [[ "$SCHEMII_LAUNCH_ACTION" == start && "${SCHEMII_QA_LEASE_MODE-}" == exclusive \
      && "${SCHEMII_QA_LEASE_FD-}" == 3 && "${SCHEMII_QA_GATE_FD-}" == 4 \
      && "$SCHEMII_QA_FIXTURE_CA_BINDING" == /* \
-     && "${DOCKER_HOST-}" == unix:///var/run/* && ! -v DOCKER_CONTEXT && ! -v COMPOSE_ENV_FILES ]] \
+     && "${DOCKER_HOST-}" == unix:///var/run/* && ! -v DOCKER_CONTEXT ]] \
     || fail "fixture CA requires an exclusive disposable guest launch"
   systemd-detect-virt --vm --quiet || fail "fixture CA requires a disposable virtual machine"
 fi
+
+COMPOSE_FILE="${ROOT_DIR}/compose.test.yaml"
 
 # A QA coordinator holds this lease for its whole run, including manual testing.
 # Resolve through Git so all linked worktrees protect the same deployment.
